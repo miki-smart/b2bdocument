@@ -201,10 +201,13 @@ export const RFQListPage = () => {
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="all">All</TabsTrigger>
-          <TabsTrigger value="draft">Draft</TabsTrigger>
-          <TabsTrigger value="published">Published</TabsTrigger>
-          <TabsTrigger value="bidding_closed">Bidding Closed</TabsTrigger>
-          <TabsTrigger value="awarded">Awarded</TabsTrigger>
+          <TabsTrigger value="DRAFT">Draft</TabsTrigger>
+          <TabsTrigger value="PUBLISHED">Published</TabsTrigger>
+          <TabsTrigger value="BIDDING">Bidding</TabsTrigger>
+          <TabsTrigger value="PARTIALLY_AWARDED">Partially Awarded</TabsTrigger>
+          <TabsTrigger value="AWARDED">Awarded</TabsTrigger>
+          <TabsTrigger value="COMPLETED">Completed</TabsTrigger>
+          <TabsTrigger value="CANCELLED">Cancelled</TabsTrigger>
         </TabsList>
 
         <TabsContent value={activeTab} className="space-y-4">
@@ -243,6 +246,61 @@ export const RFQListPage = () => {
 
 **Route:** `/business/rfqs/create`  
 **Component:** `src/features/business/rfq/pages/CreateRFQPage.tsx`
+
+#### Prerequisites: Business Verification
+
+**CRITICAL:** Before allowing RFQ creation, verify business status.
+
+**Rule BR-001:** Business MUST have `status = VERIFIED` to create RFQ.
+
+**Implementation:**
+
+```typescript
+// Add to CreateRFQPage.tsx
+import { useAuthStore } from '@/stores/auth-store';
+import { useQuery } from '@tanstack/react-query';
+import { businessService } from '../services/business-service';
+
+export const CreateRFQPage = () => {
+  const { user } = useAuthStore();
+  const { data: business, isLoading } = useQuery({
+    queryKey: ['business', user.businessId],
+    queryFn: () => businessService.getBusinessById(user.businessId),
+  });
+
+  if (isLoading) return <LoadingState />;
+
+  // Check verification status
+  if (business?.status !== 'VERIFIED') {
+    return (
+      <Card className="max-w-2xl mx-auto mt-8">
+        <CardHeader>
+          <CardTitle>Business Verification Required</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Alert variant="warning">
+            <AlertCircle className="h-4 w-4" />
+            <AlertTitle>Account Not Verified</AlertTitle>
+            <AlertDescription>
+              Your business account must be verified before you can create RFQs.
+              {business?.status === 'PENDING' && ' Your verification is currently under review.'}
+              {business?.status === 'REJECTED' && ' Please contact support for assistance.'}
+            </AlertDescription>
+          </Alert>
+          <div className="mt-4">
+            <Button asChild variant="outline">
+              <Link to="/business/profile">View Profile</Link>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Proceed with RFQ creation wizard
+  return <CreateRFQWizard />;
+};
+```
 
 #### Step 1: Basic Information
 
@@ -354,11 +412,14 @@ export const CreateRFQStep1 = ({ onNext, formData, setFormData }) => {
 **Features:**
 - Add/Remove line items dynamically
 - Each line item:
-  - Vehicle Type (dropdown)
-  - Engine Type (dropdown)
-  - Quantity Required (number, 1-50)
-  - With Driver (toggle)
-  - Preferred Tags (multi-select)
+  - Vehicle Type (dropdown, required)
+  - Quantity (number, 1-50, required)
+  - Seating Capacity (number, optional - for specific seat requirements)
+  - Pickup Location (string, required)
+  - Dropoff Location (string, required)
+  - Pickup Date (date-time, required)
+  - Dropoff Date (date-time, optional - for open-ended rentals)
+  - Special Requirements (textarea, optional)
 - Running total display (max 50 vehicles)
 - Market price guidance per line item
 
@@ -375,18 +436,21 @@ export const CreateRFQStep2 = ({ onNext, onBack, formData, setFormData }) => {
   });
 
   const totalVehicles = useMemo(
-    () => lineItems.reduce((sum, item) => sum + item.quantityRequired, 0),
+    () => lineItems.reduce((sum, item) => sum + item.quantity, 0),
     [lineItems]
   );
 
   const addLineItem = () => {
     setLineItems([...lineItems, {
       id: generateId(),
-      vehicleTypeCode: '',
-      engineTypeCode: '',
-      quantityRequired: 1,
-      withDriver: false,
-      preferredTags: [],
+      vehicleType: '',
+      quantity: 1,
+      seatingCapacity: undefined,
+      pickupLocation: '',
+      dropoffLocation: '',
+      pickupDate: new Date(),
+      dropoffDate: undefined,
+      specialRequirements: '',
     }]);
   };
 
@@ -436,8 +500,8 @@ export const CreateRFQStep2 = ({ onNext, onBack, formData, setFormData }) => {
               <div className="grid md:grid-cols-2 gap-4">
                 <FormField label="Vehicle Type" required>
                   <Select
-                    value={item.vehicleTypeCode}
-                    onValueChange={(value) => updateLineItem(item.id, { vehicleTypeCode: value })}
+                    value={item.vehicleType}
+                    onValueChange={(value) => updateLineItem(item.id, { vehicleType: value })}
                   >
                     <SelectTrigger>
                       <SelectValue placeholder="Select vehicle type" />
@@ -452,57 +516,74 @@ export const CreateRFQStep2 = ({ onNext, onBack, formData, setFormData }) => {
                   </Select>
                 </FormField>
 
-                <FormField label="Engine Type" required>
-                  <Select
-                    value={item.engineTypeCode}
-                    onValueChange={(value) => updateLineItem(item.id, { engineTypeCode: value })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="Select engine type" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="EV">Electric</SelectItem>
-                      <SelectItem value="DIESEL">Diesel</SelectItem>
-                      <SelectItem value="PETROL">Petrol</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </FormField>
-
-                <FormField label="Quantity Required" required>
+                <FormField label="Quantity" required>
                   <Input
                     type="number"
                     min={1}
                     max={50}
-                    value={item.quantityRequired}
+                    value={item.quantity}
                     onChange={(e) => updateLineItem(item.id, {
-                      quantityRequired: parseInt(e.target.value) || 1
+                      quantity: parseInt(e.target.value) || 1
                     })}
                   />
                 </FormField>
 
-                <FormField label="With Driver">
-                  <Switch
-                    checked={item.withDriver}
-                    onCheckedChange={(checked) => updateLineItem(item.id, { withDriver: checked })}
+                <FormField label="Seating Capacity (Optional)">
+                  <Input
+                    type="number"
+                    min={1}
+                    value={item.seatingCapacity || ''}
+                    onChange={(e) => updateLineItem(item.id, {
+                      seatingCapacity: e.target.value ? parseInt(e.target.value) : undefined
+                    })}
+                    placeholder="e.g., 4, 7, 12"
                   />
                 </FormField>
 
-                <FormField label="Preferred Tags">
-                  <MultiSelect
-                    options={[
-                      { value: 'luxury', label: 'Luxury' },
-                      { value: 'vip', label: 'VIP' },
-                      { value: 'guest', label: 'Guest' },
-                      { value: 'family', label: 'Family' },
-                    ]}
-                    value={item.preferredTags}
-                    onChange={(tags) => updateLineItem(item.id, { preferredTags: tags })}
+                <FormField label="Pickup Location" required>
+                  <Input
+                    value={item.pickupLocation}
+                    onChange={(e) => updateLineItem(item.id, { pickupLocation: e.target.value })}
+                    placeholder="Enter pickup location"
+                  />
+                </FormField>
+
+                <FormField label="Dropoff Location" required>
+                  <Input
+                    value={item.dropoffLocation}
+                    onChange={(e) => updateLineItem(item.id, { dropoffLocation: e.target.value })}
+                    placeholder="Enter dropoff location"
+                  />
+                </FormField>
+
+                <FormField label="Pickup Date" required>
+                  <DateTimePicker
+                    value={item.pickupDate}
+                    onChange={(date) => updateLineItem(item.id, { pickupDate: date })}
+                    minDate={new Date()}
+                  />
+                </FormField>
+
+                <FormField label="Dropoff Date (Optional)">
+                  <DateTimePicker
+                    value={item.dropoffDate}
+                    onChange={(date) => updateLineItem(item.id, { dropoffDate: date })}
+                    minDate={item.pickupDate}
+                  />
+                </FormField>
+
+                <FormField label="Special Requirements" className="md:col-span-2">
+                  <Textarea
+                    value={item.specialRequirements || ''}
+                    onChange={(e) => updateLineItem(item.id, { specialRequirements: e.target.value })}
+                    placeholder="Any special requirements or notes..."
+                    rows={3}
                   />
                 </FormField>
               </div>
 
-              {item.vehicleTypeCode && (
-                <MarketPriceGuidance vehicleType={item.vehicleTypeCode} />
+              {item.vehicleType && (
+                <MarketPriceGuidance vehicleType={item.vehicleType} />
               )}
             </Card>
           ))}
@@ -900,6 +981,114 @@ export const BidReviewPage = () => {
 };
 ```
 
+### Partial Award Handling
+
+**Rule BR-007:** Business can award fewer vehicles than requested if wallet balance is insufficient.
+
+#### Partial Award Dialog Component
+
+```typescript
+interface PartialAwardDialogProps {
+  requested: number;
+  affordable: number;
+  required: number;
+  available: number;
+  onDeposit: () => void;
+  onPartialAward: () => void;
+  onCancel: () => void;
+}
+
+export const PartialAwardDialog = ({
+  requested,
+  affordable,
+  required,
+  available,
+  onDeposit,
+  onPartialAward,
+  onCancel,
+}: PartialAwardDialogProps) => {
+  return (
+    <Dialog open onOpenChange={onCancel}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Insufficient Wallet Balance</DialogTitle>
+        </DialogHeader>
+        <div className="space-y-4">
+          <Alert variant="warning">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              Your balance is sufficient for {affordable} vehicles out of {requested} requested.
+            </AlertDescription>
+          </Alert>
+
+          <div className="bg-gray-50 p-4 rounded space-y-2">
+            <div className="flex justify-between">
+              <span>Required Escrow:</span>
+              <span className="font-semibold">{formatCurrency(required)} ETB</span>
+            </div>
+            <div className="flex justify-between">
+              <span>Available Balance:</span>
+              <span className="font-semibold">{formatCurrency(available)} ETB</span>
+            </div>
+            <div className="flex justify-between text-red-600">
+              <span>Shortfall:</span>
+              <span className="font-semibold">{formatCurrency(required - available)} ETB</span>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <p className="text-sm font-medium">What would you like to do?</p>
+            <div className="space-y-2">
+              <Button onClick={onDeposit} className="w-full">
+                Deposit Funds & Award All {requested} Vehicles
+              </Button>
+              <Button onClick={onPartialAward} variant="outline" className="w-full">
+                Award {affordable} Vehicles Only
+              </Button>
+              <Button onClick={onCancel} variant="ghost" className="w-full">
+                Cancel
+              </Button>
+            </div>
+          </div>
+
+          <Alert>
+            <Info className="h-4 w-4" />
+            <AlertDescription className="text-xs">
+              To award the remaining {requested - affordable} vehicles, you'll need to create a new RFQ.
+            </AlertDescription>
+          </Alert>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+};
+```
+
+#### Integration in BidReviewPage
+
+```typescript
+const handleAwardBids = async () => {
+  const totalEscrow = calculateTotalEscrow();
+  const { data: wallet } = await walletService.getWallet();
+  
+  if (totalEscrow > wallet.availableBalance) {
+    const maxAffordable = calculateMaxAffordableVehicles(wallet.availableBalance);
+    
+    setPartialAwardDialog({
+      show: true,
+      requested: selectedBids.size,
+      affordable: maxAffordable,
+      required: totalEscrow,
+      available: wallet.availableBalance,
+    });
+    return;
+  }
+  
+  // Proceed with full award
+  await awardBids();
+};
+```
+
 ### Award Confirmation Modal
 
 **Component:** `src/features/business/rfq/components/AwardConfirmationModal.tsx`
@@ -1195,7 +1384,7 @@ export const AwardConfirmationModal = ({
 3. **Settings** - Notification preferences, change password
 
 **Tier Display:**
-- Badge showing current tier (STANDARD, BUSINESS_PRO, PREMIUM, ENTERPRISE)
+- Badge showing current tier (STANDARD, BUSINESS_PRO, ENTERPRISE, GOV_NGO)
 - Tier benefits listed
 - Progress to next tier (if applicable)
 

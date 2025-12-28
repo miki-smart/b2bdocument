@@ -1019,38 +1019,113 @@ Priority: CRITICAL
 Order: 1
 
 async function handleDeliveryConfirmedEvent(event) {
-  const { contractId } = event.payload;
+  const { contractId, vehicleId } = event.payload;
   
   if (await isAlreadyProcessed(event.eventId)) return;
   
   // Check activation prerequisites
   const contract = await getContract(contractId);
   
-  if (contract.escrowLocked && contract.vehiclesAssigned && contract.deliveryConfirmed) {
-    // All conditions met - activate contract
-    await updateContractStatus(contractId, {
-      status: 'ACTIVE',
-      activatedAt: event.timestamp,
-      actualStartDate: event.timestamp
-    });
+  // Update vehicle delivery status
+  await markVehicleDelivered(contractId, vehicleId, event.timestamp);
+  
+  // Calculate delivery metrics
+  const deliveryMetrics = await calculateDeliveryMetrics(contractId);
+  const { quantityAwarded, quantityDelivered, quantityActive } = deliveryMetrics;
+  
+  if (contract.escrowLocked && contract.vehiclesAssigned) {
+    // Determine contract status based on delivery progress
+    let newStatus = contract.status;
     
-    // Publish activation event
-    await publishEvent({
-      eventType: 'ContractActivatedEvent',
-      correlationId: event.correlationId,
-      causationId: event.eventId,
-      aggregateId: contractId,
-      payload: {
-        contractId,
-        providerId: contract.providerId,
-        businessId: contract.businessId,
-        status: 'ACTIVE',
-        activationTimestamp: event.timestamp
+    if (quantityDelivered === 0) {
+      newStatus = 'PENDING_DELIVERY';
+    } else if (quantityDelivered < quantityAwarded) {
+      // Some but not all vehicles delivered
+      newStatus = 'PARTIALLY_DELIVERED';
+      
+      // Update contract status to PARTIALLY_DELIVERED if not already
+      if (contract.status !== 'PARTIALLY_DELIVERED') {
+        await updateContractStatus(contractId, {
+          status: 'PARTIALLY_DELIVERED',
+          firstDeliveryAt: event.timestamp,
+          quantityDelivered: quantityDelivered,
+          quantityActive: quantityActive
+        });
+        
+        // Publish partial activation event (optional, for tracking)
+        await publishEvent({
+          eventType: 'ContractPartiallyActivatedEvent',
+          correlationId: event.correlationId,
+          causationId: event.eventId,
+          aggregateId: contractId,
+          payload: {
+            contractId,
+            quantityDelivered,
+            quantityAwarded,
+            status: 'PARTIALLY_DELIVERED'
+          }
+        });
+      } else {
+        // Update delivery metrics
+        await updateContractStatus(contractId, {
+          quantityDelivered: quantityDelivered,
+          quantityActive: quantityActive,
+          lastDeliveryAt: event.timestamp
+        });
       }
-    });
+    } else if (quantityDelivered === quantityAwarded) {
+      // All vehicles delivered - fully activate contract
+      newStatus = 'ACTIVE';
+      
+      await updateContractStatus(contractId, {
+        status: 'ACTIVE',
+        activatedAt: event.timestamp,
+        actualStartDate: event.timestamp,
+        quantityDelivered: quantityDelivered,
+        quantityActive: quantityActive
+      });
+      
+      // Publish full activation event
+      await publishEvent({
+        eventType: 'ContractActivatedEvent',
+        correlationId: event.correlationId,
+        causationId: event.eventId,
+        aggregateId: contractId,
+        payload: {
+          contractId,
+          providerId: contract.providerId,
+          businessId: contract.businessId,
+          status: 'ACTIVE',
+          activationTimestamp: event.timestamp,
+          quantityDelivered,
+          quantityAwarded
+        }
+      });
+    }
   }
   
   await storeIdempotencyKey(event.eventId);
+}
+
+// Helper function to calculate delivery metrics
+async function calculateDeliveryMetrics(contractId) {
+  const contract = await getContractWithLineItems(contractId);
+  
+  let totalAwarded = 0;
+  let totalDelivered = 0;
+  let totalActive = 0;
+  
+  for (const lineItem of contract.lineItems) {
+    totalAwarded += lineItem.quantityAwarded;
+    totalDelivered += lineItem.quantityDelivered || 0;
+    totalActive += lineItem.quantityActive || 0;
+  }
+  
+  return {
+    quantityAwarded: totalAwarded,
+    quantityDelivered: totalDelivered,
+    quantityActive: totalActive
+  };
 }
 ```
 

@@ -378,17 +378,34 @@ Provider can ONLY assign vehicle if:
 
 ### 5.1 Contract Activation Prerequisites
 
-**Rule BR-016: Dual Condition for Activation**
+**Rule BR-016: Contract Activation Conditions**
 
-Contract becomes `ACTIVE` ONLY when **BOTH** conditions met:
+Contract activation requires **ALL** of the following conditions:
 1. ✅ Escrow locked (EscrowLockedEvent received)
-2. ✅ Delivery confirmed (DeliveryConfirmedEvent received via OTP)
+2. ✅ At least one vehicle assigned
+3. ✅ At least one vehicle delivery confirmed (DeliveryConfirmedEvent received via OTP)
 
-**Contract States Before Activation:**
+**Contract Status Transitions:**
+
+**Single Vehicle Contracts:**
+- First vehicle delivered → Contract status → `ACTIVE` (all vehicles delivered)
+
+**Multi-Vehicle Contracts:**
+- First vehicle(s) delivered → Contract status → `PARTIALLY_DELIVERED`
+- Last remaining vehicle(s) delivered → Contract status → `ACTIVE` (all vehicles delivered)
+
+**Contract States Before Full Activation:**
 - `PENDING_ESCROW` - Contract created, waiting for escrow lock
 - `PENDING_VEHICLE_ASSIGNMENT` - Escrow locked, waiting for vehicle assignment
-- `PENDING_DELIVERY` - Vehicle assigned, waiting for delivery confirmation
-- `ACTIVE` - All conditions met, contract running
+- `PENDING_DELIVERY` - Vehicles assigned, waiting for delivery confirmation
+- `PARTIALLY_DELIVERED` - Some vehicles delivered, waiting for remaining vehicles (multi-vehicle contracts only)
+- `ACTIVE` - All vehicles delivered and contract running
+
+**Partial Delivery Behavior:**
+- Contracts in `PARTIALLY_DELIVERED` status are considered active for delivered vehicles only
+- Settlement calculations are based on actual delivered vehicles (quantityActive = quantityDelivered)
+- Contract can continue operating with subset of vehicles if remaining vehicles are not delivered within timeout
+- No business confirmation required - status automatically updates based on vehicle delivery count
 
 ---
 
@@ -420,6 +437,61 @@ Contract status → `COMPLETED` when:
 
 **Settlement Processing:**
 - Triggered by `ContractCompletedEvent` (see BR-026)
+
+---
+
+### 5.1A Partial Delivery Activation
+
+**Rule BR-016A: Automatic Partial Delivery Status Update**
+
+**When:** Contract has multiple vehicles assigned and delivery confirmation received via OTP
+
+**System Behavior:**
+1. Track delivery count per contract line item:
+   - `quantityAwarded` - Total vehicles awarded
+   - `quantityDelivered` - Vehicles with verified OTP delivery
+   - `quantityActive` - Currently active vehicles in use
+
+2. Status Update Logic:
+   ```typescript
+   if (quantityDelivered === 0) {
+     status = 'PENDING_DELIVERY';
+   } else if (quantityDelivered < quantityAwarded) {
+     status = 'PARTIALLY_DELIVERED';
+     // Contract is active for delivered vehicles only
+   } else if (quantityDelivered === quantityAwarded) {
+     status = 'ACTIVE';
+     // All vehicles delivered, contract fully active
+   }
+   ```
+
+3. Contract Activation:
+   - Contract becomes active (can be used) when first vehicle is delivered
+   - Status shows `PARTIALLY_DELIVERED` when some but not all vehicles are delivered
+   - Status shows `ACTIVE` when all vehicles are delivered
+
+4. Settlement Calculation:
+   - Settlement based on `quantityActive` (actual delivered vehicles)
+   - Provider paid only for vehicles that were delivered and activated
+   - Escrow adjusted based on actual delivery count
+
+5. No Business Confirmation Required:
+   - Status automatically updates when vehicles are delivered
+   - No explicit "accept partial delivery" action needed
+   - Business can use contract with delivered vehicles immediately
+
+**Examples:**
+
+**Example 1: 3 Vehicles Awarded, 2 Delivered**
+- After first 2 vehicles OTP verified → Status: `PARTIALLY_DELIVERED`
+- Contract active for 2 vehicles
+- Settlement based on 2 vehicles
+- Provider can still deliver 3rd vehicle later (within timeout)
+
+**Example 2: 3 Vehicles Awarded, All 3 Delivered**
+- After all 3 vehicles OTP verified → Status: `ACTIVE`
+- Contract fully active for all 3 vehicles
+- Settlement based on 3 vehicles
 
 ---
 
@@ -1411,23 +1483,95 @@ BIDDING → AWARDED / LOST → REJECTED (if provider rejects) → BIDDING (re-ac
 
 **Rule BR-040: Contract Status Definitions**
 
+**Note:** Contract status aggregates from Contract Line Item statuses. See Section 12.4 for Contract Line Item statuses.
+
 ```
-PENDING_ESCROW → PENDING_VEHICLE_ASSIGNMENT → PENDING_DELIVERY → ACTIVE → COMPLETED / TERMINATED
+PENDING_ESCROW → PENDING_VEHICLE_ASSIGNMENT → PENDING_DELIVERY → [PARTIALLY_DELIVERED] → ACTIVE → [PARTIALLY_RETURNED] → COMPLETED / TERMINATED
 ```
 
 | Status | Definition | Next Status | Timeout |
 |--------|-----------|-------------|---------|
 | `PENDING_ESCROW` | Contract created, waiting for escrow lock | `PENDING_VEHICLE_ASSIGNMENT` | 5 days → Notify parties |
 | `PENDING_VEHICLE_ASSIGNMENT` | Escrow locked, waiting for vehicle assignment | `PENDING_DELIVERY` | 5 days → Notify parties |
-| `PENDING_DELIVERY` | Vehicle assigned, waiting for delivery confirmation | `ACTIVE` | 5 days → Notify parties |
-| `ACTIVE` | All conditions met, contract running | `COMPLETED`, `TERMINATED` | (rental period) |
-| `COMPLETED` | Rental period ended, vehicle returned | (final state) | - |
+| `PENDING_DELIVERY` | Vehicles assigned, waiting for delivery confirmation | `PARTIALLY_DELIVERED` or `ACTIVE` | 5 days → Notify parties |
+| `PARTIALLY_DELIVERED` | Some vehicles delivered, waiting for remaining vehicles | `ACTIVE` | 5 days for remaining vehicles → Notify parties |
+| `ACTIVE` | All vehicles delivered, contract running | `PARTIALLY_RETURNED`, `COMPLETED`, `TERMINATED` | (rental period) |
+| `PARTIALLY_RETURNED` | Some vehicles returned, not all | `COMPLETED` | - |
+| `COMPLETED` | All vehicles returned | (final state) | - |
 | `TERMINATED` | Contract cancelled or early return | (final state) | - |
 | `TIMEOUT_PENDING` | Activation timeout reached | Manual intervention | - |
+| `ON_HOLD` | Contract temporarily suspended | `ACTIVE`, `TERMINATED` | - |
+
+**Status Aggregation Rules:**
+- Contract status is determined by aggregating metrics from all Contract Line Items
+- Priority order: Contract-level actions (TERMINATED, ON_HOLD, TIMEOUT_PENDING, DISPUTED) → Operational states (PARTIALLY_RETURNED, PARTIALLY_DELIVERED, ACTIVE) → Pending states → Final states (COMPLETED)
+- See MVP_CONTRACT_STATE_MACHINE.md Section 10 for detailed aggregation logic
 
 ---
 
-### 12.4 Vehicle Status Flow
+### 12.4 Contract Line Item Status Flow
+
+**Rule BR-041: Contract Line Item Status Definitions**
+
+Contract Line Items track the lifecycle of vehicle delivery and return for each awarded quantity within a contract.
+
+```
+PENDING_ACTIVATION → PARTIALLY_DELIVERED → ACTIVE → PARTIALLY_RETURNED → COMPLETED / TERMINATED
+```
+
+| Status | Definition | Entry Condition | Exit Condition |
+|--------|-----------|-----------------|----------------|
+| `PENDING_ACTIVATION` | No vehicles assigned yet | Line item created, `QuantityDelivered == 0` | First vehicle delivered |
+| `PARTIALLY_DELIVERED` | Some vehicles delivered, not all | `QuantityDelivered > 0` AND `QuantityDelivered < QuantityAwarded` | All vehicles delivered → `ACTIVE` |
+| `ACTIVE` | All vehicles delivered and in use | `QuantityDelivered == QuantityAwarded` AND `QuantityReturned == 0` | First vehicle returned → `PARTIALLY_RETURNED` |
+| `PARTIALLY_RETURNED` | Some vehicles returned, not all | `QuantityReturned > 0` AND `QuantityReturned < QuantityAwarded` | All vehicles returned → `COMPLETED` |
+| `COMPLETED` | All vehicles returned | `QuantityReturned == QuantityAwarded` | (final state) |
+| `TERMINATED` | Line item cancelled | Line item or contract terminated | (final state) |
+| `ON_HOLD` | Line item suspended | Contract on hold (cascades) | Issue resolved → Previous status |
+
+**Quantity Tracking:**
+- `QuantityAwarded`: Total vehicles awarded (immutable after contract creation)
+- `QuantityDelivered`: Vehicles with verified OTP delivery
+- `QuantityActive`: Currently active vehicles in use (`QuantityAwarded - QuantityReturned`)
+- `QuantityReturned`: Vehicles returned to provider
+
+**Status Transition Logic:**
+1. `PENDING_ACTIVATION` → `PARTIALLY_DELIVERED`: First vehicle delivered (`QuantityDelivered == 1`, `QuantityAwarded > 1`)
+2. `PENDING_ACTIVATION` → `ACTIVE`: Single vehicle delivered (`QuantityDelivered == QuantityAwarded == 1`)
+3. `PARTIALLY_DELIVERED` → `ACTIVE`: All vehicles delivered (`QuantityDelivered == QuantityAwarded`)
+4. `ACTIVE` → `PARTIALLY_RETURNED`: First vehicle returned (`QuantityReturned == 1`, `QuantityAwarded > 1`)
+5. `PARTIALLY_RETURNED` → `COMPLETED`: All vehicles returned (`QuantityReturned == QuantityAwarded`)
+6. `ACTIVE` → `COMPLETED`: Single vehicle returned (`QuantityReturned == QuantityAwarded == 1`)
+
+---
+
+### 12.5 Vehicle Assignment Status Flow
+
+**Rule BR-042: Vehicle Assignment Status Definitions**
+
+Vehicle Assignments track individual vehicle lifecycle within a contract line item.
+
+```
+ASSIGNED → DELIVERED → RETURNED
+          └──────────→ REPLACED (if replacement needed)
+```
+
+| Status | Definition | Entry Condition | Exit Condition |
+|--------|-----------|-----------------|----------------|
+| `ASSIGNED` | Vehicle assigned, not yet delivered | `ContractVehicleAssignment.Create()` called | OTP verified → `DELIVERED` |
+| `DELIVERED` | Vehicle delivered, OTP verified | `MarkDelivered()` called (OTP verified) | Vehicle returned → `RETURNED` |
+| `RETURNED` | Vehicle returned to provider | `Release()` called | (final state) |
+| `REPLACED` | Vehicle replaced during contract | `Replace()` called | (final state for original) |
+
+**Status Transition Logic:**
+1. (Initial) → `ASSIGNED`: Vehicle assignment created
+2. `ASSIGNED` → `DELIVERED`: `DeliveryConfirmedEvent` received, `MarkDelivered()` called
+3. `DELIVERED` → `RETURNED`: Vehicle returned, `Release()` called
+4. `DELIVERED` → `REPLACED`: Vehicle replacement needed, `Replace()` called (replacement tracked as new assignment)
+
+---
+
+### 12.6 Vehicle Status Flow
 
 **Rule BR-041: Vehicle Status Definitions**
 

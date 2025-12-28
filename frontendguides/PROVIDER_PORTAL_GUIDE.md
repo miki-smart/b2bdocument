@@ -402,14 +402,14 @@ export const RFQBiddingPage = () => {
   - Quantity Offered
   - Unit Price
   - Total Price
-  - Status (Submitted, Awarded, Rejected, Lost)
+  - Status (BIDDING, AWARDED, LOST, REJECTED, WITHDRAWN)
   - Submission Date
 - **Filters:**
   - Status dropdown
   - Date range
 - **Actions:**
   - View RFQ (link)
-  - Withdraw Bid (if status is Submitted)
+  - Withdraw Bid (if status is BIDDING)
 
 ---
 

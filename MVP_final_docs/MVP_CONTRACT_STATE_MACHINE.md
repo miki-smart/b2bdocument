@@ -26,14 +26,17 @@ This document defines the complete contract lifecycle state machine for the Move
 ## TABLE OF CONTENTS
 
 1. [Contract State Overview](#1-contract-state-overview)
-2. [State Definitions](#2-state-definitions)
-3. [State Transition Matrix](#3-state-transition-matrix)
-4. [State Machine Diagram](#4-state-machine-diagram)
-5. [Timeout Rules](#5-timeout-rules)
-6. [State Validation Rules](#6-state-validation-rules)
-7. [Error States & Recovery](#7-error-states--recovery)
-8. [State Change Event Flow](#8-state-change-event-flow)
-9. [Business Rules Mapping](#9-business-rules-mapping)
+2. [Contract State Definitions](#2-contract-state-definitions)
+3. [Contract Line Item State Definitions](#2a-contract-line-item-state-definitions)
+4. [Vehicle Assignment State Definitions](#2b-vehicle-assignment-state-definitions)
+5. [State Transition Matrix](#3-state-transition-matrix)
+6. [State Machine Diagram](#4-state-machine-diagram)
+7. [Timeout Rules](#5-timeout-rules)
+8. [State Validation Rules](#6-state-validation-rules)
+9. [Error States & Recovery](#7-error-states--recovery)
+10. [State Change Event Flow](#8-state-change-event-flow)
+11. [Business Rules Mapping](#9-business-rules-mapping)
+12. [Status Aggregation Rules](#10-status-aggregation-rules)
 
 ---
 
@@ -45,6 +48,7 @@ This document defines the complete contract lifecycle state machine for the Move
 - `PENDING_ESCROW` - Waiting for escrow lock
 - `PENDING_VEHICLE_ASSIGNMENT` - Waiting for vehicle assignment
 - `PENDING_DELIVERY` - Waiting for delivery confirmation
+- `PARTIALLY_DELIVERED` - Some vehicles delivered, waiting for remaining vehicles
 - `TIMEOUT_PENDING` - Activation timeout reached
 
 **Active States** (Contract Running):
@@ -71,7 +75,9 @@ This document defines the complete contract lifecycle state machine for the Move
 └──────────────────────────────────────────────────────────────────┘
 
 CREATION → PENDING_ESCROW → PENDING_VEHICLE_ASSIGNMENT → 
-PENDING_DELIVERY → ACTIVE → COMPLETED
+PENDING_DELIVERY → [PARTIALLY_DELIVERED] → ACTIVE → COMPLETED
+
+Note: PARTIALLY_DELIVERED is optional - only occurs when contract has multiple vehicles and some but not all are delivered.
 
                     ↓ (if issues)
               TIMEOUT_PENDING
@@ -81,7 +87,9 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-## 2. STATE DEFINITIONS
+## 2. CONTRACT STATE DEFINITIONS
+
+**Note:** Contract status aggregates from Contract Line Item statuses. See [Section 2A](#2a-contract-line-item-state-definitions) and [Section 10](#10-status-aggregation-rules) for details.
 
 ### 2.1 PENDING_ESCROW
 
@@ -164,7 +172,8 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 - Delivery scheduled
 
 **Exit Conditions:**
-- `DeliveryConfirmedEvent` received (OTP verified) → Transition to `ACTIVE`
+- First vehicle delivered (OTP verified) → Transition to `PARTIALLY_DELIVERED` (if contract has multiple vehicles)
+- All vehicles delivered (OTP verified) → Transition to `ACTIVE` (if all vehicles delivered in one batch or last vehicle delivered)
 - `DeliveryRejectedEvent` received → Transition to `FAILED`
 - Timeout (5 days from delivery date) → Transition to `TIMEOUT_PENDING`
 
@@ -189,16 +198,58 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.4 ACTIVE
+### 2.4 PARTIALLY_DELIVERED
 
-**Description:** Contract is active, vehicles delivered and in use.
+**Description:** Some vehicles have been delivered and verified via OTP, but not all vehicles assigned to the contract have been delivered yet.
 
 **Entry Conditions:**
-- `DeliveryConfirmedEvent` received
+- Contract status = `PENDING_DELIVERY`
+- At least one vehicle delivery confirmed via OTP (`DeliveryConfirmedEvent` received)
+- Not all vehicles have been delivered yet (quantityDelivered < quantityAwarded)
+
+**Exit Conditions:**
+- All vehicles delivered (last vehicle OTP verified) → Transition to `ACTIVE`
+- Remaining vehicles not delivered within timeout → Transition to `TIMEOUT_PENDING` or remain `PARTIALLY_DELIVERED` until resolved
+- All remaining vehicles rejected → Transition to `FAILED`
+
+**Allowed Actions:**
+- Provider: Continue delivering remaining vehicles, generate OTP for each vehicle
+- Business: Inspect and accept/reject remaining vehicle deliveries
+- System: Process partial activation (contract activates with delivered vehicles only)
+- Admin: Cancel contract, manually activate with partial delivery
+
+**Key Attributes:**
+```typescript
+{
+  status: 'PARTIALLY_DELIVERED',
+  firstDeliveryAt: timestamp,
+  quantityAwarded: number,
+  quantityDelivered: number,
+  quantityActive: number,
+  deliveredVehicleIds: string[],
+  pendingVehicleIds: string[],
+  lastDeliveryAt: timestamp,
+  timeoutAt: timestamp (firstDeliveryAt + 5 days for remaining vehicles)
+}
+```
+
+**Business Rule Reference:** BR-016, BR-016A
+
+**Note:** Contracts in `PARTIALLY_DELIVERED` status are considered active for delivered vehicles. The contract operates with the subset of vehicles that have been delivered and verified. Settlement is calculated based on actual delivered vehicles.
+
+---
+
+### 2.5 ACTIVE
+
+**Description:** Contract is active, all vehicles delivered and in use.
+
+**Entry Conditions:**
+- All vehicles delivered and verified via OTP (`DeliveryConfirmedEvent` received for all vehicles)
 - All activation prerequisites met:
   - ✅ Escrow locked
   - ✅ Vehicles assigned
-  - ✅ Delivery confirmed
+  - ✅ All deliveries confirmed
+- OR contract status = `PARTIALLY_DELIVERED` and last remaining vehicle delivered
 
 **Exit Conditions:**
 - Contract end date reached + vehicle returned → Transition to `COMPLETED`
@@ -230,7 +281,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.5 TIMEOUT_PENDING
+### 2.6 TIMEOUT_PENDING
 
 **Description:** Contract stuck in pending state beyond timeout threshold, requires manual intervention.
 
@@ -265,7 +316,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.6 ON_HOLD
+### 2.7 ON_HOLD
 
 **Description:** Contract temporarily suspended due to payment default or other issues. Awaiting provider decision on grace period.
 
@@ -334,7 +385,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.7 COMPLETED
+### 2.8 COMPLETED
 
 **Description:** Contract successfully completed, all obligations fulfilled.
 
@@ -371,7 +422,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.8 TERMINATED
+### 2.9 TERMINATED
 
 **Description:** Contract cancelled or terminated before normal completion.
 
@@ -407,7 +458,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.9 FAILED
+### 2.10 FAILED
 
 **Description:** Contract setup failed, could not be activated.
 
@@ -439,7 +490,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.10 UNDER_DISPUTE
+### 2.11 UNDER_DISPUTE
 
 **Description:** Contract has active dispute, certain actions blocked until resolution.
 
@@ -473,7 +524,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.11 PENDING_ALTERATION
+### 2.12 PENDING_ALTERATION
 
 **Description:** Contract modification requested, awaiting approval.
 
@@ -505,7 +556,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 
 ---
 
-### 2.12 ALTERED
+### 2.13 ALTERED
 
 **Description:** Contract has been modified, new terms in effect.
 
@@ -550,13 +601,19 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 | `PENDING_VEHICLE_ASSIGNMENT` | `PENDING_DELIVERY` | All vehicles assigned | `VehicleAssignedEvent` |
 | `PENDING_VEHICLE_ASSIGNMENT` | `TIMEOUT_PENDING` | 5 days elapsed | System timeout job |
 | `PENDING_VEHICLE_ASSIGNMENT` | `FAILED` | Provider rejected | `ProviderRejectedAwardEvent` |
-| `PENDING_DELIVERY` | `ACTIVE` | Delivery confirmed | `DeliveryConfirmedEvent` |
+| `PENDING_DELIVERY` | `PARTIALLY_DELIVERED` | First vehicle(s) delivered (if multiple vehicles) | `DeliveryConfirmedEvent` (partial) |
+| `PENDING_DELIVERY` | `ACTIVE` | All vehicles delivered in one batch | `DeliveryConfirmedEvent` (all) |
 | `PENDING_DELIVERY` | `TIMEOUT_PENDING` | 5 days elapsed | System timeout job |
 | `PENDING_DELIVERY` | `FAILED` | Delivery rejected | `DeliveryRejectedEvent` |
+| `PARTIALLY_DELIVERED` | `ACTIVE` | Last remaining vehicle(s) delivered | `DeliveryConfirmedEvent` (completion) |
+| `PARTIALLY_DELIVERED` | `TIMEOUT_PENDING` | Remaining vehicles not delivered (5 days) | System timeout job |
+| `PARTIALLY_DELIVERED` | `FAILED` | All remaining vehicles rejected | `DeliveryRejectedEvent` (all remaining) |
 | `TIMEOUT_PENDING` | Previous pending state | Issue resolved | Manual resolution |
 | `TIMEOUT_PENDING` | `FAILED` | Cannot be resolved | Admin cancellation |
-| `ACTIVE` | `COMPLETED` | Contract period ended | `ContractCompletedEvent` |
-| `ACTIVE` | `COMPLETED` | Early return approved | `EarlyReturnApprovedEvent` |
+| `ACTIVE` | `PARTIALLY_RETURNED` | First vehicle returned | `VehicleReturnedEvent` |
+| `PARTIALLY_RETURNED` | `COMPLETED` | All vehicles returned | All line items completed |
+| `ACTIVE` | `COMPLETED` | Contract period ended, all vehicles returned | `ContractCompletedEvent` |
+| `ACTIVE` | `COMPLETED` | Early return approved, all vehicles returned | `EarlyReturnApprovedEvent` |
 | `ACTIVE` | `TERMINATED` | Contract terminated | `ContractTerminatedEvent` |
 | `ACTIVE` | `UNDER_DISPUTE` | Dispute created | `DisputeCreatedEvent` |
 | `ACTIVE` | `PENDING_ALTERATION` | Alteration requested | `ContractAlterationRequestedEvent` |
@@ -674,7 +731,23 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
         │      OTP verification                  │
         └─┬──────────┬────────────────┬─────────┘
           │          │                │
-  OTP Verified  Timeout (5d)   Business Rejects
+  First Vehicle  Timeout (5d)   Business Rejects
+  Delivered (if  │                │
+  multiple)      │                │
+          │          ▼                ▼
+          │   ┌─────────────────┐  ┌──────────┐
+          │   │TIMEOUT_PENDING  │  │ FAILED   │
+          │   └─────────────────┘  └──────────┘
+          │
+          ▼
+        ┌────────────────────────────────────────┐
+        │    PARTIALLY_DELIVERED (optional)      │
+        │    Some vehicles delivered, waiting    │
+        │    for remaining vehicles              │
+        └─┬──────────┬────────────────┬─────────┘
+          │          │                │
+  All Vehicles  Timeout (5d)   Remaining
+  Delivered      │            Rejected
           │          │                │
           │          ▼                ▼
           │   ┌─────────────────┐  ┌──────────┐
@@ -733,6 +806,7 @@ PENDING_DELIVERY → ACTIVE → COMPLETED
 | `PENDING_ESCROW` | 5 days from contract creation | → `TIMEOUT_PENDING` + Notify both parties |
 | `PENDING_VEHICLE_ASSIGNMENT` | 5 days from escrow lock | → `TIMEOUT_PENDING` + Notify both parties |
 | `PENDING_DELIVERY` | 5 days from scheduled delivery date | → `TIMEOUT_PENDING` + Notify both parties |
+| `PARTIALLY_DELIVERED` | 5 days from first delivery | → `TIMEOUT_PENDING` + Notify both parties (remaining vehicles) |
 | `TIMEOUT_PENDING` | No timeout | Manual intervention required |
 | `ON_HOLD` | 7 days from hold start | → `TERMINATED` (if not resolved) |
 | `PENDING_ALTERATION` | 3 days from request | Auto-reject alteration, → `ACTIVE` |
@@ -775,6 +849,16 @@ async checkContractTimeouts() {
   
   for (const contract of pendingDeliveryTimeouts) {
     await this.transitionToTimeoutPending(contract, 'DELIVERY_TIMEOUT');
+  }
+  
+  // Check PARTIALLY_DELIVERED timeouts (remaining vehicles not delivered)
+  const partiallyDeliveredTimeouts = await this.contractRepository.find({
+    status: 'PARTIALLY_DELIVERED',
+    firstDeliveryAt: LessThan(new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000))
+  });
+  
+  for (const contract of partiallyDeliveredTimeouts) {
+    await this.transitionToTimeoutPending(contract, 'PARTIAL_DELIVERY_TIMEOUT');
   }
   
   // Check ON_HOLD timeouts
@@ -1182,6 +1266,7 @@ async function executeStateActions(contractId: string, state: ContractState) {
 | `PENDING_ESCROW` | BR-010, BR-011 | BR-008, BR-009 |
 | `PENDING_VEHICLE_ASSIGNMENT` | BR-013 | BR-004 |
 | `PENDING_DELIVERY` | BR-014, BR-015 | BR-016 |
+| `PARTIALLY_DELIVERED` | BR-016, BR-016A | BR-014, BR-015 |
 | `TIMEOUT_PENDING` | BR-017 | - |
 | `ACTIVE` | BR-016, BR-018 | BR-012, BR-028 |
 | `ON_HOLD` | BR-012, BR-028 | - |
@@ -1544,6 +1629,115 @@ export class ContractStateMachine {
     }
   }
 }
+```
+
+---
+
+## 10. STATUS AGGREGATION RULES
+
+### 10.1 Contract Status Aggregation from Line Items
+
+Contract status is determined by aggregating delivery and return metrics from all Contract Line Items, with hierarchical priority rules.
+
+#### Aggregation Logic:
+
+```typescript
+// Step 1: Filter operational line items (exclude TERMINATED and COMPLETED)
+const operationalLineItems = lineItems.filter(li => 
+  li.status !== 'TERMINATED' && li.status !== 'COMPLETED'
+);
+
+// Step 2: Calculate aggregated metrics
+const totalAwarded = operationalLineItems.sum(li => li.quantityAwarded);
+const totalDelivered = operationalLineItems.sum(li => li.quantityDelivered);
+const totalReturned = operationalLineItems.sum(li => li.quantityReturned);
+const totalActive = operationalLineItems.sum(li => li.quantityActive);
+
+// Step 3: Determine contract status (hierarchical priority)
+if (allLineItemsCompleted) {
+  contractStatus = 'COMPLETED';
+} else if (contractLevelAction) {
+  // Contract-level actions override aggregation
+  if (terminated) contractStatus = 'TERMINATED';
+  if (onHold) contractStatus = 'ON_HOLD';
+  if (timeoutPending) contractStatus = 'TIMEOUT_PENDING';
+  if (disputed) contractStatus = 'DISPUTED';
+} else if (hasOperationalLineItems) {
+  // Operational states
+  if (totalReturned > 0 && totalReturned < totalAwarded) {
+    contractStatus = 'PARTIALLY_RETURNED';
+  } else if (totalDelivered > 0 && totalDelivered < totalAwarded) {
+    contractStatus = 'PARTIALLY_DELIVERED';
+  } else if (totalDelivered == totalAwarded && totalReturned == 0) {
+    contractStatus = 'ACTIVE';
+  }
+} else {
+  // Pending states
+  if (totalDelivered == 0 && totalActive > 0) {
+    contractStatus = 'PENDING_DELIVERY';
+  } else {
+    contractStatus = 'PENDING_VEHICLE_ASSIGNMENT';
+  }
+}
+```
+
+#### Priority Order:
+
+1. **Contract-Level Actions** (highest priority - override aggregation):
+   - `TERMINATED` - Contract terminated (cascades to all line items)
+   - `ON_HOLD` - Contract on hold (cascades to active line items)
+   - `TIMEOUT_PENDING` - Contract timeout
+   - `DISPUTED` - Contract under dispute
+
+2. **Operational States** (when any line items are operational):
+   - `PARTIALLY_RETURNED` - Some vehicles returned across all line items
+   - `PARTIALLY_DELIVERED` - Some vehicles delivered, not all
+   - `ACTIVE` - All vehicles delivered across all line items
+
+3. **Pending States** (when no operational line items):
+   - `PENDING_DELIVERY` - Vehicles assigned, waiting for delivery
+   - `PENDING_VEHICLE_ASSIGNMENT` - Waiting for vehicle assignment
+   - `PENDING_ESCROW` - Waiting for escrow lock
+
+4. **Final States**:
+   - `COMPLETED` - All line items completed (all vehicles returned)
+
+### 10.2 Handling Mixed Line Item States
+
+**Scenario: Some Line Items ACTIVE, Some COMPLETED**
+- **Contract Status:** `ACTIVE` or `PARTIALLY_RETURNED` (based on active line items)
+- **Business Logic:** Completed line items don't affect contract status. Contract remains operational. Settlement calculated only for active line items.
+
+**Scenario: Some Line Items ACTIVE, Some ON_HOLD**
+- **Contract Status:** `ACTIVE` (operational precedence)
+- **Business Logic:** Active line items continue operations. On-hold line items are suspended. Contract is operational but flagged.
+
+**Scenario: Some Line Items ACTIVE, Some TERMINATED**
+- **Contract Status:** `ACTIVE` or `PARTIALLY_DELIVERED` (based on active line items)
+- **Business Logic:** Active line items continue operations. Terminated line items excluded from calculations. Contract remains operational.
+
+**Scenario: Mix of PENDING_ACTIVATION, PARTIALLY_DELIVERED, ACTIVE**
+- **Contract Status:** `PARTIALLY_DELIVERED` (operational precedence)
+- **Business Logic:** Contract is operational with partially delivered state. Business can use delivered vehicles while waiting for remaining deliveries.
+
+### 10.3 Contract-Level Action Cascading
+
+When contract-level actions occur, they cascade to line items:
+
+**Contract Termination:**
+```typescript
+contract.Terminate() → 
+  For each lineItem in contract.lineItems:
+    if (lineItem.status != 'COMPLETED' && lineItem.status != 'TERMINATED')
+      lineItem.Terminate()
+```
+
+**Contract On Hold:**
+```typescript
+contract.PutOnHold() →
+  For each lineItem in contract.lineItems:
+    if (lineItem.status == 'ACTIVE' || lineItem.status == 'PARTIALLY_DELIVERED' || lineItem.status == 'PARTIALLY_RETURNED')
+      lineItem.status = 'ON_HOLD'
 ```
 
 ---

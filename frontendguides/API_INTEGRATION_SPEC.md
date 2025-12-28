@@ -217,9 +217,16 @@ export interface VehicleType {
 }
 
 export interface BusinessTier {
-  code: 'STANDARD' | 'BUSINESS_PRO' | 'PREMIUM' | 'ENTERPRISE';
+  id: string;
+  code: 'STANDARD' | 'BUSINESS_PRO' | 'ENTERPRISE' | 'GOV_NGO';
   name: string;
-  maxRfqsPerMonth?: number;
+  description?: string;
+  maxRFQsPerMonth?: number; // null = unlimited
+  maxActiveContracts?: number;
+  maxVehiclesPerRFQ?: number;
+  colorCode?: string;
+  displayOrder: number;
+  isActive: boolean;
 }
 
 export interface ProviderTier {
@@ -237,46 +244,60 @@ export interface RFQ {
   rfqNumber: string;
   businessId: string;
   title: string;
-  description: string;
-  status: 'DRAFT' | 'PUBLISHED' | 'BIDDING' | 'AWARDED' | 'COMPLETED' | 'CANCELLED';
-  startDate: string;
-  endDate: string;
-  bidDeadline: string;
-  publishedAt?: string;
+  description?: string;
+  status: 'DRAFT' | 'PUBLISHED' | 'BIDDING' | 'PARTIALLY_AWARDED' | 'AWARDED' | 'COMPLETED' | 'CANCELLED';
+  type: 'STANDARD' | 'URGENT' | 'LONG_TERM';
+  submissionDeadline: string;
+  awardedAt?: string;
+  pickupCity?: string;
+  dropoffCity?: string;
+  isBlind: boolean;
   lineItems: RFQLineItem[];
+  bidCount: number;
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface RFQLineItem {
   id: string;
-  vehicleTypeCode: string;
-  engineTypeCode: string;
-  quantityRequired: number;
-  withDriver: boolean;
-  preferredTags?: string[];
-  bidCount?: number;
+  rfqId: string;
+  vehicleType: string;
+  quantity: number;
+  requiredFrom: string; // ISO date-time
+  requiredTo: string; // ISO date-time
+  specifications?: string;
+  targetPricePerUnit?: number;
+  seatingCapacity?: number; // Optional - for vehicles requiring specific seat count
 }
 
 export interface CreateRFQRequest {
   title: string;
-  description: string;
-  startDate: string;
-  endDate: string;
-  bidDeadline: string;
+  description?: string;
+  type?: 'STANDARD' | 'URGENT' | 'LONG_TERM';
+  submissionDeadline: string; // ISO date-time
+  pickupCity?: string;
+  dropoffCity?: string;
+  isBlind?: boolean; // Default: true
   lineItems: {
-    vehicleTypeCode: string;
-    engineTypeCode: string;
-    quantityRequired: number;
-    withDriver: boolean;
-    preferredTags?: string[];
+    vehicleType: string;
+    quantity: number;
+    pickupLocation: string;
+    dropoffLocation: string;
+    pickupDate: string; // ISO date-time
+    dropoffDate?: string; // ISO date-time (optional for open-ended)
+    specialRequirements?: string;
+    seatingCapacity?: number; // Optional
   }[];
 }
 
 export interface RFQFilters extends PaginationParams {
-  status?: string;
+  status?: 'DRAFT' | 'PUBLISHED' | 'BIDDING' | 'PARTIALLY_AWARDED' | 'AWARDED' | 'COMPLETED' | 'CANCELLED';
+  type?: 'STANDARD' | 'URGENT' | 'LONG_TERM';
   startDateFrom?: string;
   startDateTo?: string;
-  vehicleTypeCode?: string;
+  vehicleType?: string;
+  pickupCity?: string;
+  dropoffCity?: string;
   search?: string;
 }
 ```
@@ -289,9 +310,12 @@ export interface Bid {
   rfqId: string;
   providerId: string;
   providerHash: string; // For blind bidding
-  status: 'SUBMITTED' | 'AWARDED' | 'LOST' | 'REJECTED' | 'WITHDRAWN';
+  status: 'BIDDING' | 'AWARDED' | 'LOST' | 'REJECTED' | 'WITHDRAWN';
+  totalAmount: number;
+  validUntil?: string; // ISO date-time
+  notes?: string;
   submittedAt: string;
-  lineItemBids: BidLineItem[];
+  items: BidItem[];
 }
 
 export interface BidLineItem {
@@ -327,15 +351,19 @@ export interface Contract {
   id: string;
   contractNumber: string;
   rfqId: string;
+  rfqBidAwardId?: string;
   businessId: string;
-  status: 'PENDING_ESCROW' | 'PENDING_VEHICLE_ASSIGNMENT' | 'PENDING_DELIVERY' | 'ACTIVE' | 'COMPLETED' | 'TERMINATED';
+  providerId: string;
+  status: 'PENDING_ESCROW' | 'PENDING_VEHICLE_ASSIGNMENT' | 'PENDING_DELIVERY' | 'ACTIVE' | 'ON_HOLD' | 'COMPLETED' | 'TERMINATED' | 'TIMEOUT_PENDING';
   startDate: string;
   endDate: string;
-  totalValue: number;
-  escrowAmount: number;
-  escrowStatus: 'LOCKED' | 'RELEASED';
+  totalContractValue: number;
+  businessSignedAt?: string;
+  providerSignedAt?: string;
   lineItems: ContractLineItem[];
+  vehicleAssignments: ContractVehicleAssignment[];
   createdAt: string;
+  updatedAt: string;
 }
 
 export interface ContractLineItem {
@@ -484,29 +512,33 @@ export const handleApiError = (error: unknown): void => {
 | `/api/rfqs/{id}` | GET | Get RFQ details | - | - |
 | `/api/rfqs/{id}` | PUT | Update RFQ | - | `UpdateRFQRequest` |
 | `/api/rfqs/{id}` | DELETE | Delete RFQ | - | - |
-| `/api/rfqs/{id}/publish` | POST | Publish RFQ | - | - |
-| `/api/rfqs/{id}/cancel` | POST | Cancel RFQ | - | `{ reason }` |
-| `/api/rfqs/open` | GET | Get open RFQs (Provider) | `PaginationParams, Filters` | - |
-| `/api/rfqs/{id}/bids` | GET | Get bids for RFQ | - | - |
-| `/api/rfqs/{id}/awards` | POST | Award bids | - | `AwardBidRequest` |
+| `/api/marketplace/rfqs/{id}/publish` | PUT | Publish RFQ | - | - |
+| `/api/marketplace/rfqs/{id}/close` | PUT | Close RFQ | - | - |
+| `/api/marketplace/rfqs` | GET | Get RFQs (role-based) | `PaginationParams, Filters` | - |
+| `/api/marketplace/rfqs/{id}` | GET | Get RFQ details | - | - |
+| `/api/marketplace/rfqs/{id}` | PUT | Update RFQ | - | `UpdateRFQRequest` |
+| `/api/marketplace/rfqs/{id}` | DELETE | Delete RFQ | - | - |
+| `/api/marketplace/rfqs/{id}/bids` | GET | Get bids for RFQ | - | - |
+| `/api/marketplace/rfqs/{id}/award` | POST | Award bids | - | `AwardBidCommand` |
 
 ### Bid Endpoints
 
 | Endpoint | Method | Description | Request Body |
 |----------|--------|-------------|--------------|
 | `/api/rfqs/{rfqId}/bids` | POST | Submit bid | `SubmitBidRequest` |
-| `/api/bids/my-bids` | GET | Get provider's bids | - |
-| `/api/bids/{id}` | GET | Get bid details | - |
-| `/api/bids/{id}/withdraw` | POST | Withdraw bid | - |
+| `/api/marketplace/bids` | GET | Get provider's bids | `PaginationParams` | - |
+| `/api/marketplace/bids` | POST | Submit bid | - | `SubmitBidCommand` |
+| `/api/marketplace/bids/{id}` | GET | Get bid details | - | - |
+| `/api/marketplace/bids/{id}` | DELETE | Withdraw bid | - | - |
 
 ### Contract Endpoints
 
 | Endpoint | Method | Description | Query Params |
 |----------|--------|-------------|--------------|
-| `/api/contracts` | GET | List contracts | `PaginationParams, Filters` |
-| `/api/contracts/{id}` | GET | Get contract details | - |
-| `/api/contracts/{id}/line-items/{lineItemId}/vehicles` | POST | Assign vehicle | `{ vehicleId }` |
-| `/api/contracts/vehicle-assignments/{assignmentId}/early-return` | POST | Request early return | `{ returnReason, notes }` |
+| `/api/contracts` | GET | List contracts | `PaginationParams, Filters` | - |
+| `/api/contracts/{id}` | GET | Get contract details | - | - |
+| `/api/contracts/{contractId}/line-items/{lineItemId}/assign-vehicle` | POST | Assign vehicle | - | `AssignVehicleRequest` |
+| `/api/contracts/{contractId}/line-items/{lineItemId}/early-return` | POST | Request early return | - | `EarlyReturnRequest` |
 
 ### Wallet Endpoints
 
@@ -521,20 +553,45 @@ export const handleApiError = (error: unknown): void => {
 
 | Endpoint | Method | Description | Request Body |
 |----------|--------|-------------|--------------|
-| `/api/vehicles` | GET | List vehicles | `PaginationParams, Filters` |
-| `/api/vehicles` | POST | Register vehicle | `CreateVehicleRequest` |
-| `/api/vehicles/{id}` | GET | Get vehicle details | - |
-| `/api/vehicles/{id}` | PUT | Update vehicle | `UpdateVehicleRequest` |
-| `/api/vehicles/{id}/photos` | POST | Upload photos | `FormData` |
-| `/api/vehicles/{id}/insurance` | POST | Add insurance | `InsuranceRequest` |
+| `/api/identity/vehicles` | GET | List vehicles | `PaginationParams, Filters` | - |
+| `/api/identity/vehicles` | POST | Register vehicle | - | `CreateVehicleRequest` |
+| `/api/identity/vehicles/{id}` | GET | Get vehicle details | - | - |
+| `/api/identity/vehicles/{id}` | PUT | Update vehicle | - | `UpdateVehicleRequest` |
+| `/api/identity/vehicles/{id}/documents` | POST | Upload documents | - | `FormData` |
+| `/api/identity/vehicles/{id}/insurance` | POST | Add insurance | - | `InsuranceRequest` |
+| `/api/identity/vehicles/provider/{providerId}` | GET | Get provider's vehicles | `PaginationParams` | - |
 
 ### Delivery Endpoints
 
 | Endpoint | Method | Description | Request Body |
 |----------|--------|-------------|--------------|
-| `/api/delivery/sessions/{sessionId}/otp` | POST | Generate OTP | - |
-| `/api/delivery/sessions/{sessionId}/verify-otp` | POST | Verify OTP | `{ otpCode }` |
-| `/api/delivery/sessions/{sessionId}/handover` | POST | Upload handover evidence | `FormData` |
+| `/api/delivery/sessions/{sessionId}/otp` | POST | Generate OTP | - | - |
+| `/api/delivery/sessions/{sessionId}/verify-otp` | POST | Verify OTP | - | `{ otpCode }` |
+| `/api/delivery/sessions/{sessionId}/handover` | POST | Upload handover evidence | - | `FormData` |
+| `/api/document-types` | GET | Get document types | `PaginationParams` | - |
+| `/api/document-types` | POST | Create document type (Admin) | - | `CreateDocumentTypeCommand` |
+| `/api/kyc-requirements` | GET | Get KYC requirements | `PaginationParams, entityType` | - |
+| `/api/kyc-requirements` | POST | Create KYC requirement (Admin) | - | `CreateKycRequirementCommand` |
+| `/api/business-tiers` | GET | Get business tiers | `PaginationParams` | - |
+| `/api/business-tiers` | POST | Create business tier (Admin) | - | `CreateBusinessTierCommand` |
+| `/api/provider-tiers` | GET | Get provider tiers | `PaginationParams` | - |
+| `/api/provider-tiers` | POST | Create provider tier (Admin) | - | `CreateProviderTierCommand` |
+| `/api/commission-strategies/versions` | GET | Get commission strategies | `PaginationParams` | - |
+| `/api/admin/verifications/businesses` | GET | List businesses for verification | `PaginationParams, Filters` | - |
+| `/api/admin/verifications/businesses/{id}` | GET | Get business verification details | - | - |
+| `/api/admin/verifications/businesses/{id}/status` | PUT | Update business verification status | - | `UpdateStatusCommand` |
+| `/api/admin/verifications/providers` | GET | List providers for verification | `PaginationParams, Filters` | - |
+| `/api/admin/verifications/providers/{id}` | GET | Get provider verification details | - | - |
+| `/api/admin/verifications/providers/{id}/status` | PUT | Update provider verification status | - | `UpdateStatusCommand` |
+| `/api/admin/verifications/vehicles` | GET | List vehicles for verification | `PaginationParams, Filters` | - |
+| `/api/admin/verifications/vehicles/{id}` | GET | Get vehicle verification details | - | - |
+| `/api/admin/verifications/vehicles/{id}/status` | PUT | Update vehicle verification status | - | `UpdateStatusCommand` |
+| `/api/identity/businesses` | GET | List businesses (Admin) | `PaginationParams, Filters` | - |
+| `/api/identity/businesses/{id}` | GET | Get business details | - | - |
+| `/api/identity/businesses/{id}` | PUT | Update business (Admin) | - | `UpdateBusinessRequest` |
+| `/api/identity/providers` | GET | List providers (Admin) | `PaginationParams, Filters` | - |
+| `/api/identity/providers/{id}` | GET | Get provider details | - | - |
+| `/api/identity/providers/{id}` | PUT | Update provider (Admin) | - | `UpdateProviderRequest` |
 
 ---
 

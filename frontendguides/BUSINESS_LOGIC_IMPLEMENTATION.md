@@ -599,8 +599,8 @@ const getPenaltyRate = (
   const tierMultipliers = {
     STANDARD: 1.0,
     BUSINESS_PRO: 0.95,
-    PREMIUM: 0.90,
-    ENTERPRISE: 0.85,
+    ENTERPRISE: 0.90,
+    GOV_NGO: 0.85,
   };
 
   return baseRates[category] * tierMultipliers[tier];

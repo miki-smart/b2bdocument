@@ -284,11 +284,52 @@ export const RegisterBusinessStep2 = () => {
 **Route:** `/register/business/step-3`  
 **Component:** `src/features/auth/pages/RegisterBusinessStep3.tsx`
 
-**Required Documents:**
-1. Business License (PDF/Image, max 5MB)
-2. TIN Certificate (PDF/Image, max 5MB)
-3. Articles of Association (PDF, max 10MB)
-4. ID of Representative (PDF/Image, max 5MB)
+**CRITICAL:** Document types must be fetched from master data, not hardcoded.
+
+**Implementation:**
+
+```typescript
+import { useQuery } from '@tanstack/react-query';
+import { masterDataService } from '@/shared/services/master-data-service';
+
+export const RegisterBusinessStep3 = () => {
+  const { data: kycRequirements } = useQuery({
+    queryKey: ['kyc-requirements', 'BUSINESS'],
+    queryFn: () => masterDataService.getKYCRequirements({
+      entityType: 'BUSINESS',
+    }),
+  });
+
+  const { data: documentTypes } = useQuery({
+    queryKey: ['document-types'],
+    queryFn: () => masterDataService.getDocumentTypes(),
+  });
+
+  // Map KYC requirements to document types
+  const requiredDocuments = useMemo(() => {
+    if (!kycRequirements || !documentTypes) return [];
+    
+    return kycRequirements
+      .filter(req => req.isRequired)
+      .map(req => {
+        const docType = documentTypes.find(dt => dt.id === req.documentTypeId);
+        return {
+          id: req.id,
+          documentTypeId: req.documentTypeId,
+          label: docType?.name || 'Unknown',
+          description: req.description || docType?.description,
+          maxSize: req.maxFileSize || 5 * 1024 * 1024, // Default 5MB
+          acceptedTypes: req.allowedFileTypes || ['application/pdf', 'image/jpeg', 'image/png'],
+          isRequired: req.isRequired,
+        };
+      });
+  }, [kycRequirements, documentTypes]);
+
+  // Use requiredDocuments instead of hardcoded REQUIRED_DOCUMENTS
+};
+```
+
+**Note:** Document requirements are dynamically loaded from `/api/kyc-requirements?entityType=BUSINESS`.
 
 **Component Implementation:**
 
@@ -629,20 +670,223 @@ Similar to Business Step 2, but with provider-specific fields.
 
 ### Step 3: Document Upload
 
-**Conditional Documents Based on Provider Type:**
+**CRITICAL:** Document types must be fetched from master data, not hardcoded.
 
-- **Individual:**
-  - National ID
-  - Driver's License
+**Implementation:**
 
-- **Agent:**
-  - Agent Agreement
-  - ID of Representative
+```typescript
+import { useQuery } from '@tanstack/react-query';
+import { masterDataService } from '@/shared/services/master-data-service';
 
-- **Company:**
-  - Business License
-  - TIN Certificate
-  - Vehicle Ownership Proof
+export const RegisterProviderStep3 = () => {
+  const { data: kycRequirements } = useQuery({
+    queryKey: ['kyc-requirements', 'PROVIDER', providerType],
+    queryFn: () => masterDataService.getKYCRequirements({
+      entityType: 'PROVIDER',
+      providerType: providerType, // INDIVIDUAL, AGENT, or COMPANY
+    }),
+  });
+
+  const { data: documentTypes } = useQuery({
+    queryKey: ['document-types'],
+    queryFn: () => masterDataService.getDocumentTypes(),
+  });
+
+  // Map KYC requirements to document types
+  const requiredDocuments = useMemo(() => {
+    if (!kycRequirements || !documentTypes) return [];
+    
+    return kycRequirements
+      .filter(req => req.isRequired)
+      .map(req => {
+        const docType = documentTypes.find(dt => dt.id === req.documentTypeId);
+        return {
+          id: req.id,
+          documentTypeId: req.documentTypeId,
+          label: docType?.name || 'Unknown',
+          description: req.description || docType?.description,
+          maxSize: req.maxFileSize || 5 * 1024 * 1024, // Default 5MB
+          acceptedTypes: req.allowedFileTypes || ['application/pdf', 'image/jpeg', 'image/png'],
+          isRequired: req.isRequired,
+        };
+      });
+  }, [kycRequirements, documentTypes]);
+
+  // Rest of component...
+};
+```
+
+**Note:** Document requirements are dynamically loaded from `/api/kyc-requirements` based on provider type.
+
+### Step 4: Vehicle Registration
+
+**Route:** `/register/provider/step-4`  
+**Component:** `src/features/auth/pages/RegisterProviderStep4.tsx`
+
+**CRITICAL:** Providers can register vehicles during onboarding to complete their profile.
+
+**Features:**
+- Register at least 1 vehicle (required to complete onboarding)
+- Can register multiple vehicles
+- Same 3-step vehicle registration flow as in fleet management:
+  1. Vehicle Information
+  2. Photo Upload (5 photos)
+  3. Insurance Information
+
+**Component:**
+
+```typescript
+export const RegisterProviderStep4 = ({ onBack, onSubmit }) => {
+  const [vehicles, setVehicles] = useState<VehicleFormData[]>([]);
+  const [currentVehicleStep, setCurrentVehicleStep] = useState(1);
+  const [currentVehicleIndex, setCurrentVehicleIndex] = useState(0);
+
+  const handleVehicleComplete = (vehicleData: VehicleFormData) => {
+    const updated = [...vehicles];
+    updated[currentVehicleIndex] = vehicleData;
+    setVehicles(updated);
+    
+    // Move to next vehicle or finish
+    if (currentVehicleIndex < vehicles.length - 1) {
+      setCurrentVehicleIndex(currentVehicleIndex + 1);
+      setCurrentVehicleStep(1);
+    } else {
+      // All vehicles registered
+      onSubmit({ vehicles });
+    }
+  };
+
+  const handleAddAnotherVehicle = () => {
+    setVehicles([...vehicles, {}]);
+    setCurrentVehicleIndex(vehicles.length);
+    setCurrentVehicleStep(1);
+  };
+
+  return (
+    <div className="min-h-screen bg-gray-50 py-12">
+      <div className="max-w-4xl mx-auto">
+        <Stepper currentStep={4} totalSteps={4} />
+        
+        <Card className="mt-8 p-8">
+          <h2 className="text-2xl font-bold mb-6">Register Vehicles</h2>
+          <p className="text-gray-600 mb-6">
+            Register at least one vehicle to complete your provider profile.
+            You can add more vehicles later from your dashboard.
+          </p>
+
+          {vehicles.length === 0 ? (
+            <div className="text-center py-12">
+              <p className="text-gray-600 mb-4">No vehicles registered yet</p>
+              <Button onClick={() => setVehicles([{}])}>
+                Register First Vehicle
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-6">
+              <div className="flex justify-between items-center">
+                <h3 className="font-semibold">
+                  Vehicle {currentVehicleIndex + 1} of {vehicles.length}
+                </h3>
+                {vehicles.length > 1 && (
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setVehicles(vehicles.filter((_, i) => i !== currentVehicleIndex));
+                      if (currentVehicleIndex >= vehicles.length - 1) {
+                        setCurrentVehicleIndex(Math.max(0, currentVehicleIndex - 1));
+                      }
+                    }}
+                  >
+                    Remove Vehicle
+                  </Button>
+                )}
+              </div>
+
+              {/* Vehicle Registration Steps - Same as in Fleet Management */}
+              {currentVehicleStep === 1 && (
+                <VehicleInfoStep
+                  data={vehicles[currentVehicleIndex]?.vehicleInfo}
+                  onNext={(data) => {
+                    const updated = [...vehicles];
+                    updated[currentVehicleIndex] = {
+                      ...updated[currentVehicleIndex],
+                      vehicleInfo: data,
+                    };
+                    setVehicles(updated);
+                    setCurrentVehicleStep(2);
+                  }}
+                />
+              )}
+
+              {currentVehicleStep === 2 && (
+                <PhotoUploadStep
+                  photos={vehicles[currentVehicleIndex]?.photos || {}}
+                  onPhotosChange={(photos) => {
+                    const updated = [...vehicles];
+                    updated[currentVehicleIndex] = {
+                      ...updated[currentVehicleIndex],
+                      photos,
+                    };
+                    setVehicles(updated);
+                  }}
+                  onBack={() => setCurrentVehicleStep(1)}
+                  onNext={() => setCurrentVehicleStep(3)}
+                />
+              )}
+
+              {currentVehicleStep === 3 && (
+                <InsuranceStep
+                  data={vehicles[currentVehicleIndex]?.insurance}
+                  onBack={() => setCurrentVehicleStep(2)}
+                  onSubmit={(data) => {
+                    handleVehicleComplete({
+                      ...vehicles[currentVehicleIndex],
+                      insurance: data,
+                    });
+                  }}
+                />
+              )}
+
+              {currentVehicleStep === 3 && currentVehicleIndex === vehicles.length - 1 && (
+                <div className="flex justify-between mt-6">
+                  <Button
+                    variant="outline"
+                    onClick={handleAddAnotherVehicle}
+                  >
+                    Add Another Vehicle
+                  </Button>
+                  <Button
+                    onClick={() => onSubmit({ vehicles })}
+                    disabled={vehicles.length === 0}
+                  >
+                    Complete Onboarding
+                  </Button>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="mt-8 flex justify-between">
+            <Button variant="outline" onClick={onBack}>
+              Back
+            </Button>
+            {vehicles.length > 0 && (
+              <Button
+                onClick={() => onSubmit({ vehicles })}
+                disabled={vehicles.some(v => !v.vehicleInfo || !v.photos || !v.insurance)}
+              >
+                Complete Onboarding
+              </Button>
+            )}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+};
+```
+
+**Note:** Vehicle registration during onboarding is optional but recommended. Providers can complete onboarding without vehicles and register them later, but they won't be able to bid on RFQs until they have at least one verified vehicle.
 
 ---
 
