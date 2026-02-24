@@ -101,17 +101,93 @@ Contract Duration: 90 days
 
 ---
 
-### 1.3 Settlement Flow Overview
+### 1.3 Settlement Schedule Generation (BR-031A) - UPDATED
+
+**When Generated:** Settlement schedules are generated on **first vehicle delivery**, NOT at contract creation.
+
+**Anchor Point:** Schedules are anchored from the first delivery date (fixed 30-day cycles).
+
+```
+┌─────────────────────────────────────────────────────────┐
+│           SETTLEMENT SCHEDULE GENERATION                 │
+└─────────────────────────────────────────────────────────┘
+
+DeliveryConfirmedEvent (first vehicle)
+    ↓
+Check if settlement schedule exists
+    ↓ (if not exists)
+Generate fixed 30-day settlement windows
+    - CycleStart = FirstDeliveryDate
+    - CycleEnd = CycleStart + 30 days
+    - Repeat until contract end
+    ↓
+Schedule windows stored (contract-level)
+    ↓
+At each cycle end: Calculate vehicle-level earnings
+```
+
+**Why This Change:**
+- Schedules based on actual delivery date, not contract creation
+- Handles partial delivery naturally (vehicles earn from their delivery date)
+- Avoids schedule inaccuracies when deliveries are delayed
+
+---
+
+### 1.4 Vehicle-Level Earnings Calculation (BR-031A) - NEW
+
+**Rule: Contract-Level Schedule, Vehicle-Level Earnings**
+
+Settlement windows are defined at the contract level, but actual earnings are calculated from individual vehicle activity within each window.
+
+```typescript
+function calculateVehicleEarnings(
+  contract: Contract,
+  windowStart: DateTime,
+  windowEnd: DateTime
+): decimal {
+  let totalEarnings = 0;
+  
+  for (const assignment of contract.vehicleAssignments) {
+    if (!assignment.deliveredAt) continue; // Not delivered yet
+    
+    const vehicleStart = assignment.deliveredAt;
+    const vehicleEnd = assignment.releasedAt ?? contract.endDate;
+    
+    // Calculate overlap with settlement window
+    const activeDays = calculateActiveDaysInWindow(
+      vehicleStart, vehicleEnd, windowStart, windowEnd
+    );
+    
+    if (activeDays <= 0) continue;
+    
+    const dailyRate = assignment.lineItem.unitAmount;
+    totalEarnings += dailyRate * activeDays;
+  }
+  
+  return totalEarnings;
+}
+```
+
+**Handles:**
+- **Partial delivery:** Vehicle earns only from its actual delivery date
+- **Late delivery:** Vehicle contributes 0 until delivered
+- **Early return:** Vehicle stops earning at return date
+- **Undelivered vehicles:** 0 contribution, escrow refunded
+
+---
+
+### 1.5 Settlement Flow Overview
 
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                  SETTLEMENT PROCESS                      │
 └─────────────────────────────────────────────────────────┘
 
-1. TRIGGER EVENT
+1. TRIGGER EVENT (Month-end or Contract completion)
    ↓
-2. CALCULATE AMOUNTS
-   - Gross amount (days × daily rate)
+2. CALCULATE AMOUNTS (Vehicle-level activity - BR-031A)
+   - For each vehicle: ActiveDays × DailyRate
+   - Gross amount = Sum of vehicle earnings
    - Platform commission
    - Tax withholding
    - Net to provider
@@ -175,18 +251,31 @@ async function checkMonthlySettlements() {
 }
 ```
 
-**Calculation:**
+**Calculation (BR-031A: Vehicle-Level Earnings):**
 ```typescript
 async function processMonthlySettlement(contract: Contract) {
   const today = new Date();
   const settlementPeriodStart = contract.lastSettlementDate 
     ? addDays(contract.lastSettlementDate, 1) 
-    : contract.actualStartDate;
+    : contract.firstDeliveryDate; // Anchored from first delivery
   const settlementPeriodEnd = today;
   
-  const daysInPeriod = differenceInDays(settlementPeriodEnd, settlementPeriodStart);
-  const dailyRate = contract.totalAmount / contract.totalDays;
-  const grossAmount = dailyRate * daysInPeriod;
+  // Calculate gross amount using vehicle-level activity (BR-031A)
+  // Each vehicle earns based on [DeliveredAt, ReturnedAt) overlap with window
+  let grossAmount = 0;
+  for (const assignment of contract.vehicleAssignments) {
+    if (!assignment.deliveredAt) continue;
+    
+    const activeDays = calculateActiveDaysInWindow(
+      assignment.deliveredAt,
+      assignment.releasedAt ?? contract.endDate,
+      settlementPeriodStart,
+      settlementPeriodEnd
+    );
+    
+    const dailyRate = assignment.lineItem.unitAmount;
+    grossAmount += dailyRate * activeDays;
+  }
   
   // Calculate deductions
   const commission = await calculateCommission(contract, grossAmount);

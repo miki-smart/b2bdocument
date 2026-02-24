@@ -578,20 +578,22 @@ START (Triggered by BidAwardedEvent)
   │       ├─► late_delivery_penalty
   │       └─► settlement_frequency
   │
-  ├─► Publish Events
-  │   ├─► ContractCreatedEvent
-  │   └─► EscrowLockRequestedEvent
+  ├─► Publish Event
+  │   └─► ContractCreatedEvent
   │
-  ├─► Finance Module Locks Escrow
-  │   ├─► Calculate escrow_amount
-  │   │   └─► total_amount × escrow_policy_multiplier
+  ├─► Finance Module Locks Escrow (BR-031A)
+  │   ├─► Calculate escrow_amount per line item:
+  │   │   └─► Sum(lineItem.UnitPrice × Quantity × min(DurationDays, 30))
   │   ├─► Debit business wallet
   │   ├─► Credit escrow virtual wallet
-  │   └─► Create escrow_lock record
+  │   ├─► Create escrow_lock record
+  │   └─► Publish ContractEscrowLockedEvent ← NEW
+  │       ├─► NOTE: NOT ContractActivatedEvent
+  │       └─► Settlement schedules NOT generated yet
   │
   └─► Notify Parties
-      ├─► Business: "Contract created, escrow locked"
-      └─► Provider: "Contract ready, assign vehicles"
+      ├─► Business: "Escrow locked, awaiting vehicle assignment"
+      └─► Provider: "Contract ready, assign vehicles within 5 days"
 END
 ```
 
@@ -663,29 +665,41 @@ START
   │   └─► IF first activation on line:
   │       └─► contract_line_item.status = ACTIVE
   │
-  ├─► IF all line items activated:
-  │   └─► contract.status = ACTIVE
+  ├─► IF first vehicle delivered:
+  │   ├─► Generate Settlement Schedule (BR-031A)
+  │   │   └─► Anchored from first delivery date
+  │   │   └─► Fixed 30-day cycles
+  │   └─► contract.status = PARTIALLY_DELIVERED
+  │
+  ├─► IF all vehicles delivered:
+  │   ├─► contract.status = ACTIVE
+  │   └─► Publish ContractActivatedEvent ← TRUE activation
   │
   └─► Publish Events
+      ├─► DeliveryConfirmedEvent
       ├─► VehicleAssignmentActivatedEvent
-      ├─► ContractLineActivatedEvent
-      └─► ContractActivatedEvent
+      └─► ContractLineActivatedEvent (if line item fully delivered)
 END
 ```
 
-### Business Rules
+### Business Rules (Updated)
 
 1. **Escrow Lock:** Required before vehicle assignment
-2. **Escrow Amount:** 
-   - Monthly contracts: 1 month rent
-   - Event contracts: 100% upfront
+2. **Escrow Calculation (BR-031A):** 
+   - Per line item: `UnitPrice × Quantity × min(DurationDays, 30)`
+   - NOT contract-level averaging
 3. **OTP Expiry:** 5 minutes
 4. **OTP Attempts:** Maximum 3, then 30-minute lockout
 5. **Photo Evidence:** Mandatory for all deliveries
-6. **Activation:** Only after OTP verification + evidence capture
-7. **Contract Status:**
-   - PENDING_ACTIVATION: Created, escrow locked
-   - ACTIVE: At least one vehicle activated
+6. **Activation:** Only after ALL vehicles delivered + OTP verified
+7. **Settlement Schedule:** Generated on first delivery, not at contract creation
+8. **Settlement Calculation (BR-031A):** Vehicle-level activity-based earnings
+9. **Contract Status:**
+   - PENDING_ESCROW: Created, awaiting escrow lock
+   - PENDING_VEHICLE_ASSIGNMENT: Escrow locked, awaiting vehicle assignment
+   - PENDING_DELIVERY: Vehicles assigned, awaiting delivery
+   - PARTIALLY_DELIVERED: Some vehicles delivered, partial operations allowed
+   - ACTIVE: All vehicles delivered
    - COMPLETED: All vehicles returned, settlement done
    - TERMINATED: Cancelled before completion
 

@@ -135,10 +135,22 @@ Finance/
 
 ### 1. Escrow Lock (Critical Path)
 
-**IMPORTANT (BR-010):** Escrow lock is triggered by `ContractCreatedEvent`, NOT `BidAwardedEvent`.
+**IMPORTANT (BR-010, BR-031A):** Escrow lock is triggered by `ContractCreatedEvent`, NOT `BidAwardedEvent`.
 
 **Correct Flow:**  
-BidAwardedEvent → ContractCreatedEvent → **EscrowLockedEvent**
+BidAwardedEvent → ContractCreatedEvent → **ContractEscrowLockedEvent** → VehicleAssignment → Delivery
+
+**Escrow Calculation (BR-031A):**
+```
+EscrowAmount = Sum of each line item:
+  - For short-term (lineItem.DurationDays < 30): lineItem.UnitPrice × lineItem.Quantity × lineItem.DurationDays
+  - For long-term (lineItem.DurationDays >= 30): lineItem.UnitPrice × lineItem.Quantity × 30 (first cycle)
+```
+
+**Key Changes:**
+- `ContractEscrowLockedEvent` published (NOT `ContractActivatedEvent`)
+- Settlement schedules are NOT generated here (generated on first delivery)
+- Escrow calculated per line item with 30-day cap, NOT contract-level averaging
 
 ```csharp
 // Command
@@ -275,6 +287,26 @@ public class LockEscrowCommandHandler : IRequestHandler<LockEscrowCommand, bool>
 
 ### 2. Settlement Processing (Monthly Job)
 
+**Settlement Schedule Generation (BR-031A):**
+- Settlement schedules are generated on **first vehicle delivery**, NOT at contract creation
+- Schedules are anchored from the first delivery date (fixed 30-day cycles)
+- Actual earnings calculated at each cycle end based on **vehicle-level activity**
+
+**Vehicle-Level Earnings Calculation (BR-031A):**
+```
+For each vehicle in contract:
+    ActiveDaysInWindow = overlap of [DeliveredAt, ReturnedAt) with settlement window
+    VehicleEarnings = UnitPricePerDay × ActiveDaysInWindow
+
+GrossSettlement = Sum(VehicleEarnings)
+```
+
+This handles:
+- **Partial delivery:** Vehicle earns only from its actual delivery date
+- **Late delivery:** Vehicle contributes 0 until delivered
+- **Early return:** Vehicle stops earning at return date
+- **Undelivered vehicles:** Escrow refunded, provider penalized
+
 ```csharp
 // Command
 public class ProcessSettlementCommand : IRequest<Unit>
@@ -294,9 +326,17 @@ public class ProcessSettlementCommandHandler : IRequestHandler<ProcessSettlement
 
     public async Task<Unit> Handle(ProcessSettlementCommand request, CancellationToken cancellationToken)
     {
-        // 1. Calculate Gross Amount (from Completed Contracts)
-        var contracts = await _settlementRepository.GetCompletedContractsAsync(request.ProviderId, request.PeriodStart, request.PeriodEnd);
-        decimal grossAmount = contracts.Sum(c => c.TotalAmount);
+        // 1. Calculate Gross Amount using vehicle-level activity (BR-031A)
+        var contracts = await _settlementRepository.GetActiveContractsAsync(
+            request.ProviderId, request.PeriodStart, request.PeriodEnd);
+        
+        decimal grossAmount = 0;
+        foreach (var contract in contracts)
+        {
+            // Calculate based on actual vehicle activity in settlement window
+            grossAmount += CalculateContractEarningsFromVehicleActivity(
+                contract, request.PeriodStart, request.PeriodEnd);
+        }
 
         if (grossAmount <= 0) return Unit.Value;
 

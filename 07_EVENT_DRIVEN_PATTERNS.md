@@ -129,8 +129,10 @@ public class ProviderLookupService : IProviderLookupService
 ### Contracts Module
 | Event | Trigger | Consumers |
 |-------|---------|-----------|
-| `ContractCreatedEvent` | Contract record created | Notification |
+| `ContractCreatedEvent` | Contract record created | Finance (Lock Escrow) |
+| `ContractEscrowLockedEvent` | Escrow locked (NEW) | Notifications, Contracts (Status update) |
 | `VehicleAssignedEvent` | Vehicle linked to contract | Delivery (Create Session) |
+| `ContractActivatedEvent` | ALL vehicles delivered | Notifications, Identity (Trust Score) |
 | `ContractCompletedEvent` | All vehicles returned | Finance (Settlement), Identity (Trust Score) |
 | `VehicleReturnedEarlyEvent` | Early return processed | Finance (Partial Refund) |
 
@@ -138,14 +140,21 @@ public class ProviderLookupService : IProviderLookupService
 | Event | Trigger | Consumers |
 |-------|---------|-----------|
 | `OTPGeneratedEvent` | OTP requested | Notification (Send SMS) |
-| `DeliveryConfirmedEvent` | Handover complete | Contracts (Activate) |
+| `DeliveryConfirmedEvent` | Handover complete | Contracts (Update status, generate settlement schedule on first delivery), Notifications (Business + Provider) |
 | `DeliveryReturnConfirmedEvent` | Return complete | Contracts (Complete) |
 
 ### Finance Module
 | Event | Trigger | Consumers |
 |-------|---------|-----------|
-| `EscrowLockedEvent` | Funds locked | Notification |
+| `ContractEscrowLockedEvent` | Escrow funds locked | Notifications (Escrow locked notice) |
 | `SettlementProcessedEvent` | Monthly payout done | Notification |
+
+**Key Event Flow Changes (BR-031A):**
+```
+BidAwardedEvent → ContractCreatedEvent → ContractEscrowLockedEvent (NOT ActivatedEvent)
+    → VehicleAssignedEvent → DeliveryConfirmedEvent (first) → Generate Settlement Schedule
+    → DeliveryConfirmedEvent (last) → ContractActivatedEvent (TRUE activation)
+```
 
 ---
 

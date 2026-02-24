@@ -1,8 +1,9 @@
 # Movello MVP - Authoritative Business Rules
-## Single Source of Truth - Version 1.0
+## Single Source of Truth - Version 1.1
 
 **Document Status:** AUTHORITATIVE  
-**Date:** December 21, 2025  
+**Date:** February 20, 2026  
+**Last Updated:** February 20, 2026  
 **Supersedes:** All conflicting specifications in previous documents  
 **Review Status:** ✅ Approved by Business Owner
 
@@ -36,6 +37,10 @@
 12. [Settlement Processing](#12-settlement-processing)
 13. [Dispute Resolution](#13-dispute-resolution)
 14. [Status Definitions](#14-status-definitions)
+15. [Vehicle Assignment Lifecycle](#13-vehicle-assignment-lifecycle) *(NEW)*
+16. [Contract Completion Rules (Updated)](#14-contract-completion-rules-updated) *(NEW)*
+17. [Settlement Calculation with Vehicle Lifecycle](#15-settlement-calculation-with-vehicle-lifecycle) *(NEW)*
+18. [Contract Extension Rules](#16-contract-extension-rules) *(NEW)*
 
 ---
 
@@ -1253,6 +1258,22 @@ Net Settlement = Gross Amount - Commission - Tax Withholding
 Payment to Provider = Net Settlement
 ```
 
+**Rule BR-031A: Contract-Level Schedule, Vehicle-Level Earnings (Partial Delivery/Return Safe)**
+
+**Purpose:** Ensure settlement remains deterministic and accurate under partial delivery, late deliveries, and partial returns.
+
+**Schedule Windows (Contract-Level):**
+- Settlement cycle windows (e.g., month-end windows for long-term contracts) are generated at the **contract** level.
+- These windows define **when** settlement is calculated and processed.
+
+**Earnings Calculation (Vehicle-Level):**
+- The **gross** amount for a settlement window is calculated from **actual vehicle activity**, not awarded quantities:
+  - `Gross = Σ(UnitPricePerDay × ActiveDaysInWindow)` across delivered vehicles
+  - `ActiveDaysInWindow` is the overlap of `[DeliveredAt, ReturnedAt)` with the settlement window.
+- **Partial delivery:** Undelivered vehicles contribute `0` until they are delivered and accepted (OTP verified).
+- **Late delivery:** A vehicle contributes only from its delivery acceptance timestamp (`DeliveredAt`).
+- **Partial return:** A vehicle stops contributing after it is returned (`ReturnedAt` / release confirmation).
+
 **Early Return Settlement (EarlyReturnEvent):**
 ```
 Already Paid = Amount paid to provider before early return
@@ -1594,6 +1615,7 @@ PENDING_VERIFICATION → ACTIVE / REJECTED → ASSIGNED → ACTIVE (after return
 | Version | Date | Changes | Approved By |
 |---------|------|---------|-------------|
 | 1.0 | Dec 21, 2025 | Initial authoritative version consolidating all business rules | Business Owner |
+| 1.1 | Feb 20, 2026 | Added vehicle assignment lifecycle rules (BR-052 to BR-063), updated contract completion logic, added settlement calculation with vehicle lifecycle, added contract extension rules, updated database schema | Business Owner |
 
 ---
 
@@ -1605,6 +1627,503 @@ PENDING_VERIFICATION → ACTIVE / REJECTED → ASSIGNED → ACTIVE (after return
 2. ❌ `Business_Rules.md` - "Initial trust score = 0" → Replaced by BR-025 (verified users = 50)
 3. ❌ Various documents - "Escrow lock before contract creation" → Replaced by BR-008 (contract before escrow)
 4. ❌ Trust Engine Spec - "Complex signal-based decay algorithms" → Replaced by BR-025 (simple calculation)
+
+---
+
+## 13. VEHICLE ASSIGNMENT LIFECYCLE
+
+### 13.1 Vehicle Assignment Status Flow
+
+**Rule BR-052: Vehicle Assignment Lifecycle Tracking**
+
+Vehicle assignments track individual vehicle lifecycle throughout a contract's duration with detailed status tracking.
+
+**Status Flow:**
+```
+ASSIGNED → DELIVERED → RETURNED (normal completion)
+ASSIGNED → DELIVERED → REPLACED (vehicle replacement)
+ASSIGNED → DELIVERED → MAINTENANCE → DELIVERED (temporary maintenance)
+```
+
+**Status Definitions:**
+
+| Status | Definition | Entry Condition | Exit Condition |
+|--------|-----------|-----------------|----------------|
+| `ASSIGNED` | Vehicle assigned to contract, awaiting delivery | Assignment created | OTP verified delivery |
+| `DELIVERED` | Vehicle delivered and accepted via OTP | OTP verification completed | Vehicle returned/replaced |
+| `RETURNED` | Vehicle returned to provider | Return confirmed | (final state) |
+| `REPLACED` | Vehicle replaced by another vehicle | Replacement processed | (final state) |
+| `MAINTENANCE` | Vehicle temporarily removed for maintenance | Maintenance initiated | Returned from maintenance |
+
+---
+
+### 13.2 Vehicle Replacement Rules
+
+**Rule BR-053: Vehicle Replacement Process**
+
+**Prerequisites:**
+- Only DELIVERED or ASSIGNED vehicles can be replaced
+- Replacement vehicle must be APPROVED and available
+- Replacement vehicle must match contract specifications
+
+**Process:**
+1. Create NEW assignment record for replacement vehicle
+2. Mark new assignment as DELIVERED immediately (seamless transition)
+3. Mark old assignment status as REPLACED
+4. Set old assignment's ReturnedAt timestamp
+5. Link old assignment to new assignment via ReplacedByAssignmentId
+6. Record replacement reason
+
+**Key Principles:**
+- Replacement creates NEW assignment (not update existing)
+- No gap in earnings - old vehicle earns until replacement time, new vehicle earns from replacement time
+- LineItem.QuantityActive remains unchanged (1 vehicle replaces 1 vehicle)
+
+**Example:**
+```
+Vehicle A: Delivered Day 1, Replaced Day 15
+- Assignment Status: REPLACED
+- ReturnedAt: Day 15
+- ReplacedByAssignmentId: [Vehicle B Assignment ID]
+- Earnings: 15 days
+
+Vehicle B (replacement): Delivered Day 15, Returned Day 30
+- Assignment Status: RETURNED
+- ReturnedAt: Day 30
+- Earnings: 15 days
+
+Total Contract Earnings: 30 days (seamless, no gaps)
+```
+
+---
+
+### 13.3 Maintenance Handling
+
+**Rule BR-054: Vehicle Maintenance During Contract**
+
+**Prerequisites:**
+- Only DELIVERED vehicles can be marked for maintenance
+- Maintenance reason MUST be recorded
+
+**Process:**
+1. Vehicle status: DELIVERED → MAINTENANCE
+2. Record maintenance reason and timestamp
+3. Maintenance period NOT counted in earnings calculation
+4. After maintenance: MAINTENANCE → DELIVERED
+5. Vehicle resumes earning from return date
+
+**Earnings Impact:**
+```
+Vehicle: Delivered Day 1, Maintenance Day 10-15, Returned Day 30
+- Active Days: Day 1-10 (10 days) + Day 15-30 (15 days) = 25 days
+- Maintenance period (5 days) NOT counted
+- Provider paid for 25 days only
+```
+
+---
+
+## 14. CONTRACT COMPLETION RULES (UPDATED)
+
+### 14.1 Contract Completion Prerequisites
+
+**Rule BR-055: Updated Contract Completion Conditions**
+
+A contract can ONLY be marked as COMPLETED when ALL of the following conditions are met:
+
+**For All Contracts:**
+1. ✅ ALL vehicle assignments have status RETURNED or REPLACED
+2. ✅ NO vehicle assignments have status DELIVERED
+3. ✅ No outstanding disputes
+
+**Additional Requirements by Contract Duration:**
+
+**Short-Term Contracts (<30 days):**
+- Settlement processed (single payment at completion)
+
+**Long-Term Contracts (≥30 days):**
+- Final settlement (IsFinalSettlement=true) processed
+- Contract.FinalSettlementProcessed = true
+
+**Completion Blocking:**
+- Contract completion is BLOCKED if ANY vehicle has status DELIVERED
+- Contract completion is BLOCKED if final settlement not processed (long-term contracts)
+- Check vehicle assignment status, NOT LineItem.QuantityActive
+
+**Example Scenarios:**
+
+**Scenario 1: Short-Term Contract (15 days)**
+```
+Day 1: All vehicles delivered (Status: DELIVERED)
+Day 15: All vehicles returned (Status: RETURNED)
+Day 15: Settlement processed
+Day 15: Contract status → COMPLETED ✅
+```
+
+**Scenario 2: Long-Term Contract (90 days)**
+```
+Day 1: All vehicles delivered (Status: DELIVERED)
+Day 90: All vehicles returned (Status: RETURNED)
+Day 90: Contract status remains ACTIVE (not COMPLETED) ⏳
+Day 90: Final settlement (Cycle 3) processed
+Day 90: Contract.FinalSettlementProcessed = true
+Day 90: Contract status → COMPLETED ✅
+```
+
+**Scenario 3: Blocked Completion**
+```
+Contract with 3 vehicles:
+- Vehicle 1: RETURNED ✅
+- Vehicle 2: RETURNED ✅
+- Vehicle 3: DELIVERED ❌ (still with business)
+
+Result: Contract completion BLOCKED
+Action: Wait for Vehicle 3 to be returned
+```
+
+---
+
+### 14.2 Settlement Schedule Lifecycle (Updated)
+
+**Rule BR-056: Simplified Settlement Schedule Status Flow**
+
+**Previous Flow (Deprecated):**
+```
+PENDING → LOCKED → SETTLED
+```
+
+**New Simplified Flow:**
+```
+PENDING → SETTLED (when cycle end date reached AND settlement processed)
+PENDING → CANCELLED (if contract terminated early)
+```
+
+**Rationale:**
+- LOCKED status removed for simplicity
+- Settlement processing checks `CycleEndDate <= current date` directly
+- No separate locking step required
+
+**Settlement Processing Eligibility:**
+- Schedules eligible for processing when:
+  - Status = PENDING
+  - CycleEndDate ≤ current date
+- Settlement job queries and processes eligible schedules directly
+
+---
+
+### 14.3 Final Settlement Marker
+
+**Rule BR-057: Final Settlement Identification**
+
+**Purpose:** Identify the last settlement cycle for a contract to trigger completion checks.
+
+**Implementation:**
+- Last settlement schedule for a contract has `IsFinalSettlement = true`
+- Marked at schedule creation time
+- Used to trigger contract completion check after processing
+
+**When Final Settlement Processed:**
+1. Settlement job processes schedule with IsFinalSettlement = true
+2. Contract.FinalSettlementProcessed set to true
+3. Check if all vehicles returned/replaced
+4. If yes: Contract status → COMPLETED
+5. If no: Contract waits for remaining vehicles to be returned
+
+**Contract Extension Impact:**
+- When contract extended: Old final schedule unmarked (IsFinalSettlement = false)
+- New schedules generated for extension period
+- New last schedule marked as final (IsFinalSettlement = true)
+- Contract.FinalSettlementProcessed reset to false
+
+---
+
+## 15. SETTLEMENT CALCULATION WITH VEHICLE LIFECYCLE
+
+### 15.1 Vehicle Earnings Calculation
+
+**Rule BR-058: Vehicle-Level Earnings Calculation (Updated)**
+
+**Purpose:** Calculate earnings based on actual vehicle delivery and return dates, accounting for replacements and maintenance.
+
+**Calculation Formula:**
+
+For each vehicle assignment:
+```
+IF DeliveredAt is NULL: 
+  Skip (vehicle not delivered yet)
+
+ActiveStart = MAX(DeliveredAt, SettlementWindowStart)
+ActiveEnd = MIN(ReturnedAt ?? ContractEnd, SettlementWindowEnd)
+
+IF ActiveEnd <= ActiveStart: 
+  Skip (vehicle not active in settlement window)
+
+DaysActive = CEILING((ActiveEnd - ActiveStart).TotalDays)
+VehicleEarnings = DailyRate × DaysActive
+```
+
+**Key Principles:**
+- Earnings calculated per vehicle, not per line item
+- Only delivered vehicles (DeliveredAt not null) count
+- Vehicle earns from DeliveredAt until ReturnedAt (or contract end)
+- Partial delivery: Undelivered vehicles contribute 0
+- Late delivery: Vehicle earns only from actual delivery date
+- Early return: Vehicle stops earning at return date
+
+---
+
+### 15.2 Replacement Handling in Settlements
+
+**Rule BR-059: Seamless Earnings Calculation for Replacements**
+
+**Principle:** Replacements should result in continuous earnings with no gaps or overlaps.
+
+**Calculation:**
+```
+Vehicle A (Original):
+- DeliveredAt: Day 1
+- ReturnedAt: Day 15 (replaced)
+- Status: REPLACED
+- Earnings: Day 1-15 = 15 days
+
+Vehicle B (Replacement):
+- DeliveredAt: Day 15 (replacement time)
+- ReturnedAt: Day 30
+- Status: RETURNED
+- Earnings: Day 15-30 = 15 days
+
+Total Earnings: 30 days (seamless, no gaps)
+```
+
+**Settlement Processing:**
+- Both assignments processed in same settlement
+- No double-counting (ReturnedAt of old = DeliveredAt of new)
+- Provider paid for continuous 30 days
+
+---
+
+### 15.3 Maintenance Period Exclusion
+
+**Rule BR-060: Maintenance Period Not Counted in Earnings**
+
+**Principle:** Provider not paid for periods when vehicle is in maintenance.
+
+**Implementation:**
+- Maintenance periods tracked separately
+- Earnings calculation skips maintenance periods
+- Vehicle status MAINTENANCE indicates non-earning period
+
+**Example:**
+```
+Vehicle Assignment:
+- DeliveredAt: Day 1
+- Maintenance Period: Day 10-15 (5 days)
+- ReturnedAt: Day 30
+
+Earnings Calculation:
+- Active Period 1: Day 1-10 = 10 days
+- Maintenance: Day 10-15 = 0 days (not counted)
+- Active Period 2: Day 15-30 = 15 days
+- Total Earnings: 25 days (not 30)
+```
+
+**Note:** For MVP, maintenance tracking is simplified. POST-MVP may include detailed maintenance period tracking with start/end timestamps.
+
+---
+
+## 16. CONTRACT EXTENSION RULES
+
+### 16.1 Contract Extension Prerequisites
+
+**Rule BR-061: Extension Eligibility**
+
+**Prerequisites:**
+- Only long-term contracts (≥30 days) can be extended
+- New end date MUST be after current end date
+- Contract status MUST NOT be COMPLETED or TERMINATED
+- Both business and provider must agree (mutual consent)
+
+**Not Eligible for Extension:**
+- Short-term contracts (<30 days) - Must create new RFQ
+- Completed contracts
+- Terminated contracts
+- Contracts with active disputes
+
+---
+
+### 16.2 Contract Extension Process
+
+**Rule BR-062: Extension Workflow**
+
+**Process Steps:**
+
+1. **Validation:**
+   - Verify contract is long-term (≥30 days)
+   - Verify new end date > current end date
+   - Verify contract status is active
+   - Verify both parties consent
+
+2. **Unmark Current Final Settlement:**
+   - Find current final settlement schedule (IsFinalSettlement = true)
+   - Set IsFinalSettlement = false
+
+3. **Generate New Settlement Schedules:**
+   - Start date: (CurrentEndDate + 1 day)
+   - End date: NewEndDate
+   - Continue cycle numbering from last schedule
+   - Use same daily rate as original contract
+
+4. **Mark New Final Settlement:**
+   - Mark last new schedule as final (IsFinalSettlement = true)
+
+5. **Update Contract:**
+   - Set Contract.EndDate = NewEndDate
+   - Set Contract.FinalSettlementProcessed = false
+   - Record extension reason
+
+**Example:**
+
+**Original Contract:**
+- Start: Jan 1, 2026
+- End: Mar 31, 2026 (90 days)
+- Schedules: Cycle 1 (Jan), Cycle 2 (Feb), Cycle 3 (Mar - IsFinalSettlement=true)
+
+**Extension to Jun 30, 2026:**
+1. Unmark Cycle 3 as final (IsFinalSettlement = false)
+2. Generate new schedules:
+   - Cycle 4 (Apr 1-30)
+   - Cycle 5 (May 1-31)
+   - Cycle 6 (Jun 1-30, IsFinalSettlement=true)
+3. Update Contract.EndDate = Jun 30, 2026
+4. Reset Contract.FinalSettlementProcessed = false
+
+---
+
+### 16.3 Multiple Extensions
+
+**Rule BR-063: Repeated Contract Extensions**
+
+**Allowed:**
+- Contracts can be extended multiple times
+- Each extension follows same process (BR-062)
+- Settlement schedules form continuous chain
+
+**Constraints:**
+- Each extension requires mutual consent
+- Extension cannot skip months (must be continuous)
+- Maximum extension limit: 12 months per extension (configurable)
+
+**Example - Multiple Extensions:**
+```
+Original: Jan 1 - Mar 31 (3 months)
+Extension 1: Apr 1 - Jun 30 (3 months added)
+Extension 2: Jul 1 - Sep 30 (3 months added)
+Total Duration: 9 months
+Settlement Cycles: 9 (continuous)
+```
+
+---
+
+## APPENDIX C: Database Schema Updates
+
+### C.1 Vehicle Assignment Lifecycle Fields
+
+**Table:** `contracts_schema.contract_vehicle_assignments`
+
+**New Columns:**
+- `returned_at` (timestamptz, nullable) - Timestamp when vehicle returned or replaced
+- `replaced_by_assignment_id` (uuid, nullable) - Links to replacement assignment
+- `maintenance_reason` (varchar(500), nullable) - Reason for maintenance
+
+**Updated Status Values:**
+- ASSIGNED
+- DELIVERED
+- RETURNED
+- REPLACED
+- MAINTENANCE
+
+---
+
+### C.2 Settlement Schedule Final Marker
+
+**Table:** `wallet.monthly_settlement_schedules`
+
+**New Column:**
+- `is_final_settlement` (boolean, default false) - Marks last settlement cycle for contract
+
+**Updated Status Values (Simplified):**
+- PENDING (only status before settlement)
+- SETTLED (after settlement processed)
+- CANCELLED (if contract terminated)
+
+**Removed Status:**
+- ~~LOCKED~~ (deprecated for simplicity)
+
+---
+
+### C.3 Contract Completion Tracking
+
+**Table:** `contracts_schema.contracts`
+
+**New Column:**
+- `final_settlement_processed` (boolean, default false) - Tracks if final settlement completed
+
+**Purpose:**
+- Prevent premature contract completion
+- Ensure provider fully paid before contract marked complete
+
+---
+
+## APPENDIX D: Implementation Commands
+
+### D.1 Vehicle Replacement Command
+
+**Command:** `ReplaceVehicleCommand`
+
+**Purpose:** Handle vehicle replacement during active contract
+
+**Parameters:**
+- ContractId (Guid)
+- OldVehicleId (Guid)
+- NewVehicleId (Guid)
+- Reason (string)
+
+**Validation:**
+- Old vehicle must be DELIVERED or ASSIGNED
+- New vehicle must be APPROVED and available
+- New vehicle must match contract specifications
+
+**Actions:**
+1. Create new vehicle assignment for replacement
+2. Mark new assignment as DELIVERED
+3. Mark old assignment as REPLACED
+4. Link assignments via ReplacedByAssignmentId
+5. Update vehicle statuses
+
+---
+
+### D.2 Contract Extension Command
+
+**Command:** `ExtendContractCommand`
+
+**Purpose:** Extend long-term contract with automatic schedule regeneration
+
+**Parameters:**
+- ContractId (Guid)
+- NewEndDate (DateTime)
+- Reason (string)
+
+**Validation:**
+- Contract must be long-term (≥30 days)
+- New end date must be after current end date
+- Contract must not be COMPLETED or TERMINATED
+
+**Actions:**
+1. Validate extension prerequisites
+2. Unmark current final settlement schedule
+3. Generate new settlement schedules
+4. Mark new last schedule as final
+5. Update contract end date
+6. Reset FinalSettlementProcessed flag
 
 ---
 

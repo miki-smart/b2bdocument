@@ -73,7 +73,8 @@ Contracts/
 │   │
 │   ├── Events/
 │   │   ├── ContractCreatedEvent.cs
-│   │   ├── ContractActivatedEvent.cs
+│   │   ├── ContractEscrowLockedEvent.cs  ← NEW: Published after escrow lock
+│   │   ├── ContractActivatedEvent.cs     ← Updated: Published when ALL vehicles delivered
 │   │   ├── ContractCompletedEvent.cs
 │   │   ├── ContractTerminatedEvent.cs
 │   │   ├── VehicleAssignedEvent.cs
@@ -796,17 +797,46 @@ public class VehicleAssignedEvent : INotification
 ```
 **Consumed by:** Delivery Module (creates delivery task)
 
-### ContractActivatedEvent
+### ContractEscrowLockedEvent (NEW)
+
+**Published by:** Finance Module (ContractCreatedEventHandler)  
+**Trigger:** Escrow successfully locked after contract creation  
+**NOTE:** This is NOT contract activation. Published BEFORE vehicle assignment/delivery.
+
 ```csharp
-public class ContractActivatedEvent : INotification
-{
-    public Guid ContractId { get; set; }
-    public Guid BusinessId { get; set; }
-    public Guid ProviderId { get; set; }
-    public DateTime ActivatedAt { get; set; }
-}
+public record ContractEscrowLockedEvent(
+    Guid ContractId,
+    Guid BusinessId,
+    Guid ProviderId,
+    string ContractNumber,
+    decimal EscrowAmount,
+    decimal TotalContractValue,
+    DateTime LockedAt) : INotification;
 ```
-**Consumed by:** Notification Module, Finance Module
+**Consumed by:** Notifications Module (sends "Escrow Locked" notifications)
+
+---
+
+### ContractActivatedEvent (UPDATED)
+
+**Published by:** Contracts Module (DeliveryConfirmedEventHandler)  
+**Trigger:** ALL awarded vehicles have been delivered and verified via OTP  
+**NOTE:** This is TRUE contract activation. Settlement schedules are generated on first delivery.
+
+```csharp
+public record ContractActivatedEvent(
+    Guid ContractId,
+    Guid BusinessId,
+    Guid ProviderId,
+    string ContractNumber,
+    decimal TotalAmount,
+    DateTime StartDate,
+    DateTime EndDate,
+    DateTime ActivatedAt,
+    int TotalVehiclesDelivered,
+    DateTime FirstDeliveryAt) : INotification;
+```
+**Consumed by:** Notifications Module, Identity Module (trust score update)
 
 ### ContractTimeoutEvent
 ```csharp
@@ -1008,20 +1038,24 @@ public class DeliveryReturnConfirmedEventHandler : INotificationHandler<Delivery
 **State Progression:**
 ```
 BidAwardedEvent → PENDING_ESCROW 
-                → EscrowLockedEvent → PENDING_VEHICLE_ASSIGNMENT
+                → ContractEscrowLockedEvent → PENDING_VEHICLE_ASSIGNMENT
                 → VehicleAssignedEvent → PENDING_DELIVERY
-                → DeliveryConfirmedEvent + EscrowLockedEvent → ACTIVE
+                → DeliveryConfirmedEvent (first) → Generate Settlement Schedule (BR-031A)
+                → DeliveryConfirmedEvent (last) → ACTIVE + ContractActivatedEvent
 ```
 
 1. **Initial State:** Contract created in `PENDING_ESCROW` status
-2. **Activation Prerequisites (BR-016):** Contract becomes `ACTIVE` **only when BOTH** conditions are met:
-   - ✅ Escrow locked (`EscrowLockedAt` is set)
-   - ✅ First delivery confirmed (`FirstDeliveryConfirmedAt` is set)
-3. **Activation Timeout (BR-017):** Contract must activate within **5 days** of creation
+2. **Escrow Lock:** Finance module locks escrow, publishes `ContractEscrowLockedEvent`
+3. **Vehicle Assignment:** Provider assigns vehicles → `PENDING_DELIVERY`
+4. **First Delivery:** Settlement schedule generated (BR-031A: anchored from first delivery date)
+5. **Full Delivery (BR-016):** Contract becomes `ACTIVE` when ALL vehicles are delivered
+   - `ContractActivatedEvent` published only when all `QuantityDelivered == QuantityAwarded`
+   - Partial delivery → `PARTIALLY_DELIVERED` status, operations continue
+6. **Activation Timeout (BR-017):** Contract must activate within **5 days** of creation
    - `ActivationTimeoutAt` = `CreatedAt` + 5 days
    - If timeout reached without activation → `TIMEOUT_PENDING` status
    - Background job checks timeouts every hour
-4. **State Transitions:**
+7. **State Transitions:**
    - `PENDING_ESCROW` → `PENDING_VEHICLE_ASSIGNMENT` (when escrow locks)
    - `PENDING_VEHICLE_ASSIGNMENT` → `PENDING_DELIVERY` (when first vehicle assigned)
    - `PENDING_DELIVERY` → `ACTIVE` (when delivery confirmed AND escrow locked)

@@ -235,7 +235,14 @@ Note: PARTIALLY_DELIVERED is optional - only occurs when contract has multiple v
 
 **Business Rule Reference:** BR-016, BR-016A
 
-**Note:** Contracts in `PARTIALLY_DELIVERED` status are considered active for delivered vehicles. The contract operates with the subset of vehicles that have been delivered and verified. Settlement is calculated based on actual delivered vehicles.
+**Note: Contract-Level Schedule, Vehicle-Level Earnings (Partial Delivery/Return Safe)**
+
+Contracts in `PARTIALLY_DELIVERED` status are considered operational for delivered vehicles only. To keep settlement deterministic under partial delivery, late delivery, and partial return:
+- **Schedule windows are contract-level** (cycle boundaries). They define **when** settlement is calculated.
+- **Earnings are vehicle-level** and computed from actual activity inside a window:
+  - `Gross = Σ(UnitPricePerDay × ActiveDaysInWindow)` across delivered vehicles
+  - `ActiveDaysInWindow` is the overlap of `[DeliveredAt, ReturnedAt)` with the settlement window.
+- **Undelivered vehicles** contribute `0` until delivered (OTP verified). **Late-delivered vehicles** start contributing from `DeliveredAt`. **Returned vehicles** stop contributing after `ReturnedAt`.
 
 ---
 

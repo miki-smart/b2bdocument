@@ -161,7 +161,8 @@ async function handleEvent(event) {
 | `ContractCreationFailedEvent` | Contract creation fails | Contracts | Marketplace, Finance, Notifications |
 | `VehicleAssignedEvent` | Provider assigns vehicle | Contracts | Delivery, Identity, Notifications |
 | `VehicleAssignmentFailedEvent` | Vehicle assignment validation fails | Contracts | Delivery, Notifications |
-| `ContractActivatedEvent` | Contract meets activation criteria | Contracts | Finance, Delivery, Identity, Notifications |
+| `ContractEscrowLockedEvent` | Escrow locked, awaiting vehicle assignment | Finance | Contracts, Notifications |
+| `ContractActivatedEvent` | ALL vehicles delivered and verified | Contracts | Finance, Delivery, Identity, Notifications |
 | `ContractActivationTimeoutEvent` | Contract stuck in pending > 5 days | Contracts | Notifications, Support |
 | `ContractCompletedEvent` | Contract rental period ends | Contracts | Finance, Identity, Notifications |
 | `ContractAlteredEvent` | Contract modified (vehicle swap, etc.) | Contracts | Finance, Delivery, Notifications |
@@ -188,7 +189,7 @@ async function handleEvent(event) {
 |-----------|---------|--------------|---------------------|
 | `DeliveryScheduledEvent` | Delivery date/location set | Delivery | Contracts, Notifications |
 | `OTPGeneratedEvent` | Provider requests OTP | Delivery | Notifications |
-| `DeliveryConfirmedEvent` | Provider enters OTP successfully | Delivery | Contracts, Identity, Notifications |
+| `DeliveryConfirmedEvent` | Provider enters OTP successfully | Delivery | Contracts (activate + settlement schedule), Identity (trust score), Notifications (business + provider) |
 | `DeliveryRejectedEvent` | Business rejects delivery (no OTP shared) | Delivery | Contracts, Marketplace, Notifications |
 | `DeliveryNoShowEvent` | Business no-show at delivery | Delivery | Contracts, Identity, Notifications |
 | `VehicleReturnedEvent` | Vehicle returned at contract end | Delivery | Contracts, Finance, Notifications |
@@ -351,12 +352,56 @@ async function handleEvent(event) {
 }
 ```
 
+#### `ContractEscrowLockedEvent` (NEW)
+
+**Published by:** Finance Module (ContractCreatedEventHandler)  
+**Trigger:** Escrow successfully locked after contract creation  
+**NOTE:** This is NOT contract activation. Contract is activated only after ALL vehicles are delivered.
+
+```json
+{
+  "eventId": "820e8400-e29b-41d4-a716-446655440099",
+  "eventType": "ContractEscrowLockedEvent",
+  "eventVersion": "1.0",
+  "timestamp": "2025-12-21T10:32:00Z",
+  "correlationId": "rfq-12345-award-flow",
+  "causationId": "contract-created-event-id",
+  "aggregateId": "contract-11111",
+  "aggregateType": "Contract",
+  "payload": {
+    "contractId": "contract-11111",
+    "businessId": "business-789",
+    "providerId": "provider-456",
+    "contractNumber": "CON-2025-0001",
+    "escrowAmount": 50000.00,
+    "totalContractValue": 150000.00,
+    "lockedAt": "2025-12-21T10:32:00Z"
+  },
+  "metadata": {
+    "publisherId": "finance-service",
+    "userId": "system",
+    "sessionId": null
+  }
+}
+```
+
+**Subscribers:**
+- **Contracts Module:** Update contract status to PENDING_VEHICLE_ASSIGNMENT
+- **Notifications Module:** Send "Escrow Locked" notifications to business and provider
+
+---
+
 #### `ContractActivatedEvent`
+
+**Published by:** Contracts Module (DeliveryConfirmedEventHandler)  
+**Trigger:** ALL awarded vehicles have been delivered and verified via OTP  
+**NOTE:** This is TRUE contract activation. Settlement schedules are generated on first delivery, not here.
+
 ```json
 {
   "eventId": "850e8400-e29b-41d4-a716-446655440003",
   "eventType": "ContractActivatedEvent",
-  "eventVersion": "1.0",
+  "eventVersion": "2.0",
   "timestamp": "2025-12-25T09:00:00Z",
   "correlationId": "rfq-12345-award-flow",
   "causationId": "delivery-confirmed-event-id",
@@ -366,13 +411,14 @@ async function handleEvent(event) {
     "contractId": "contract-11111",
     "providerId": "provider-456",
     "businessId": "business-789",
+    "contractNumber": "CON-2025-0001",
     "status": "ACTIVE",
-    "activationTimestamp": "2025-12-25T09:00:00Z",
-    "escrowLocked": true,
-    "vehiclesDelivered": true,
-    "vehicleIds": ["vehicle-001", "vehicle-002", "vehicle-003"],
-    "actualStartDate": "2025-12-25",
-    "expectedEndDate": "2026-03-25"
+    "totalAmount": 150000.00,
+    "startDate": "2025-12-25",
+    "endDate": "2026-03-25",
+    "activatedAt": "2025-12-25T09:00:00Z",
+    "totalVehiclesDelivered": 3,
+    "firstDeliveryAt": "2025-12-23T14:30:00Z"
   },
   "metadata": {
     "publisherId": "contracts-service",
@@ -381,6 +427,10 @@ async function handleEvent(event) {
   }
 }
 ```
+
+**Subscribers:**
+- **Notifications Module:** Send "Contract Activated" notifications to business and provider
+- **Identity Module:** Update provider trust score (successful delivery)
 
 #### `ContractCompletedEvent`
 ```json
@@ -1155,6 +1205,62 @@ async function handleDeliveryConfirmedEvent(event) {
 }
 ```
 
+#### Handler 3: Notifications Module - Send Delivery Confirmations
+```javascript
+Module: Notifications
+Handler: DeliveryConfirmedNotificationHandler
+Priority: MEDIUM
+Order: 3
+
+async function handleDeliveryConfirmedEvent(event) {
+  const { contractId, vehicleId, deliveredAt } = event.payload;
+  
+  const contract = await getContract(contractId);
+  const vehicle = await getVehicle(vehicleId);
+  const business = await getBusiness(contract.businessId);
+  const provider = await getProvider(contract.providerId);
+  
+  const payload = {
+    contractNumber: contract.contractNumber,
+    vehiclePlateNumber: vehicle.licensePlate,
+    vehicleMake: vehicle.make,
+    vehicleModel: vehicle.model,
+    deliveredAt: deliveredAt,
+    businessName: business.name,
+    providerName: provider.name
+  };
+  
+  // Notify BUSINESS (Email, SMS, In-App)
+  await sendNotification({
+    recipients: [business.userId],
+    channels: ['email', 'sms', 'in_app'],
+    templates: {
+      email: 'delivery_confirmed',
+      sms: 'delivery_confirmed_sms',
+      inApp: 'delivery_confirmed_inapp'
+    },
+    payload
+  });
+  
+  // Notify PROVIDER (Email, SMS, In-App) - Confirmation of successful handover
+  await sendNotification({
+    recipients: [provider.userId],
+    channels: ['email', 'sms', 'in_app'],
+    templates: {
+      email: 'delivery_confirmed_provider',
+      sms: 'delivery_confirmed_provider_sms',
+      inApp: 'delivery_confirmed_provider_inapp'
+    },
+    payload
+  });
+}
+```
+
+**Provider Notification Templates:**
+- `delivery_confirmed_provider`: "Vehicle [PlateNumber] successfully delivered to [BusinessName] for Contract [ContractNumber]"
+- `delivery_confirmed_provider_sms`: "Vehicle [PlateNumber] delivered. Contract [ContractNumber] now active."
+- `delivery_confirmed_provider_inapp`: "Delivery confirmed for [VehicleMake] [VehicleModel]"
+
 ---
 
 ### 5.5 ContractCompletedEvent Handlers
@@ -1432,13 +1538,15 @@ Step 1: BidAwardedEvent (Marketplace)
   ↓
 Step 2: ContractCreatedEvent (Contracts)
   ↓ [Compensating Action: Cancel Contract if next step fails]
-Step 3: EscrowLockedEvent (Finance)
+Step 3: ContractEscrowLockedEvent (Finance) ← Escrow locked notification sent
   ↓ [Compensating Action: Release Escrow if next step fails]
 Step 4: VehicleAssignedEvent (Contracts)
   ↓ [Compensating Action: Unassign Vehicles if delivery fails]
-Step 5: DeliveryConfirmedEvent (Delivery)
+Step 5: DeliveryConfirmedEvent (Delivery) - First vehicle
+  ↓ → Generate Settlement Schedule (BR-031A: anchored from first delivery)
+Step 6: DeliveryConfirmedEvent (Delivery) - Last vehicle
   ↓
-Step 6: ContractActivatedEvent (Contracts)
+Step 7: ContractActivatedEvent (Contracts) ← TRUE activation (all vehicles delivered)
 ```
 
 **Compensating Actions:**
@@ -1517,13 +1625,17 @@ async function handleContractCreatedEvent(event) {
         ↓
     ContractCreatedEvent (Contracts)
         ↓
-    EscrowLockedEvent (Finance)
+    ContractEscrowLockedEvent (Finance) ← Notifications sent: "Escrow locked, assign vehicles"
         ↓
     VehicleAssignedEvent (Contracts)
         ↓
-    DeliveryConfirmedEvent (Delivery)
+    DeliveryConfirmedEvent (Delivery) - First vehicle
         ↓
-    ContractActivatedEvent (Contracts)
+    [Generate Settlement Schedule - BR-031A: anchored from first delivery date]
+        ↓
+    DeliveryConfirmedEvent (Delivery) - Last vehicle
+        ↓
+    ContractActivatedEvent (Contracts) ← TRUE activation, all vehicles delivered
 ```
 
 ### A.2 Error Path: Escrow Lock Fails
