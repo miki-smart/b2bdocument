@@ -1,1512 +1,235 @@
 # Movello MVP - Module Integration Specification
-## Module Communication Patterns & Dependencies - Version 1.0
+## Module Communication Patterns & Dependencies
 
-**Document Status:** AUTHORITATIVE  
-**Date:** December 21, 2025  
-**Related Documents:** 
-- MVP_AUTHORITATIVE_BUSINESS_RULES.md
-- MVP_EVENT_CATALOG_AND_HANDLERS.md  
-**Review Status:** ✅ Approved by Business Owner
+**Version:** 2.0 (rewritten against running code)
+**Last verified against code: 2026-07-23**
+**Original version:** 1.0, dated December 21, 2025 — described a schema-per-module, message-bus-style architecture that was never built. Preserved only in git history.
+**Related documents:** [`project-docs/18_Implementation_Coverage_Audit.md`](../../../../project-docs/18_Implementation_Coverage_Audit.md), [`backlog/mvp/epic-06-contract-management.md`](../../../../backlog/mvp/epic-06-contract-management.md), [`project-docs/service-specs/contract-engine-spec.md`](../../../../project-docs/service-specs/contract-engine-spec.md), [`backlog/post-mvp/epic-21-direct-rental.md`](../../../../backlog/post-mvp/epic-21-direct-rental.md), [`backlog/mvp/epic-10-monthly-renewal-settlement.md`](../../../../backlog/mvp/epic-10-monthly-renewal-settlement.md), [`MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md`](./MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md), [`MVP_DISPUTE_RESOLUTION_WORKFLOW.md`](./MVP_DISPUTE_RESOLUTION_WORKFLOW.md), [`architecture/auth-service-microservice-spec.md`](../../../../architecture/auth-service-microservice-spec.md) (the sibling doc this rewrite follows the same current-vs-proposed pattern from)
 
 ---
 
-## Document Purpose
+## 0. What changed in this rewrite
 
-This document defines how modules communicate with each other in the Movello MVP platform, including:
-- Module boundaries and responsibilities
-- Read patterns (synchronous database queries)
-- Write patterns (asynchronous events)
-- Module dependency graph
-- Shared data access rules
-- Master data caching strategy
-- API boundaries and contracts
+Version 1.0 of this document described an architecture that does not exist in the codebase:
 
----
+- **A message-bus/event-broker integration style** ("Publish Event" to a broker, a transactional outbox table per module, a background `EventOutboxPublisher` worker). The real system uses **in-process MediatR domain events** — `IMediator.Publish(...)` calling `INotificationHandler<TEvent>` implementations synchronously in the same request/process, inside the same `Marketplace.API` ASP.NET Core process. There is no message broker, no outbox table, and no separate publisher worker anywhere in the backend.
+- **Per-module database schemas** (`marketplace_schema`, `contracts_schema`, `finance_schema`, etc.) with cross-schema SQL joins shown as example queries. The real system uses **one shared Postgres database with no schema-per-module isolation** — snake_case tables (`contracts`, `contract_line_items`, `wallet_accounts`, `settlement_cycles`, ...) all live in the same default schema, accessed through one shared EF Core `DbContext` per module's repository classes, not raw cross-schema SQL.
+- **A `Disputes` module** with its own schema and API. **This module does not exist.** The backend has exactly 8 module folders under `Modules/`: `Auth`, `Contracts`, `Delivery`, `Finance`, `Identity`, `Marketplace`, `MasterData`, `Notifications`. There is no `Modules/Disputes` anywhere in the codebase — see [`MVP_DISPUTE_RESOLUTION_WORKFLOW.md`](./MVP_DISPUTE_RESOLUTION_WORKFLOW.md) for the full accounting of what does and does not exist around disputes.
+- **Redis-cached MasterData with a 6-hourly cache-warm job.** No Redis dependency or cache-loader job was found anywhere in the backend for MasterData; MasterData is read directly from Postgres per-request through its own repositories. (If a caching layer is added later, this document should be updated to match — it is not there today.)
+- **A separate API Gateway routing requests to per-module "services."** There is one deployable (`Marketplace.API`), one `Program.cs`, one set of controllers under one process — not eight independently deployed services behind a gateway.
 
-## TABLE OF CONTENTS
-
-1. [Module Architecture Overview](#1-module-architecture-overview)
-2. [Communication Pattern Decision Matrix](#2-communication-pattern-decision-matrix)
-3. [Module Dependency Graph](#3-module-dependency-graph)
-4. [Read Patterns (Synchronous)](#4-read-patterns-synchronous)
-5. [Write Patterns (Asynchronous)](#5-write-patterns-asynchronous)
-6. [Master Data Module Integration](#6-master-data-module-integration)
-7. [Identity Module Integration](#7-identity-module-integration)
-8. [Module API Boundaries](#8-module-api-boundaries)
-9. [Data Ownership & Responsibilities](#9-data-ownership--responsibilities)
+What follows describes the real module list, the real in-process event mechanism, and the real cross-module integration points, verified directly against the code named throughout.
 
 ---
 
-## 1. MODULE ARCHITECTURE OVERVIEW
+## 1. MODULE ARCHITECTURE OVERVIEW (as implemented)
 
 ### 1.1 Module List
 
-**Core Business Modules:**
-1. **Marketplace** - RFQ, Bidding, Award management
-2. **Contracts** - Contract lifecycle, vehicle assignment
-3. **Finance** - Wallet, escrow, settlement, payments
-4. **Delivery** - Delivery scheduling, OTP verification, returns
-5. **Identity** - Users, businesses, providers, vehicles, trust score, KYC/KYB
-6. **Disputes** - Dispute creation, evidence, resolution
+`Marketplace.API` is a single .NET 9 ASP.NET Core process containing 8 module folders under `Modules/`:
 
-**Support Modules:**
-7. **MasterData** - Lookups, configurations, commission rates, contract policies
-8. **Notifications** - Email, SMS, in-app notifications (pure consumer)
+1. **Auth** — Keycloak-backed login/session/MFA-stub integration (see `architecture/auth-service-microservice-spec.md` for the full current-vs-proposed picture; not otherwise covered here)
+2. **Marketplace** — RFQ (header + `RFQLineItem[]`), per-line-item bidding (`RFQBidItem`), multi-provider split awards (`RFQBidAward`/`RFQAwardVehicleAssignment`), and Direct Rental (`DirectRentalCart/Request`) — Direct Rental lives in the Marketplace module, not a separate one
+3. **Contracts** — Contract lifecycle (18 real status strings, not the 6-value model v1.0 assumed), vehicle-assignment sub-lifecycle, dual-party OTP terms signing, termination/completion
+4. **Finance** — Wallets, double-entry ledger, escrow locks, settlement cycles/payouts, payment-gateway webhooks (Chapa/Telebirr/CBEBirr), withholding tax
+5. **Delivery** — Delivery/return OTP verification, vehicle inspection checklists
+6. **Identity** — Users, businesses, providers, vehicles, insurance, KYC/KYB, provider trust score (`TrustScoreCalculator`, provider-only — see `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` §1)
+7. **MasterData** — Lookups, commission strategies/tiers, contract/escrow/settlement policy versions and rules, vehicle types, geography, banks
+8. **Notifications** — Email/SMS/push (FCM) multi-channel provider system, admin-configurable, plus real-time SignalR hub (`NotificationHub`); a pure event consumer, does not publish domain events of its own
 
-### 1.2 Module Database Schema
+There is **no `Disputes` module**. `DISPUTED`/`ON_HOLD` exist only as unused, reserved values on the `Contract.Status` string field — see §2.4 and `MVP_DISPUTE_RESOLUTION_WORKFLOW.md` for the complete picture.
 
-Each module owns its database schema (logical separation):
+### 1.2 Data Storage (single shared database, no schema isolation)
 
 ```
-movello_db
-├── marketplace_schema
-│   ├── rfqs
-│   ├── rfq_line_items
-│   ├── bids
-│   └── awards
-├── contracts_schema
-│   ├── contracts
-│   ├── contract_vehicles
-│   └── contract_alterations
-├── finance_schema
-│   ├── wallets
-│   ├── transactions
-│   ├── escrow_locks
-│   └── settlements
-├── delivery_schema
-│   ├── deliveries
-│   ├── otp_verifications
-│   └── vehicle_returns
-├── identity_schema
-│   ├── users
-│   ├── businesses
-│   ├── providers
-│   ├── vehicles
-│   ├── insurance_records
-│   └── trust_scores
-├── disputes_schema
-│   ├── disputes
-│   ├── dispute_evidence
-│   └── dispute_resolutions
-├── masterdata_schema
-│   ├── lookups
-│   ├── lookup_types
-│   ├── commission_strategies
-│   ├── contract_policies
-│   └── vehicle_types
-└── notifications_schema
-    ├── notification_queue
-    └── notification_logs
+Marketplace.API (one process)
+│
+└── PostgreSQL (one shared database, one EF Core model per module's DbContext,
+    all tables in the default schema, snake_case naming via EFCore.NamingConventions)
+    ├── contracts, contract_line_items, contract_vehicle_assignments,
+    │   contract_terms_acceptances, contract_status_history            (Contracts)
+    ├── rfqs, rfq_line_items, rfq_bids, rfq_bid_items, rfq_bid_awards,
+    │   direct_rental_carts, direct_rental_requests                    (Marketplace)
+    ├── wallet_accounts, wallet_ledger_transactions, wallet_ledger_entries,
+    │   escrow_locks, settlement_cycles, settlement_payouts,
+    │   monthly_settlement_schedules                                   (Finance)
+    ├── delivery_sessions, delivery_return_sessions, vehicle_inspection_checklists (Delivery)
+    ├── businesses, providers, vehicles, user_accounts, insurance_records (Identity)
+    ├── lookups, lookup_types, commission_strategy_versions,
+    │   contract_policy_versions, settlement_policy_versions            (MasterData)
+    └── (Notifications persists templates/config/logs, not shown in full)
 ```
 
-### 1.3 Architecture Principles
+There is no cross-schema foreign key isolation to enforce — everything is one physical database — but modules still observe logical ownership boundaries in their repository/DbContext code (a module's repository only queries the tables it owns, plus read-only lookups against Identity/MasterData entities via EF Core navigation or explicit queries, not raw cross-schema SQL as v1.0 showed).
 
-**Principle 1: No Direct Writes Across Modules**
-- ❌ Module A cannot INSERT/UPDATE/DELETE in Module B's database schema
-- ✅ Module A publishes event → Module B subscribes and updates its own schema
+### 1.3 Architecture Principles (as implemented)
 
-**Principle 2: Read-Only Queries Allowed**
-- ✅ Modules can SELECT from Identity and MasterData schemas (read-only)
-- ✅ No foreign key constraints across module schemas
-- ✅ Eventual consistency accepted for cross-module data
+**Principle 1: No cross-module writes bypassing the owning module's domain logic**
+- A module does not directly mutate another module's entities from its own command handlers.
+- Instead: Module A's domain method fires a MediatR notification → Module B's `INotificationHandler<TEvent>` runs Module B's own command/service to update Module B's own entities.
+- This is enforced by convention and code review, not by a database-level schema boundary (since there is only one schema).
 
-**Principle 3: Event-Driven State Changes**
-- ✅ All CUD (Create, Update, Delete) operations trigger events
-- ✅ Other modules subscribe to events for state synchronization
-- ✅ MasterData is exception - no events (static config data)
+**Principle 2: Read access across modules is real and direct, via EF Core**
+- Handlers commonly query another module's `DbContext`/repository directly for read-only lookups (e.g., Finance reading `Provider.TrustScore`/tier, Contracts reading `Vehicle.Status`) — this is a normal in-process method call and/or EF query against the shared database, not a network call.
+- There is no MasterData Redis cache in the real system; MasterData reads go straight to Postgres per call.
+
+**Principle 3: Event-driven state changes are real, but in-process**
+- State changes that other modules care about are raised as MediatR notifications (`IMediator.Publish(event)`) from the owning module's domain/application layer.
+- Other modules' `INotificationHandler<TEvent>` implementations run **synchronously, in the same request pipeline, in the same process** — not asynchronously via a broker. If a handler throws, it can affect the outcome of the original request unless the calling code explicitly isolates failures (this varies by handler; it is not a guaranteed fire-and-forget style across the board).
+- There is no outbox table, no background event-publisher worker, and no at-least-once/exactly-once delivery guarantee beyond normal in-process method-call semantics.
 
 ---
 
-## 2. COMMUNICATION PATTERN DECISION MATRIX
+## 2. REAL CROSS-MODULE INTEGRATION POINTS
 
-### 2.1 When to Use Each Pattern
+This section replaces v1.0's generic decision matrix/flowchart with the actual integration points verified against code, grouped by the module pairs the task explicitly calls out.
 
-| Use Case | Pattern | Example |
-|----------|---------|---------|
-| **Data Fetching** | Direct DB Read | Finance queries Identity for business name |
-| **Validation Check** | Direct DB Read | Marketplace checks if provider is verified |
-| **Lookup/Config** | Redis Cache + DB Read | Get commission rate from MasterData |
-| **State Change** | Publish Event | Award bid → Publish BidAwardedEvent |
-| **Cross-Module Notification** | Publish Event | Contract created → Notify Finance |
-| **Multi-Step Workflow** | Saga Pattern | Award → Contract → Escrow → Delivery |
+### 2.1 Marketplace ↔ Contracts (award → contract creation)
 
-### 2.2 Decision Flowchart
+**RFQ path:**
+- A business awards one or more `RFQLineItem`s of a bid to a provider (possibly split across providers per line item — `RFQBidAward`/`RFQAwardVehicleAssignment`).
+- Marketplace fires `BidAwardedEvent`.
+- `Modules/Contracts/Application/EventHandlers/BidAwardedEventHandler.cs` handles it: groups all awards belonging to one bid-award action, resolves the provider's commission rate from `ProviderTierAssignment`/`CommissionStrategy` (MasterData, defaulting to 5% if nothing resolves), and issues `CreateContractCommand`.
+- Contract is created with `SourceType = RFQ`, status `PENDING_ESCROW`, one `ContractLineItem` per awarded line item; RFQ-sourced contracts never pre-create vehicle assignments — they always require the separate vehicle-assignment step (§2.2 of `epic-06-contract-management.md`, Story 6.3).
 
-```
-┌─────────────────────────────┐
-│ Need to communicate with    │
-│ another module?             │
-└────────────┬────────────────┘
-             │
-             ▼
-    ┌────────────────┐
-    │ Is it a read   │ YES  ┌──────────────────────────┐
-    │ operation?     ├─────►│ Use Direct DB Query      │
-    └────────┬───────┘      │ (SELECT from schema)     │
-             │ NO            └──────────────────────────┘
-             ▼
-    ┌────────────────┐
-    │ Is it MasterData│ YES  ┌──────────────────────────┐
-    │ lookup?        ├─────►│ Use Redis Cache + DB     │
-    └────────┬───────┘      │ (GET from cache)         │
-             │ NO            └──────────────────────────┘
-             ▼
-    ┌────────────────┐
-    │ Is it CUD      │ YES  ┌──────────────────────────┐
-    │ operation?     ├─────►│ Publish Event            │
-    └────────┬───────┘      │ (Event-driven)           │
-             │ NO            └──────────────────────────┘
-             ▼
-    ┌────────────────┐
-    │ Is it workflow │ YES  ┌──────────────────────────┐
-    │ orchestration? ├─────►│ Use Saga Pattern         │
-    └────────────────┘      │ (Event chain)            │
-                            └──────────────────────────┘
-```
+**Direct Rental path (parallel, not the same code path):**
+- Direct Rental is a fixed-price, non-bidding booking channel living inside the **Marketplace module** (`DirectRentalCart(Item)`, `DirectRentalRequest(LineItem/Vehicle)` entities, `DirectRentalCartController`/`DirectRentalRequestController`) — not a separate module, and not one of the numbered epics until `backlog/post-mvp/epic-21-direct-rental.md` formalized it retroactively.
+- A provider accepting (or partially accepting) a submitted request fires `DirectRentalRequestAcceptedEvent` / `...PartiallyAcceptedEvent`.
+- `Modules/Contracts/Application/EventHandlers/DirectRentalRequestAcceptedEventHandler.cs` issues `CreateDirectRentalContractCommand` — **idempotent**: if a contract already exists for that request (e.g. a retried event), it re-syncs vehicle assignments instead of duplicating the `Contract` row.
+- Contract is created with `SourceType = DIRECT_RENTAL`, linked to the originating request; unlike the RFQ path, vehicle assignments **are** pre-created immediately (the business already chose specific vehicles during browse/cart), so there is no separate post-creation vehicle-assignment step for this path (epic-21, Story 21.9).
+- Both paths converge on the same `Contract` aggregate, the same `Contract.Status` string field, and the rest of the lifecycle below — Direct Rental is an acquisition channel into the standard contract machinery, not a parallel contract model.
 
----
+### 2.2 Contracts ↔ Finance (escrow lock / release triggers)
 
-## 3. MODULE DEPENDENCY GRAPH
+**Lock, on contract creation:**
+- `Contract.Create*` factories always set the initial status to `PENDING_ESCROW` and publish `ContractCreatedEvent`.
+- `Modules/Finance/Application/EventHandlers/ContractCreatedEventHandler.cs` locks `Σ line item (UnitAmount × QuantityAwarded × min(DurationDays, 30))` from the business's `MAIN` wallet into `ESCROW`, double-entry, with 5-attempt exponential backoff (1s/2s/4s/8s/16s) on transient failure.
+- On success: `Contract.ActivateAfterEscrowLock()` moves status to `PENDING_VEHICLE_ASSIGNMENT` (RFQ default) or `PENDING_SIGNING` (Direct Rental, vehicles already assigned); `ContractEscrowLockedEvent` is published — this is **not** activation, just a successful lock.
+- On exhausted retries: `Contract.MarkAsEscrowLockFailed()` → `ESCROW_LOCK_FAILED`; a separate `EscrowTimeoutJob` (15-minute interval) later cancels any contract still stuck in `PENDING_ESCROW` past a configurable timeout (default 24h, MasterData `ESCROW_RELEASE_DELAY_HOURS`) via `Contract.Cancel()` → `CANCELLED` (a status **not present** in the C# `ContractStatus` enum at all — see `MVP_CONTRACT_STATE_MACHINE.md`).
+- **Known internal inconsistency (per the 2026-07-23 audit, §10.5):** a second, competing escrow-lock code path (`FinanceBidAwardedEventHandler`, using the MasterData policy engine) also exists but does not actually run in the live flow — only `ContractCreatedEventHandler`'s hardcoded-constant path does. The two paths also look up the platform commission wallet using two different `AccountType` strings (`"COMMISSION"` vs `"PLATFORM_COMMISSION"`) for what should be the same wallet. Flagged here so no integration work assumes both paths are equally live.
 
-### 3.1 Read Dependencies (Direct Database Queries)
+**Release, on settlement:**
+- Contract activation and delivery events do not themselves move money — settlement is a separate, scheduled process (see `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` and `epic-10-monthly-renewal-settlement.md`). On admin approval of a `SettlementPayout`, Finance debits the business `ESCROW` wallet, credits the provider `MAIN` wallet, the platform `COMMISSION` wallet, and the platform `TAX` wallet, and either refunds unused escrow (final cycle) or rolls it into the next cycle's lock (non-final cycle) — all inside `Modules/Finance/Application/Settlement/Commands/ApproveSettlementPayoutCommand.cs`. This does **not** go back through a Contracts-published event; Finance reads contract/line-item/assignment data directly (`IContractsUnitOfWork`) rather than waiting on a new Contracts event per settlement.
+- Termination/abort paths also trigger escrow refunds directly in Contracts-owned code (`AbortContractBeforeSigningCommand` refunds locked escrow back to the business `MAIN` wallet as part of the same handler, not via a round-trip event to Finance).
 
-**Who Can Query Whom (Read-Only):**
+### 2.3 Delivery ↔ Contracts (OTP/checklist confirmation → activation)
 
-```
-┌──────────────┐
-│  MasterData  │◄──────────────┐
-└──────┬───────┘               │
-       │                       │
-       │ READ                  │ READ
-       │                       │
-       ▼                       │
-┌──────────────┐       ┌───────┴──────┐
-│   Identity   │◄──────┤  Marketplace │
-└──────┬───────┘       └───────┬──────┘
-       │                       │
-       │ READ                  │ READ
-       │                       │
-       ▼                       ▼
-┌──────────────┐       ┌──────────────┐
-│   Finance    │       │  Contracts   │
-└──────────────┘       └──────────────┘
-       │                       │
-       │ READ                  │ READ
-       │                       │
-       └───────►┌──────────────┐◄──────┘
-                │  Delivery    │
-                └──────────────┘
-```
+- Delivery module confirms a vehicle handover (OTP + optional inspection checklist) and fires `DeliveryConfirmedEvent`.
+- `Modules/Contracts/Application/EventHandlers/DeliveryConfirmedEventHandler.cs` marks the corresponding `ContractVehicleAssignment` `DELIVERED`, increments `ContractLineItem.QuantityDelivered`, and recomputes contract status: `PARTIALLY_DELIVERED` while some assigned vehicles remain undelivered, `ACTIVE` once every assigned vehicle across every line item is delivered.
+- On the **first** delivery for a contract, `GenerateSettlementScheduleCommand` runs, anchoring the monthly settlement schedule to that first delivery date — not to contract creation (this is the integration point `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` §1.3 depends on).
+- On the delivery that completes the last remaining vehicle, `ContractActivatedEvent` fires — this is the one true "activation" moment in the system; it is distinct from, and later than, the dual-party OTP terms-signing step (`PENDING_SIGNING → PENDING_DELIVERY`), which is a separate mechanism from delivery confirmation entirely (Epic 06 Story 6.4 vs. Story 6.5).
+- Symmetrically, `Modules/Contracts/Application/EventHandlers/DeliveryReturnConfirmedEventHandler.cs` handles `DeliveryReturnConfirmedEvent`: marks the assignment `RETURNED`, releases the vehicle back to `APPROVED`, recomputes status toward `PARTIALLY_RETURNED`, and once every assignment is `RETURNED`, fires an admin in-app notification flagging the contract as completion-eligible (no automatic settlement or completion is triggered by this alone).
 
-**Read Dependency Table:**
+### 2.4 All modules ↔ Notifications (event fan-out)
 
-| Module | Can Read From |
-|--------|---------------|
-| Marketplace | Identity, MasterData |
-| Contracts | Identity, MasterData |
-| Finance | Identity, MasterData |
-| Delivery | Identity, MasterData, Contracts |
-| Identity | MasterData |
-| Disputes | Identity, MasterData, Contracts |
-| Notifications | All modules (read-only for notification content) |
-
-**Rules:**
-- ✅ All modules can read from MasterData
-- ✅ All modules can read from Identity (business, provider, vehicle data)
-- ✅ No circular read dependencies
-- ❌ Contracts CANNOT read from Marketplace (use events)
-- ❌ Finance CANNOT read from Contracts (use events)
+- Notifications is a **pure consumer** — it never publishes its own domain events for other modules to react to; every other module's events fan out into it.
+- Pattern: each event has a dedicated `INotificationHandler<TEvent>` class under `Modules/Notifications/EventHandlers/`, one handler class per event, e.g. `ContractCreatedNotificationHandler`, `ContractActivatedNotificationHandler`, `ContractTerminatedNotificationHandler`, `ContractCompletionRequestedNotificationHandler`, `BidAwardedNotificationHandler`, `BidRejectedNotificationHandler`, `DeliveryConfirmedNotificationHandler`, `DeliveryReturnConfirmedNotificationHandler`, `SettlementCycleGeneratedNotificationHandler`, `SettlementPayoutApprovedNotificationHandler`, `DirectRentalNotificationHandlers` (covers submit/accept/reject/expire/cancel for that channel), `DepositCompletedNotificationHandler`, plus auth/account handlers (`AccountOTPNotificationHandler`, `BusinessRegisteredNotificationHandler`, `ProviderVerifiedNotificationHandler`, etc.).
+- Each handler resolves recipient(s), renders the configured template for the enabled channels (email/SMS/push, each independently toggleable per category via `NotificationAdminController`'s 40+ admin endpoints), and dispatches — plus, for in-app notifications, pushes to the recipient's live connection via the `NotificationHub` SignalR hub if connected.
+- Gaps confirmed by the audit and still true: no automated notification is wired for `ESCROW_LOCK_FAILED` (marked `// TODO` in the handler); status-history/notification coverage is inconsistent across some Contracts transitions (e.g., the transient `SIGNED` status and some admin-only transitions don't always produce a distinct notification).
 
 ---
 
-### 3.2 Write Dependencies (Event-Driven)
+## 3. IN-PROCESS EVENT MECHANISM (replaces v1.0's message-bus/outbox pattern)
 
-**Event Publishing Flow:**
+### 3.1 How an event actually flows
 
-```
-Marketplace ──BidAwardedEvent──► Contracts
-                                      │
-                                      ├──ContractCreatedEvent──► Finance
-                                      │
-                                      └──ContractCreatedEvent──► Delivery
+```csharp
+// Illustrative shape of the real pattern — MediatR INotificationHandler, not a broker
 
-Finance ──EscrowLockedEvent──► Contracts
-                                      │
-                                      └──Update Status
+// 1. Publishing module's domain/application layer, inside a command handler,
+//    AFTER the local state change and (in most handlers) inside the same
+//    EF Core SaveChanges transaction as the state change itself:
+await _mediator.Publish(new ContractCreatedEvent(contract.Id, contract.BusinessId, ...), cancellationToken);
 
-Delivery ──DeliveryConfirmedEvent──► Contracts
-                                           │
-                                           ├──ContractActivatedEvent──► Finance
-                                           │
-                                           └──ContractActivatedEvent──► Identity
-
-Contracts ──ContractCompletedEvent──► Finance (Settlement)
-          │                           └─► Identity (Trust Score)
-          │
-          └──EarlyReturnApprovedEvent──► Finance (Settlement)
-                                          └─► Identity (Trust Score)
-
-Identity ──InsuranceExpiredEvent──► Marketplace (Suspend Vehicle)
-                                    └─► Contracts (Notify Active Contracts)
-```
-
-**Event Publishing Table:**
-
-| Publishing Module | Event | Subscribing Modules |
-|------------------|-------|---------------------|
-| Marketplace | BidAwardedEvent | Contracts, Finance, Identity |
-| Contracts | ContractCreatedEvent | Finance, Delivery, Identity |
-| Contracts | ContractActivatedEvent | Finance, Delivery, Identity |
-| Contracts | ContractCompletedEvent | Finance, Identity |
-| Finance | EscrowLockedEvent | Contracts, Identity |
-| Finance | EscrowLockFailedEvent | Contracts, Marketplace |
-| Delivery | DeliveryConfirmedEvent | Contracts, Identity |
-| Identity | InsuranceExpiredEvent | Marketplace, Contracts |
-
----
-
-## 4. READ PATTERNS (SYNCHRONOUS)
-
-### 4.1 Direct Database Query Pattern
-
-**Use Case:** Module needs data from Identity or MasterData for immediate use (validation, display, calculation)
-
-**Implementation:**
-
-```typescript
-// Example: Finance module queries Identity for business name
-
-// finance-service/src/services/wallet.service.ts
-import { getIdentityDataSource } from '@shared/database';
-
-class WalletService {
-  async getBusinessWalletBalance(businessId: string): Promise<WalletBalanceDto> {
-    // Query Finance schema for wallet
-    const wallet = await this.walletRepository.findOne({ businessId });
-    
-    // Query Identity schema for business name (read-only)
-    const identityDb = getIdentityDataSource();
-    const business = await identityDb.query(
-      'SELECT name, email FROM identity_schema.businesses WHERE id = $1',
-      [businessId]
-    );
-    
-    return {
-      businessId,
-      businessName: business[0].name,
-      balance: wallet.balance,
-      currency: wallet.currency
-    };
-  }
-}
-```
-
-**Rules:**
-- ✅ Use read-only database connection
-- ✅ Use prepared statements to prevent SQL injection
-- ✅ Handle case when data not found (eventual consistency)
-- ❌ Never use transactions across schemas
-- ❌ Never write to other module's schema
-
----
-
-### 4.2 Identity Module Read Patterns
-
-**Common Queries:**
-
-#### Query 1: Get Business Details
-```sql
--- Used by: Marketplace, Contracts, Finance, Delivery
-SELECT 
-  id,
-  name,
-  email,
-  phone,
-  status,
-  verification_status,
-  trust_score
-FROM identity_schema.businesses
-WHERE id = $1;
-```
-
-#### Query 2: Get Provider Details
-```sql
--- Used by: Marketplace, Contracts, Finance, Delivery
-SELECT 
-  id,
-  business_name,
-  email,
-  phone,
-  status,
-  verification_status,
-  trust_score,
-  tier
-FROM identity_schema.providers
-WHERE id = $1;
-```
-
-#### Query 3: Get Vehicle Details with Insurance
-```sql
--- Used by: Marketplace, Contracts, Delivery
-SELECT 
-  v.id,
-  v.provider_id,
-  v.make,
-  v.model,
-  v.year,
-  v.plate_number,
-  v.vehicle_type,
-  v.status,
-  i.policy_number,
-  i.expiry_date,
-  i.insurance_provider
-FROM identity_schema.vehicles v
-LEFT JOIN identity_schema.insurance_records i ON v.id = i.vehicle_id
-WHERE v.id = $1 AND i.is_active = true;
-```
-
-#### Query 4: Check Provider Verification Status
-```sql
--- Used by: Marketplace (bid submission validation)
-SELECT 
-  status,
-  verification_status,
-  trust_score
-FROM identity_schema.providers
-WHERE id = $1;
-```
-
-#### Query 5: Get Available Vehicles for Provider
-```sql
--- Used by: Marketplace (bid creation)
-SELECT 
-  v.id,
-  v.make,
-  v.model,
-  v.vehicle_type,
-  v.status
-FROM identity_schema.vehicles v
-INNER JOIN identity_schema.insurance_records i ON v.id = i.vehicle_id
-WHERE v.provider_id = $1
-  AND v.status = 'ACTIVE'
-  AND i.is_active = true
-  AND i.expiry_date >= CURRENT_DATE + INTERVAL '30 days';
-```
-
----
-
-### 4.3 MasterData Module Read Patterns
-
-**Common Queries:**
-
-#### Query 1: Get Commission Rate by Provider Tier
-```sql
--- Used by: Finance (settlement calculation)
-SELECT 
-  commission_rate
-FROM masterdata_schema.commission_strategies
-WHERE provider_tier = $1 AND is_active = true;
-```
-
-#### Query 2: Get Vehicle Type Details
-```sql
--- Used by: Marketplace, Contracts
-SELECT 
-  id,
-  name,
-  category,
-  features
-FROM masterdata_schema.vehicle_types
-WHERE id = $1;
-```
-
-#### Query 3: Get Contract Policy by Type
-```sql
--- Used by: Contracts (contract creation)
-SELECT 
-  early_return_penalty_type,
-  early_return_penalty_value,
-  notice_period_penalties
-FROM masterdata_schema.contract_policies
-WHERE contract_type = $1 AND is_active = true;
-```
-
-#### Query 4: Get Lookup Values
-```sql
--- Used by: All modules (dropdowns, validations)
-SELECT 
-  code,
-  display_name,
-  sort_order
-FROM masterdata_schema.lookups
-WHERE lookup_type_id = $1 AND is_active = true
-ORDER BY sort_order;
-```
-
----
-
-### 4.4 Query Performance Guidelines
-
-**Best Practices:**
-
-1. **Use Indexes:**
-```sql
--- Identity schema indexes
-CREATE INDEX idx_businesses_status ON identity_schema.businesses(status);
-CREATE INDEX idx_providers_status ON identity_schema.providers(status);
-CREATE INDEX idx_vehicles_provider_status ON identity_schema.vehicles(provider_id, status);
-CREATE INDEX idx_insurance_expiry ON identity_schema.insurance_records(expiry_date);
-```
-
-2. **Use Query Result Caching (Short-lived):**
-```typescript
-// Cache business name for 5 minutes (rarely changes)
-const cacheKey = `business:${businessId}:name`;
-const cached = await redis.get(cacheKey);
-
-if (cached) return cached;
-
-const result = await queryIdentity(businessId);
-await redis.setex(cacheKey, 300, result); // 5 min TTL
-return result;
-```
-
-3. **Batch Queries When Possible:**
-```typescript
-// Instead of N queries in loop
-const businessIds = contracts.map(c => c.businessId);
-const businesses = await queryIdentity(`
-  SELECT id, name FROM identity_schema.businesses
-  WHERE id = ANY($1)
-`, [businessIds]);
-```
-
----
-
-## 5. WRITE PATTERNS (ASYNCHRONOUS)
-
-### 5.1 Event Publishing Pattern
-
-**Use Case:** Module changes state and needs to notify other modules
-
-**Implementation:**
-
-```typescript
-// Example: Marketplace publishes BidAwardedEvent
-
-// marketplace-service/src/services/award.service.ts
-import { EventPublisher } from '@shared/events';
-
-class AwardService {
-  constructor(
-    private eventPublisher: EventPublisher,
-    private bidRepository: BidRepository
-  ) {}
-
-  async awardBid(bidId: string, userId: string): Promise<void> {
-    // 1. Update local state
-    const bid = await this.bidRepository.findById(bidId);
-    bid.status = 'AWARDED';
-    await this.bidRepository.save(bid);
-
-    // 2. Publish event
-    await this.eventPublisher.publish({
-      eventType: 'BidAwardedEvent',
-      eventVersion: '1.0',
-      aggregateId: bidId,
-      aggregateType: 'Bid',
-      payload: {
-        bidId: bid.id,
-        rfqId: bid.rfqId,
-        lineItemId: bid.lineItemId,
-        providerId: bid.providerId,
-        businessId: bid.businessId,
-        awardedQuantity: bid.quantity,
-        totalAmount: bid.totalAmount,
-        escrowAmount: bid.escrowAmount,
-        rentalPeriod: bid.rentalPeriod,
-        vehicleSpecs: bid.vehicleSpecs
-      },
-      metadata: {
-        publisherId: 'marketplace-service',
-        userId
-      }
-    });
-  }
-}
-```
-
-**Event Publishing Rules:**
-
-1. ✅ **Update local state FIRST, then publish event**
-2. ✅ **Include all necessary data in event payload** (avoid requiring subscribers to query back)
-3. ✅ **Use database transaction + outbox pattern** for guaranteed delivery
-4. ❌ **Never publish event before local state update** (can cause inconsistency)
-
----
-
-### 5.2 Transactional Outbox Pattern
-
-**Problem:** What if event publish fails after database commit?
-
-**Solution:** Store events in database, then publish asynchronously
-
-**Implementation:**
-
-```typescript
-// Outbox table in each module schema
-CREATE TABLE marketplace_schema.event_outbox (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  event_type VARCHAR(100) NOT NULL,
-  event_version VARCHAR(10) NOT NULL,
-  aggregate_id VARCHAR(100) NOT NULL,
-  aggregate_type VARCHAR(50) NOT NULL,
-  payload JSONB NOT NULL,
-  metadata JSONB NOT NULL,
-  published BOOLEAN DEFAULT false,
-  published_at TIMESTAMP,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_outbox_published ON marketplace_schema.event_outbox(published, created_at);
-```
-
-```typescript
-// Service implementation with outbox
-class AwardService {
-  async awardBid(bidId: string, userId: string): Promise<void> {
-    await this.dataSource.transaction(async (txn) => {
-      // 1. Update bid status
-      await txn.query(
-        'UPDATE marketplace_schema.bids SET status = $1 WHERE id = $2',
-        ['AWARDED', bidId]
-      );
-
-      // 2. Insert event into outbox (same transaction)
-      await txn.query(
-        `INSERT INTO marketplace_schema.event_outbox 
-         (event_type, event_version, aggregate_id, aggregate_type, payload, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        ['BidAwardedEvent', '1.0', bidId, 'Bid', eventPayload, metadata]
-      );
-    });
-    // Transaction commits - both updates guaranteed atomic
-  }
-}
-
-// Background worker publishes events from outbox
-class EventOutboxPublisher {
-  async publishPendingEvents(): Promise<void> {
-    // Run every 5 seconds
-    const events = await this.eventOutboxRepository.find({
-      published: false,
-      createdAt: LessThan(new Date(Date.now() - 1000)) // 1 sec delay
-    });
-
-    for (const event of events) {
-      try {
-        await this.eventPublisher.publish(event);
-        
-        // Mark as published
-        await this.eventOutboxRepository.update(event.id, {
-          published: true,
-          publishedAt: new Date()
-        });
-      } catch (error) {
-        // Retry next iteration
-        logger.error(`Failed to publish event ${event.id}`, error);
-      }
-    }
-  }
-}
-```
-
-**Benefits:**
-- ✅ Guaranteed event delivery (at-least-once)
-- ✅ No lost events if message broker is down
-- ✅ Audit trail of all events
-
----
-
-### 5.3 Event Subscription Pattern
-
-**Use Case:** Module subscribes to events from other modules
-
-**Implementation:**
-
-```typescript
-// Example: Contracts subscribes to BidAwardedEvent
-
-// contracts-service/src/handlers/bid-awarded.handler.ts
-import { EventSubscriber, On } from '@shared/events';
-
-@EventSubscriber()
-export class BidAwardedEventHandler {
-  constructor(
-    private contractService: ContractService,
-    private idempotencyService: IdempotencyService
-  ) {}
-
-  @On('BidAwardedEvent')
-  async handle(event: BidAwardedEvent): Promise<void> {
-    // Check idempotency
-    if (await this.idempotencyService.isProcessed(event.eventId)) {
-      logger.info(`Event ${event.eventId} already processed. Skipping.`);
-      return;
-    }
-
-    try {
-      // Create contract
-      const contract = await this.contractService.createFromBid(event.payload);
-
-      // Store idempotency key
-      await this.idempotencyService.markProcessed(event.eventId, contract.id);
-
-      logger.info(`Contract ${contract.id} created from bid ${event.payload.bidId}`);
-    } catch (error) {
-      logger.error(`Failed to handle BidAwardedEvent ${event.eventId}`, error);
-      throw error; // Will trigger retry
-    }
-  }
-}
-```
-
-**Idempotency Implementation:**
-
-```sql
--- Idempotency table in each module schema
-CREATE TABLE contracts_schema.event_idempotency (
-  event_id UUID PRIMARY KEY,
-  event_type VARCHAR(100) NOT NULL,
-  processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  result_id VARCHAR(100) -- ID of created entity (e.g., contract ID)
-);
-
-CREATE INDEX idx_event_idempotency_type ON contracts_schema.event_idempotency(event_type);
-```
-
----
-
-## 6. MASTER DATA MODULE INTEGRATION
-
-### 6.1 Master Data Caching Strategy
-
-**Cache All MasterData in Redis (MVP):**
-
-```typescript
-// masterdata-service/src/cache/cache-loader.service.ts
-
-class MasterDataCacheLoader {
-  async loadAllToCache(): Promise<void> {
-    // Load commission rates
-    const commissionRates = await this.commissionRepository.findAll();
-    for (const rate of commissionRates) {
-      await redis.set(
-        `masterdata:commission:${rate.providerTier}`,
-        JSON.stringify(rate),
-        'EX',
-        86400 // 24 hour TTL
-      );
-    }
-
-    // Load vehicle types
-    const vehicleTypes = await this.vehicleTypeRepository.findAll();
-    await redis.set(
-      'masterdata:vehicle-types',
-      JSON.stringify(vehicleTypes),
-      'EX',
-      86400
-    );
-
-    // Load contract policies
-    const contractPolicies = await this.contractPolicyRepository.findAll();
-    for (const policy of contractPolicies) {
-      await redis.set(
-        `masterdata:contract-policy:${policy.contractType}`,
-        JSON.stringify(policy),
-        'EX',
-        86400
-      );
-    }
-
-    // Load lookups by type
-    const lookupTypes = await this.lookupTypeRepository.findAll();
-    for (const type of lookupTypes) {
-      const lookups = await this.lookupRepository.find({ typeId: type.id });
-      await redis.set(
-        `masterdata:lookups:${type.code}`,
-        JSON.stringify(lookups),
-        'EX',
-        86400
-      );
-    }
-
-    logger.info('Master data loaded to cache');
-  }
-
-  // Run on startup and every 6 hours
-  async scheduleRefresh(): Promise<void> {
-    await this.loadAllToCache();
-    setInterval(() => this.loadAllToCache(), 6 * 60 * 60 * 1000);
-  }
-}
-```
-
-### 6.2 Accessing Master Data from Other Modules
-
-**Pattern 1: Cache-Aside with Fallback**
-
-```typescript
-// finance-service/src/services/master-data.service.ts
-
-class MasterDataService {
-  async getCommissionRate(providerTier: string): Promise<number> {
-    // Try cache first
-    const cacheKey = `masterdata:commission:${providerTier}`;
-    const cached = await redis.get(cacheKey);
-    
-    if (cached) {
-      const data = JSON.parse(cached);
-      return data.commissionRate;
-    }
-
-    // Cache miss - query database
-    const result = await this.dataSource.query(
-      `SELECT commission_rate 
-       FROM masterdata_schema.commission_strategies 
-       WHERE provider_tier = $1 AND is_active = true`,
-      [providerTier]
-    );
-
-    if (result.length === 0) {
-      throw new Error(`Commission rate not found for tier: ${providerTier}`);
-    }
-
-    // Update cache
-    await redis.set(cacheKey, JSON.stringify(result[0]), 'EX', 86400);
-
-    return result[0].commission_rate;
-  }
-
-  async getVehicleTypes(): Promise<VehicleType[]> {
-    const cacheKey = 'masterdata:vehicle-types';
-    const cached = await redis.get(cacheKey);
-    
-    if (cached) return JSON.parse(cached);
-
-    // Cache miss
-    const result = await this.dataSource.query(
-      'SELECT * FROM masterdata_schema.vehicle_types WHERE is_active = true'
-    );
-
-    await redis.set(cacheKey, JSON.stringify(result), 'EX', 86400);
-    return result;
-  }
-}
-```
-
-### 6.3 Cache Invalidation on MasterData Update
-
-**Admin updates MasterData → Invalidate cache:**
-
-```typescript
-// masterdata-service/src/services/commission.service.ts
-
-class CommissionStrategyService {
-  async updateCommissionRate(
-    providerTier: string, 
-    newRate: number
-  ): Promise<void> {
-    // 1. Update database
-    await this.commissionRepository.update(
-      { providerTier },
-      { commissionRate: newRate }
-    );
-
-    // 2. Invalidate cache
-    const cacheKey = `masterdata:commission:${providerTier}`;
-    await redis.del(cacheKey);
-
-    // 3. Reload to cache
-    const updated = await this.commissionRepository.findOne({ providerTier });
-    await redis.set(cacheKey, JSON.stringify(updated), 'EX', 86400);
-
-    logger.info(`Commission rate updated for ${providerTier}: ${newRate}`);
-  }
-}
-```
-
-**Why MasterData doesn't publish events:**
-- ❌ Changes are infrequent (admin-driven configuration)
-- ❌ No need for real-time synchronization
-- ✅ Cache invalidation + TTL is sufficient
-- ✅ Other modules always query latest via cache-aside pattern
-
----
-
-## 7. IDENTITY MODULE INTEGRATION
-
-### 7.1 Identity as Shared Data Source
-
-**Identity module is the single source of truth for:**
-- Businesses (KYB data, status, trust score)
-- Providers (KYC data, status, trust score, tier)
-- Vehicles (ownership, insurance, status)
-- Users (authentication, roles, permissions)
-
-**All modules can READ from Identity, but only Identity can WRITE to Identity schema.**
-
----
-
-### 7.2 Trust Score Updates via Events
-
-**Identity module subscribes to events to update trust score:**
-
-```typescript
-// identity-service/src/handlers/trust-score-update.handler.ts
-
-@EventSubscriber()
-export class TrustScoreUpdateHandler {
-  @On('ContractCompletedEvent')
-  async handleContractCompleted(event: ContractCompletedEvent): Promise<void> {
-    const { providerId, performanceMetrics } = event.payload;
-
-    // Recalculate trust score
-    const newScore = await this.trustScoreService.recalculate(providerId, {
-      contractCompleted: true,
-      onTime: performanceMetrics.onTimeDelivery,
-      noShowCount: performanceMetrics.noShowCount
-    });
-
-    // Publish TrustScoreUpdatedEvent
-    await this.eventPublisher.publish({
-      eventType: 'TrustScoreUpdatedEvent',
-      aggregateId: providerId,
-      payload: {
-        providerId,
-        previousScore: event.payload.previousTrustScore,
-        newScore,
-        recalculationTrigger: 'CONTRACT_COMPLETED'
-      }
-    });
-  }
-
-  @On('DeliveryConfirmedEvent')
-  async handleDeliveryConfirmed(event: DeliveryConfirmedEvent): Promise<void> {
-    const { providerId } = event.payload;
-
-    // Update on-time delivery count
-    await this.trustScoreService.incrementOnTimeDelivery(providerId);
-  }
-
-  @On('ProviderRejectedAwardEvent')
-  async handleProviderRejection(event: ProviderRejectedAwardEvent): Promise<void> {
-    const { providerId, isFirstTimeRejection } = event.payload;
-
-    if (!isFirstTimeRejection) {
-      // Apply penalty
-      await this.trustScoreService.applyRejectionPenalty(providerId);
-    }
-  }
-}
-```
-
----
-
-### 7.3 Insurance Expiry Monitoring
-
-**Identity module runs scheduled job to check insurance expiry:**
-
-```typescript
-// identity-service/src/jobs/insurance-monitor.job.ts
-
-@Cron('0 0 * * *') // Daily at midnight
-export class InsuranceMonitorJob {
-  async checkExpiringInsurance(): Promise<void> {
-    // Find insurance expiring in 30 days
-    const expiring30Days = await this.insuranceRepository.find({
-      expiryDate: Between(
-        new Date(),
-        new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
-      ),
-      isActive: true
-    });
-
-    for (const insurance of expiring30Days) {
-      await this.eventPublisher.publish({
-        eventType: 'InsuranceExpiringEvent',
-        aggregateId: insurance.vehicleId,
-        payload: {
-          vehicleId: insurance.vehicleId,
-          providerId: insurance.providerId,
-          expiryDate: insurance.expiryDate,
-          daysUntilExpiry: calculateDays(insurance.expiryDate),
-          urgencyLevel: 'WARNING'
-        }
-      });
-    }
-
-    // Find insurance expiring in 7 days
-    const expiring7Days = await this.insuranceRepository.find({
-      expiryDate: Between(
-        new Date(),
-        new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
-      ),
-      isActive: true
-    });
-
-    for (const insurance of expiring7Days) {
-      await this.eventPublisher.publish({
-        eventType: 'InsuranceExpiringEvent',
-        aggregateId: insurance.vehicleId,
-        payload: {
-          vehicleId: insurance.vehicleId,
-          providerId: insurance.providerId,
-          expiryDate: insurance.expiryDate,
-          daysUntilExpiry: calculateDays(insurance.expiryDate),
-          urgencyLevel: 'URGENT'
-        }
-      });
-    }
-
-    // Find expired insurance
-    const expired = await this.insuranceRepository.find({
-      expiryDate: LessThan(new Date()),
-      isActive: true
-    });
-
-    for (const insurance of expired) {
-      // Suspend vehicle
-      await this.vehicleRepository.update(insurance.vehicleId, {
-        status: 'SUSPENDED'
-      });
-
-      // Publish event
-      await this.eventPublisher.publish({
-        eventType: 'InsuranceExpiredEvent',
-        aggregateId: insurance.vehicleId,
-        payload: {
-          vehicleId: insurance.vehicleId,
-          providerId: insurance.providerId,
-          expiryDate: insurance.expiryDate,
-          urgencyLevel: 'CRITICAL'
-        }
-      });
-    }
-  }
-}
-```
-
----
-
-## 8. MODULE API BOUNDARIES
-
-### 8.1 Internal API vs Events
-
-**Each module exposes:**
-1. **REST API** - For external clients (frontend, mobile apps)
-2. **Internal Service Interface** - For read-only queries from other modules (optional)
-3. **Event Handlers** - For subscribing to events
-
-**API Gateway routes requests to appropriate module:**
-
-```
-┌──────────────┐
-│  API Gateway │
-└───────┬──────┘
-        │
-        ├─── POST /rfqs ──────────► Marketplace Service
-        ├─── POST /bids ──────────► Marketplace Service
-        ├─── GET /contracts ──────► Contracts Service
-        ├─── GET /wallet ─────────► Finance Service
-        └─── GET /profile ────────► Identity Service
-```
-
-### 8.2 Module API Contracts
-
-**Marketplace Module API:**
-```
-# RFQ Management
-POST   /api/v1/marketplace/rfqs                      # Create new RFQ
-GET    /api/v1/marketplace/rfqs                      # List all RFQs (with filters)
-GET    /api/v1/marketplace/rfqs/:id                  # Get RFQ details
-PATCH  /api/v1/marketplace/rfqs/:id                  # Update RFQ (before publish)
-DELETE /api/v1/marketplace/rfqs/:id                  # Delete RFQ (draft only)
-POST   /api/v1/marketplace/rfqs/:id/publish          # Publish RFQ
-POST   /api/v1/marketplace/rfqs/:id/cancel           # Cancel RFQ
-
-# Bidding
-POST   /api/v1/marketplace/bids                      # Submit bid
-GET    /api/v1/marketplace/bids                      # List bids (filtered by RFQ/provider)
-GET    /api/v1/marketplace/bids/:id                  # Get bid details
-PATCH  /api/v1/marketplace/bids/:id                  # Update bid (before award)
-DELETE /api/v1/marketplace/bids/:id                  # Withdraw bid
-
-# Awards
-POST   /api/v1/marketplace/awards                    # Award bid(s)
-GET    /api/v1/marketplace/awards                    # List awards
-GET    /api/v1/marketplace/awards/:id                # Get award details
-```
-
-**Contracts Module API:**
-```
-# Contract Management
-GET    /api/v1/contracts                             # List contracts (filtered by business/provider)
-GET    /api/v1/contracts/:id                         # Get contract details
-PATCH  /api/v1/contracts/:id                         # Update contract (allowed modifications)
-POST   /api/v1/contracts/:id/accept                  # Provider accepts contract
-POST   /api/v1/contracts/:id/approve                 # Business approves contract alteration
-
-# Vehicle Assignment
-POST   /api/v1/contracts/:id/assign-vehicle          # Assign vehicle to contract
-DELETE /api/v1/contracts/:id/vehicles/:vehicleId     # Unassign vehicle
-
-# Contract Actions
-POST   /api/v1/contracts/:id/early-return            # Request early return
-POST   /api/v1/contracts/:id/terminate               # Terminate contract
-POST   /api/v1/contracts/:id/alter                   # Request contract alteration
-
-# Contract Reports
-GET    /api/v1/contracts/:id/history                 # Get contract history/audit trail
-GET    /api/v1/contracts/:id/documents               # Get contract documents
-```
-
-**Finance Module API:**
-```
-# Wallet Management
-GET    /api/v1/finance/wallet                        # Get user wallet balance
-POST   /api/v1/finance/wallet/deposit                # Deposit funds
-POST   /api/v1/finance/wallet/withdraw               # Withdraw funds (provider)
-GET    /api/v1/finance/wallet/balance                # Get current balance
-
-# Transactions
-GET    /api/v1/finance/transactions                  # List transactions (filtered)
-GET    /api/v1/finance/transactions/:id              # Get transaction details
-
-# Escrow Management
-GET    /api/v1/finance/escrow                        # Get all escrow locks for user
-GET    /api/v1/finance/escrow/contract/:contractId   # Get escrow for specific contract
-GET    /api/v1/finance/escrow/summary                # Get escrow summary for user
-
-# Admin Escrow Endpoints
-GET    /api/v1/finance/admin/escrow                  # Get all escrow locks (Admin)
-GET    /api/v1/finance/admin/escrow/business/:id     # Get escrow for all contracts of business
-GET    /api/v1/finance/admin/escrow/provider/:id     # Get escrow for all contracts of provider
-GET    /api/v1/finance/admin/escrow/contracts        # Get escrow for all contracts
-
-# Settlements
-GET    /api/v1/finance/settlements                   # List settlements (filtered by provider)
-GET    /api/v1/finance/settlements/:id               # Get settlement details
-POST   /api/v1/finance/settlements/:id/approve       # Approve settlement (manual review)
-POST   /api/v1/finance/settlements/:id/reject        # Reject settlement
-
-# Refunds
-POST   /api/v1/finance/refunds                       # Process refund
-GET    /api/v1/finance/refunds                       # List refunds
-GET    /api/v1/finance/refunds/:id                   # Get refund details
-```
-
-**Delivery Module API:**
-```
-# OTP Management
-POST   /api/v1/delivery/otp/generate                 # Generate OTP for delivery
-POST   /api/v1/delivery/otp/verify                   # Verify OTP
-POST   /api/v1/delivery/otp/resend                   # Resend OTP
-
-# Delivery Management
-GET    /api/v1/delivery/deliveries                   # List deliveries (filtered)
-GET    /api/v1/delivery/deliveries/:id               # Get delivery details
-GET    /api/v1/delivery/deliveries/contract/:id      # Get deliveries for contract
-GET    /api/v1/delivery/deliveries/vehicle/:id       # Get deliveries for vehicle
-POST   /api/v1/delivery/deliveries/:id/schedule      # Schedule delivery
-POST   /api/v1/delivery/deliveries/:id/reject        # Reject delivery
-
-# Vehicle Returns
-POST   /api/v1/delivery/returns                      # Initiate vehicle return
-GET    /api/v1/delivery/returns/:id                  # Get return details
-POST   /api/v1/delivery/returns/:id/confirm          # Confirm vehicle return
-```
-
-**Identity Module API:**
-```
-# Profile Management
-GET    /api/v1/identity/profile                      # Get user profile
-PUT    /api/v1/identity/profile                      # Update user profile
-PATCH  /api/v1/identity/profile                      # Partial update profile
-
-# Business Details
-GET    /api/v1/identity/businesses/:id               # Get business basic info
-GET    /api/v1/identity/businesses/:id/details       # Get complete business details
-                                                      # (info, trust score, verification, profile completeness)
-PUT    /api/v1/identity/businesses/:id               # Update business info
-
-# Provider Details
-GET    /api/v1/identity/providers/:id                # Get provider basic info
-GET    /api/v1/identity/providers/:id/details        # Get complete provider details
-                                                      # (info, trust score, verification, vehicles count, profile completeness)
-PUT    /api/v1/identity/providers/:id                # Update provider info
-
-# Vehicle Management
-POST   /api/v1/identity/vehicles                     # Add new vehicle
-GET    /api/v1/identity/vehicles                     # List vehicles (filtered by provider)
-GET    /api/v1/identity/vehicles/:id                 # Get vehicle basic info
-GET    /api/v1/identity/vehicles/:id/details         # Get complete vehicle details
-                                                      # (vehicle info, provider, insurance, recent contracts, status)
-PUT    /api/v1/identity/vehicles/:id                 # Update vehicle info
-PATCH  /api/v1/identity/vehicles/:id                 # Partial update vehicle
-DELETE /api/v1/identity/vehicles/:id                 # Remove vehicle
-
-# Insurance Management
-POST   /api/v1/identity/vehicles/:id/insurance       # Add insurance for vehicle
-PUT    /api/v1/identity/vehicles/:id/insurance/:insuranceId  # Update insurance
-DELETE /api/v1/identity/vehicles/:id/insurance/:insuranceId  # Remove insurance
-GET    /api/v1/identity/vehicles/:id/insurance       # Get all insurance records for vehicle
-
-# Trust Score
-GET    /api/v1/identity/trust-score                  # Get user trust score
-GET    /api/v1/identity/trust-score/history          # Get trust score history
-
-# Verification
-POST   /api/v1/identity/verification/submit          # Submit documents for verification
-GET    /api/v1/identity/verification/status          # Get verification status
-```
-
-**Disputes Module API:**
-```
-# Dispute Management
-POST   /api/v1/disputes                              # Create new dispute
-GET    /api/v1/disputes                              # List disputes (filtered)
-GET    /api/v1/disputes/:id                          # Get dispute details
-PATCH  /api/v1/disputes/:id                          # Update dispute
-
-# Evidence
-POST   /api/v1/disputes/:id/evidence                 # Submit evidence
-GET    /api/v1/disputes/:id/evidence                 # List evidence
-DELETE /api/v1/disputes/:id/evidence/:evidenceId     # Remove evidence
-
-# Resolution
-POST   /api/v1/disputes/:id/resolve                  # Resolve dispute (support team)
-POST   /api/v1/disputes/:id/escalate                 # Escalate dispute
-POST   /api/v1/disputes/:id/comment                  # Add comment to dispute
-```
-
-**MasterData Module API:**
-```
-# Lookups
-GET    /api/v1/masterdata/lookups                    # Get all lookups (filtered by type)
-GET    /api/v1/masterdata/lookups/types              # Get all lookup types
-GET    /api/v1/masterdata/lookups/type/:code         # Get lookups by type code
-POST   /api/v1/masterdata/lookups                    # Create new lookup (Admin)
-PUT    /api/v1/masterdata/lookups/:id                # Update lookup (Admin)
-DELETE /api/v1/masterdata/lookups/:id                # Delete lookup (Admin)
-
-# Commission Strategies
-GET    /api/v1/masterdata/commission-strategies      # List all commission strategies
-GET    /api/v1/masterdata/commission-strategies/:id  # Get commission strategy details
-POST   /api/v1/masterdata/commission-strategies      # Create commission strategy (Admin)
-PUT    /api/v1/masterdata/commission-strategies/:id  # Update commission strategy (Admin)
-DELETE /api/v1/masterdata/commission-strategies/:id  # Delete commission strategy (Admin)
-
-# Vehicle Types
-GET    /api/v1/masterdata/vehicle-types              # List all vehicle types
-GET    /api/v1/masterdata/vehicle-types/:id          # Get vehicle type details
-POST   /api/v1/masterdata/vehicle-types              # Create vehicle type (Admin)
-PUT    /api/v1/masterdata/vehicle-types/:id          # Update vehicle type (Admin)
-DELETE /api/v1/masterdata/vehicle-types/:id          # Delete vehicle type (Admin)
-
-# Contract Policies
-GET    /api/v1/masterdata/contract-policies          # List all contract policies
-GET    /api/v1/masterdata/contract-policies/:id      # Get contract policy details
-POST   /api/v1/masterdata/contract-policies          # Create contract policy (Admin)
-PUT    /api/v1/masterdata/contract-policies/:id      # Update contract policy (Admin)
-DELETE /api/v1/masterdata/contract-policies/:id      # Delete contract policy (Admin)
-
-# Payment Configurations
-GET    /api/v1/masterdata/payment-config             # Get payment configurations
-PUT    /api/v1/masterdata/payment-config             # Update payment configuration (Admin)
-
-# System Settings
-GET    /api/v1/masterdata/settings                   # Get all system settings
-GET    /api/v1/masterdata/settings/:key              # Get specific setting
-PUT    /api/v1/masterdata/settings/:key              # Update setting (Admin)
-
-# Cache Management
-POST   /api/v1/masterdata/cache/refresh              # Refresh cache (Admin)
-DELETE /api/v1/masterdata/cache/clear                # Clear cache (Admin)
-```
-
----
-
-## 9. DATA OWNERSHIP & RESPONSIBILITIES
-
-### 9.1 Module Ownership Table
-
-| Module | Owns Data | Responsibilities |
-|--------|-----------|------------------|
-| **Marketplace** | RFQs, Bids, Awards | RFQ lifecycle, bidding process, award validation |
-| **Contracts** | Contracts, Vehicle assignments | Contract lifecycle, activation logic, early returns |
-| **Finance** | Wallets, Transactions, Escrow, Settlements | Payment processing, escrow management, settlements |
-| **Delivery** | Deliveries, OTP verifications | Delivery scheduling, OTP generation/verification |
-| **Identity** | Users, Businesses, Providers, Vehicles, Trust Scores | KYC/KYB, vehicle verification, trust score calculation |
-| **Disputes** | Disputes, Evidence, Resolutions | Dispute creation, evidence collection, resolution |
-| **MasterData** | Lookups, Commission rates, Policies | Configuration management, lookup data |
-| **Notifications** | Notification queue, logs | Email/SMS/in-app notification delivery |
-
-### 9.2 Data Synchronization Examples
-
-**Example 1: Provider Name Change**
-
-```
-User updates profile in Identity module
-         ↓
-Identity updates providers table
-         ↓
-Identity publishes ProviderProfileUpdatedEvent (optional, if needed)
-         ↓
-Other modules query Identity for latest name when needed
-```
-
-**No synchronization needed** - other modules always query Identity directly for latest data.
-
----
-
-**Example 2: Contract Completion Updates Trust Score**
-
-```
-Contract completes
-         ↓
-Contracts publishes ContractCompletedEvent
-         ↓
-Identity subscribes and recalculates trust score
-         ↓
-Identity publishes TrustScoreUpdatedEvent
-         ↓
-Marketplace displays updated score on next query
-```
-
----
-
-### 9.3 Data Consistency Model
-
-**Consistency Types:**
-
-1. **Strong Consistency (within module):**
-   - All writes within same module are immediately consistent
-   - Use database transactions for multi-table updates
-
-2. **Eventual Consistency (cross-module):**
-   - Data synchronized via events
-   - Slight delay acceptable (seconds to minutes)
-   - Example: Trust score update after contract completion
-
-3. **Read-Your-Writes (user experience):**
-   - User sees their own changes immediately
-   - Other users may see changes after event processing
-
-**Handling Eventual Consistency:**
-
-```typescript
-// Example: Display contract with latest business name
-
-async getContractDetails(contractId: string): Promise<ContractDto> {
-  // Get contract (local data - strongly consistent)
-  const contract = await this.contractRepository.findById(contractId);
-
-  // Query Identity for business name (may be slightly stale, but acceptable)
-  const business = await this.queryIdentity(contract.businessId);
-
-  return {
-    ...contract,
-    businessName: business.name,
-    businessEmail: business.email
-  };
-}
-```
-
----
-
-## APPENDIX A: Communication Pattern Examples
-
-### A.1 Example: Finance Processes Settlement
-
-**Scenario:** Contract completed, Finance needs to process settlement
-
-**Steps:**
-
-1. **Contracts module publishes event:**
-```typescript
-await eventPublisher.publish({
-  eventType: 'ContractCompletedEvent',
-  aggregateId: contractId,
-  payload: {
-    contractId,
-    providerId,
-    businessId,
-    totalAmount: 150000,
-    settlementData: {
-      grossAmount: 150000,
-      providerTier: 'SILVER'
-    }
-  }
-});
-```
-
-2. **Finance module receives event:**
-```typescript
-@On('ContractCompletedEvent')
-async handleContractCompleted(event) {
-  // Query MasterData for commission rate (read from cache)
-  const commissionRate = await this.masterDataService.getCommissionRate(
-    event.payload.settlementData.providerTier
-  );
-
-  // Query Identity for provider payment details (read from DB)
-  const provider = await this.queryIdentity(event.payload.providerId);
-
-  // Calculate settlement
-  const settlement = calculateSettlement(
-    event.payload.totalAmount,
-    commissionRate,
-    TAX_RATE
-  );
-
-  // Process payment
-  await this.processSettlement(settlement, provider.paymentDetails);
-}
-```
-
-**Data Access:**
-- ✅ Event payload (push)
-- ✅ MasterData query (pull, cached)
-- ✅ Identity query (pull, direct DB)
-
----
-
-### A.2 Example: Marketplace Validates Bid Submission
-
-**Scenario:** Provider submits bid, Marketplace validates
-
-**Steps:**
-
-1. **Provider submits bid via API:**
-```http
-POST /api/v1/marketplace/bids
+// 2. Subscribing module's handler — runs synchronously, same process, same call stack:
+public class ContractCreatedEventHandler : INotificationHandler<ContractCreatedEvent>
 {
-  "rfqId": "rfq-123",
-  "lineItemId": "line-001",
-  "quantity": 3,
-  "pricePerVehicle": 5000
+    public async Task Handle(ContractCreatedEvent notification, CancellationToken cancellationToken)
+    {
+        // locks escrow, retries on failure, etc. — see §2.2
+    }
 }
 ```
 
-2. **Marketplace validates (synchronous reads):**
-```typescript
-async validateBidSubmission(providerId: string, rfqId: string): Promise<void> {
-  // Query Identity for provider status
-  const provider = await this.queryIdentity(`
-    SELECT status, verification_status, trust_score
-    FROM identity_schema.providers
-    WHERE id = $1
-  `, [providerId]);
+- **No outbox table, no background publisher worker, no message broker** (Kafka/RabbitMQ/SQS/etc.) exists anywhere in the backend. `IMediator.Publish` fans a single in-process notification out to every registered `INotificationHandler<T>` for that event type, all running in the calling thread before the publish call returns (MediatR's default in-process notification publisher).
+- **Idempotency** is handled per-handler where it matters (e.g., `DirectRentalRequestAcceptedEventHandler`/`CreateDirectRentalContractCommand` re-syncs instead of duplicating on a repeat call), not via a generic idempotency-key table as v1.0's example showed.
+- **Multiple handlers per event** are normal — e.g. `ContractCreatedEvent` is handled by both `Modules/Finance/Application/EventHandlers/ContractCreatedEventHandler.cs` (escrow lock) and `Modules/Notifications/EventHandlers/ContractCreatedNotificationHandler.cs` (notify parties) — MediatR dispatches to all registered handlers for the published type.
+- **Failure semantics:** because handlers run in-process and synchronously, an unhandled exception in one handler can propagate back to the original HTTP request depending on how/where `Publish` is awaited — this is a materially different failure mode from a broker-based system (where a subscriber failure does not affect the publisher's original transaction). No systematic review of "does handler failure roll back the publisher's own commit" was done for this rewrite; treat this as a real behavior to verify case-by-case, not a guarantee either way.
 
-  if (provider.status !== 'ACTIVE') {
-    throw new Error('Provider account is not active');
-  }
+### 3.2 Real event names actually found in the codebase (illustrative, not exhaustive)
 
-  if (provider.verification_status !== 'VERIFIED') {
-    throw new Error('Provider is not verified');
-  }
+| Publishing module | Event | At least one real consumer |
+|---|---|---|
+| Marketplace | `BidAwardedEvent` | Contracts (`BidAwardedEventHandler`), Notifications |
+| Marketplace | `DirectRentalRequestAcceptedEvent` / `...PartiallyAcceptedEvent` / `...RejectedEvent` / `...ExpiredEvent` / `...CancelledEvent` / `...SubmittedEvent` | Contracts (accepted/partially-accepted only), Notifications (all) |
+| Contracts | `ContractCreatedEvent` | Finance (escrow lock), Notifications |
+| Contracts | `ContractEscrowLockedEvent` | Notifications |
+| Contracts | `ContractActivatedEvent` | Notifications; Finance does not re-subscribe to this for money movement (settlement is schedule-driven, not activation-event-driven) |
+| Contracts | `ContractTermsAcceptedEvent` | Notifications |
+| Delivery | `DeliveryConfirmedEvent` | Contracts (`DeliveryConfirmedEventHandler`), Notifications |
+| Delivery | `DeliveryReturnConfirmedEvent` | Contracts (`DeliveryReturnConfirmedEventHandler`), Notifications |
+| Finance | `SettlementPayoutApprovedEvent`, `WalletCreditedEvent` | Notifications |
+| Finance | `SettlementCycleGeneratedEvent`-equivalent | Notifications (`SettlementCycleGeneratedNotificationHandler`) |
 
-  // Query Identity for available vehicles
-  const vehicles = await this.queryIdentity(`
-    SELECT COUNT(*) as count
-    FROM identity_schema.vehicles v
-    INNER JOIN identity_schema.insurance_records i ON v.id = i.vehicle_id
-    WHERE v.provider_id = $1
-      AND v.status = 'ACTIVE'
-      AND i.is_active = true
-      AND i.expiry_date >= CURRENT_DATE + INTERVAL '30 days'
-  `, [providerId]);
+Exact event-class names, fields, and the full handler list should be confirmed against `Modules/*/Domain/Events/` and `Modules/Notifications/EventHandlers/` before being treated as a stable contract for new work — this table is illustrative of the real pattern, not an exhaustive catalog. (`MVP_EVENT_CATALOG_AND_HANDLERS.md` in this same folder should be treated with the same "verify before relying on" caution as this document was before its own rewrite.)
 
-  if (vehicles[0].count === 0) {
-    throw new Error('No available vehicles with valid insurance');
-  }
-
-  // Validation passed
-}
-```
-
-3. **Marketplace creates bid (write to local DB):**
-```typescript
-const bid = await this.bidRepository.create({
-  rfqId,
-  providerId,
-  quantity,
-  pricePerVehicle,
-  status: 'BIDDING'
-});
-```
-
-4. **Marketplace publishes event:**
-```typescript
-await this.eventPublisher.publish({
-  eventType: 'BidSubmittedEvent',
-  aggregateId: bid.id,
-  payload: { ...bid }
-});
-```
-
-**Data Access:**
-- ✅ Identity queries (pull, direct DB, read-only)
-- ✅ Local write (bid created in Marketplace schema)
-- ✅ Event publish (push to subscribers)
+**Confirmed absent:** `InsuranceExpiredEvent`/`InsuranceExpiringEvent` and a daily insurance-monitor cron job, as v1.0 described in its Identity-integration example — no such job or event was found in the backend; this was aspirational in v1.0, not a simplification of something real.
 
 ---
 
-## APPENDIX B: Module Integration Checklist
+## 4. READ PATTERNS (real, direct EF Core queries — not raw cross-schema SQL)
 
-**For each new module feature, verify:**
+Cross-module reads are real and common, but happen as ordinary in-process EF Core repository calls or method calls against another module's read model/DTOs — not the literal `queryIdentity('SELECT ... FROM identity_schema...')` string-SQL v1.0 showed (there is no `identity_schema` prefix; tables are unprefixed in the one shared schema). Representative real examples:
 
-- [ ] **Read Dependencies**
-  - [ ] Identified all data needed from other modules
-  - [ ] Using direct DB queries for Identity/MasterData reads
-  - [ ] Using Redis cache for MasterData lookups
-  - [ ] Handling eventual consistency gracefully
-
-- [ ] **Write Dependencies**
-  - [ ] Publishing events for all state changes
-  - [ ] Including all necessary data in event payload
-  - [ ] Using transactional outbox pattern
-  - [ ] No direct writes to other module schemas
-
-- [ ] **Event Handlers**
-  - [ ] Implemented idempotency checks
-  - [ ] Handling errors with retry logic
-  - [ ] No blocking operations in event handlers
-  - [ ] Proper logging and monitoring
-
-- [ ] **API Boundaries**
-  - [ ] Exposing only necessary APIs
-  - [ ] Following REST conventions
-  - [ ] API documentation updated
-  - [ ] Authentication/authorization implemented
+- **Contracts reads Identity** for vehicle status/ownership when validating vehicle-assignment requests (`Vehicle` must be `APPROVED`, owned by the awarded provider, not already active on another contract).
+- **Finance reads Identity** for the provider's current tier (`ProviderTierAssignment`) and reads MasterData (`CommissionStrategy`) to resolve a commission rate at contract-creation time (owned/resolved by MasterData/Marketplace logic, merely consumed by Contracts/Finance — see `epic-06-contract-management.md` Story 6.1).
+- **Finance reads Contracts** during settlement generation (`IContractsUnitOfWork`, reading `ContractVehicleAssignment.DeliveredAt`/`ReleasedAt` windowed against each `MonthlySettlementSchedule`'s cycle dates) — a direct cross-module read, not an event-driven pull.
+- **Delivery reads Contracts** to validate that a delivery/return confirmation applies to a real, currently-assignable `ContractVehicleAssignment`.
+- **All modules read MasterData** directly per call (lookups, policy versions, commission strategies) — there is no cache-aside Redis layer in the real system; if one is added later, update this section.
 
 ---
 
-**END OF MODULE INTEGRATION SPECIFICATION**
+## 5. MODULE API BOUNDARIES (real, per-module controllers under one process)
+
+There is no API Gateway routing to independently deployed services. All controllers live in the single `Marketplace.API` process; module boundaries are reflected in controller/route naming, not deployment topology. Representative real routes (not exhaustive — see each module's own controller files and the referenced epics for full endpoint tables):
+
+- **Marketplace:** `Controllers/Marketplace/*` — RFQ CRUD/publish, bid submit/withdraw, award (including split-award), plus Direct Rental (`DirectRentalCartController`, `DirectRentalRequestController`, `DirectRentalVehicleController`, admin `AdminDirectRentalController`)
+- **Contracts:** `Controllers/Contracts/ContractsController.cs` — `GET/POST /contracts/...`, `terms/otp/generate|verify`, `line-items/{id}/assign-vehicle|unassign-vehicle`, `termination/request|approve`, `completion/request|approve|reject|cancel`, `abort-before-signing`, `reset-vehicle-assignments` (see `project-docs/service-specs/contract-engine-spec.md` §5 for the full list)
+- **Finance:** `Controllers/Finance/*` — wallet, escrow, `SettlementController` (`GET/POST /api/finance/settlements/...` — see `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` §2 for the exact real endpoint list), `PaymentController` (gateway webhooks)
+- **Delivery:** `Controllers/Delivery/*` — OTP generate/verify/resend, return sessions, inspection checklists
+- **Identity:** `Controllers/Identity/*` — profile, business/provider detail, vehicle CRUD + insurance + direct-rental enable/disable, trust score read endpoints
+- **MasterData:** `Controllers/MasterData/*`, plus dedicated controllers like `BusinessTiersController`/`ProviderTiersController`, `SettlementPoliciesController` — admin-only writes, broad reads
+- **Notifications:** `NotificationAdminController` (40+ endpoints: provider config, credential rotation, test-send, per-category × per-channel toggles) plus a `NotificationHub` SignalR endpoint for real-time delivery
+
+Mobile clients hit a parallel `Controllers/Mobile/*` route tree (`MobileContractController`, `MobileAuthController`, `MobileWalletController`, etc.) rather than the web-facing routes above — see `MOBILE_APP_SPEC.md` for the mobile endpoint table.
 
 ---
 
-**For Implementation:** Use this document as reference for:
-1. Deciding when to use events vs queries
-2. Implementing cross-module data access
-3. Setting up event handlers
-4. Configuring MasterData caching
-5. Understanding module boundaries
+## 6. DATA OWNERSHIP & RESPONSIBILITIES (real)
 
-**For Architecture Reviews:** Verify:
-1. No circular write dependencies
-2. Events used for state changes
-3. Queries used for data fetching
-4. Idempotency implemented
-5. Proper error handling
+| Module | Owns | Notes vs. v1.0 |
+|---|---|---|
+| Marketplace | RFQs, line items, bids/bid items, awards, **Direct Rental carts/requests** | Direct Rental was not in v1.0 at all — it shipped later and lives here, not in a separate module |
+| Contracts | Contracts, line items, vehicle assignments, terms acceptances, status history | 18 real status strings, not the 6-value model v1.0 implied by omission |
+| Finance | Wallets, ledger entries, escrow locks, settlement cycles/payouts/schedules | No generic `Settlement`/`Debt` tables as shown in v1.0 §1 — real entities are `SettlementCycle`/`SettlementPayout(LineItem)`/`MonthlySettlementSchedule`; **no `Debt` entity exists anywhere** in the codebase (see `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` §0 for the full correction) |
+| Delivery | Delivery/return sessions, OTP verifications, inspection checklists | Return-trip OTP + checklist system (Epic 07 scope, undocumented in the original epic text) |
+| Identity | Users, businesses, providers, vehicles, insurance, provider trust score | Trust score is provider-only — no business-side risk score exists (`project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` §1) |
+| MasterData | Lookups, commission strategies/tiers, contract/escrow/settlement policy versions | No Redis cache layer; reads go straight to Postgres |
+| Notifications | Templates, per-category/channel config, delivery logs | Pure consumer — publishes nothing for other modules to react to |
+| — | **Disputes** | **Does not exist.** No module, no schema, no entities, no API. See `MVP_DISPUTE_RESOLUTION_WORKFLOW.md`. |
+
+---
+
+## 7. What was correct in v1.0 and is kept conceptually
+
+A few high-level ideas in the original document are directionally still true, just implemented differently:
+
+- **Modules should not directly write into another module's data — they should go through that module's own domain logic.** True today; enforced via MediatR events + code convention rather than a hard schema boundary.
+- **Reads across modules are cheaper/simpler than writes and are done liberally.** True today, just as direct EF Core queries against the one shared database rather than cross-schema SQL against physically separate schemas.
+- **MasterData changes are infrequent and don't need real-time push to other modules.** Still true — MasterData still doesn't publish events — the correction is only that there's no Redis cache-aside layer sitting in front of it today.
+
+---
+
+**For Implementation:** treat this document, not v1.0, as the reference for how modules actually talk to each other. When adding a new cross-module integration, follow the existing pattern for the module pair involved (§2) rather than inventing a new mechanism (no message broker, no outbox, no Redis cache-aside for MasterData) unless a separate architectural decision explicitly introduces one.
+
+**For Architecture Reviews:** verify against real code, not this document's prose, for anything load-bearing — module boundaries evolve; re-run a targeted search against `Modules/*/Domain/Events/` and `Modules/Notifications/EventHandlers/` before assuming an event/handler pair described here is still current.

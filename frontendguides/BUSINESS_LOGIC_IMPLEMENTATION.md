@@ -1,1041 +1,230 @@
 # Business Logic Implementation Guide
 ## Movello Frontend - React Implementation
 
-**Version:** 1.0  
-**Related:** [LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md](./LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md)  
-**Reference:** [MVP_AUTHORITATIVE_BUSINESS_RULES.md](./MVP_MODULAR/MVP_final_docs/MVP_AUTHORITATIVE_BUSINESS_RULES.md)
+**Version:** 2.0
+**Last verified against code: 2026-07-23**
+**Primary sources:**
+- `src/shared/components/business/SplitAwardDialog.tsx` (real escrow calc + wallet validation, per line item)
+- `src/features/business/pages/rfq/bids/BidCard.tsx` (escrow display on individual bids)
+- `src/features/business/pages/contracts/ExtendContractDialog.tsx` (real contract "renewal" — extension, not a new contract)
+- `src/features/admin/pages/operations/contracts/AdminEarlyReturnPage.tsx` (real early-return flow — no client-side penalty calculator)
+- `src/shared/components/business/TrustScoreDisplay.tsx` (trust score breakdown fields, matched to the real backend formula)
+- `src/features/admin/pages/master-data/TiersPage.tsx` (tier admin UI — edit is a stub)
+- `src/core/services/delivery-service.ts` (real OTP generate/verify endpoints)
+- `backlog/mvp/epic-04-rfq-management.md`, `epic-05-bidding-engine.md`, `epic-06-contract-management.md`, `epic-12-risk-trust-scoring.md` (rewritten 2026-07-23 — authoritative on backend business rules)
+- `project-docs/18_Implementation_Coverage_Audit.md` (cross-cutting divergence findings, §10 corrections)
+
+This replaces the v1.0 guide, which described several utility modules and a UI flow (`wallet-validation.ts` with a `calculateMaxAffordableQuantity` sorting algorithm, and an `early-return.ts` with a full client-side prorated-penalty calculator) that **do not exist in the codebase** — no such files were found under `src/features/business/rfq/utils/` or `src/features/business/contracts/utils/`. The real implementations are simpler, live in different files than v1.0 claimed, and in one case (early return) the elaborate client-side math v1.0 described has no web-UI counterpart at all — the real page just submits a reason to the backend.
+
+**Also carried over from the audit:** every RFQ/bidding business rule below now assumes the **line-item + split-award model**, not the whole-RFQ, single-award model v1.0 implied in places. If you're extending bidding/award logic, read `backlog/mvp/epic-05-bidding-engine.md` first.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-1. [Wallet Balance Validation](#wallet-balance-validation)
-2. [Partial Award Calculation](#partial-award-calculation)
-3. [Split Award Logic](#split-award-logic)
-4. [Blind Bidding Implementation](#blind-bidding-implementation)
-5. [OTP Flow](#otp-flow)
-6. [Early Return Calculation](#early-return-calculation)
-7. [Trust Score Display](#trust-score-display)
-8. [Tier System Display](#tier-system-display)
+1. [What's Actually Real vs. What v1.0 Invented](#whats-actually-real-vs-what-v10-invented)
+2. [Escrow Calculation & Wallet Validation (Split Award)](#escrow-calculation--wallet-validation-split-award)
+3. [Blind Bidding — Including a Real Gap](#blind-bidding--including-a-real-gap)
+4. [OTP Flow — Two Different OTPs, Not One](#otp-flow--two-different-otps-not-one)
+5. [Contract "Renewal" Is Actually Extension](#contract-renewal-is-actually-extension)
+6. [Early Return — No Client-Side Penalty Calculator](#early-return--no-client-side-penalty-calculator)
+7. [Trust Score — Real Formula, Not Wired Into Production](#trust-score--real-formula-not-wired-into-production)
+8. [Tier System — Real Commission Rates, Stub Admin UI](#tier-system--real-commission-rates-stub-admin-ui)
+9. [Validation Helpers Still Worth Having](#validation-helpers-still-worth-having)
 
 ---
 
-## 💰 Wallet Balance Validation
+## What's Actually Real vs. What v1.0 Invented
 
-### At Award Time
+| v1.0 claimed | Reality |
+|---|---|
+| `src/features/business/rfq/utils/wallet-validation.ts` — `validateWalletForAward()` sorts bids by unit price to compute a `maxAffordableQuantity`, offering DEPOSIT/PARTIAL_AWARD/CANCEL options | No such file. Wallet validation for award happens **inline inside `SplitAwardDialog.tsx`**, is a simple `totalEscrow > availableBalance` comparison per line item being awarded (no cross-award, price-sorted "which vehicles can I actually afford" optimizer), and blocks the Confirm button rather than offering a three-way choice menu |
+| `src/features/business/rfq/utils/partial-award.ts` — `calculatePartialAward()` | No such file. Partial award is just "type a smaller quantity into the per-bid input than what's offered" in `SplitAwardDialog` — there's no separate calculation utility, the arithmetic is a few lines inline in a `useMemo` |
+| `src/features/business/contracts/utils/early-return.ts` — `calculateEarlyReturn()` with tiered penalty rates by notice period × business tier, prorated refund math | No such file, and **no client-side penalty preview exists at all**. `AdminEarlyReturnPage.tsx` posts `{ vehicleId, initiatedBy, initiatorType, reason }` to `POST /contracts/{id}/line-items/{lineItemId}/early-return` and lets the backend do whatever penalty computation it does — the web UI shows no prorated amount, penalty rate, or refund figure before submitting |
+| Escrow = arbitrary "totalAmount" per award, no cap mentioned | Escrow is **capped at 30 days**: `escrowDays = min(durationDays, 30)`, `escrow = escrowDays × unitPrice × quantity` — computed identically in both `SplitAwardDialog.tsx` and `BidCard.tsx` |
+| OTP flow described as one generic "delivery verification" OTP | There are **two structurally different OTP mechanisms** in the real system — see [OTP Flow](#otp-flow--two-different-otps-not-one) |
+| "Renewal" implemented as a new contract with same terms | No `renew` endpoint exists anywhere in the backend. The real web feature is `ExtendContractDialog.tsx` → `contractService.extendContract()`, which lengthens the **existing** contract's end date |
+| Trust score gauge SVG largely matches reality | Close, but the breakdown fields it should bind to are `baseScore` / `completionRateBonus` / `onTimeRateBonus` / `noShowPenalty` / `rejectionPenalty` (matching the real backend `TrustScoreCalculator` formula) — not the five-metric `completionRate/onTimeRate/reliability/quality/disputeHistory` breakdown v1.0 described |
 
-**Rule BR-006, BR-007:** Wallet balance is REQUIRED when awarding bids.
+---
 
-**Implementation:**
+## Escrow Calculation & Wallet Validation (Split Award)
+
+**Real rule (epic-05, epic-08):** escrow required for an award is capped at 30 days of the contract duration, even for long-term RFQs — this protects the platform from locking a business's entire wallet against a 12-month contract, while still guaranteeing at least one month of coverage per provider.
+
+**File:** `src/shared/components/business/SplitAwardDialog.tsx`
 
 ```typescript
-// File: src/features/business/rfq/utils/wallet-validation.ts
+// Duration comes from the line item's pre-calculated durationDays, falling back to
+// Math.ceil((endDate - startDate) / 1 day) — matching the backend's own calculation.
+const durationDays = lineItem.durationDays > 0
+  ? lineItem.durationDays
+  : Math.ceil((parseISO(endDate).getTime() - parseISO(startDate).getTime()) / (1000 * 60 * 60 * 24));
 
-export interface WalletValidationResult {
-  isValid: boolean;
-  requiredAmount: number;
-  availableBalance: number;
-  shortfall: number;
-  maxAffordableQuantity?: number;
-  options?: {
-    action: 'DEPOSIT' | 'PARTIAL_AWARD' | 'CANCEL';
-    amount?: number;
-    quantity?: number;
-    text: string;
-  }[];
+// Escrow lock is capped at 30 days regardless of actual contract duration.
+const escrowDays = durationDays <= 0 ? 1 : Math.min(durationDays, 30);
+
+// Per selected bid: escrow contribution = escrowDays * unitPrice * awardedQuantity
+selectedBids.forEach((bid) => {
+  const qty = quantities[bid.bidId] || 0;
+  total += qty;
+  if (qty > 0) {
+    escrow += escrowDays * bid.unitPrice * qty;
+  }
+  if (qty > bid.quantityOffered) {
+    errors.push(`${bid.providerHash}: Cannot award more than ${bid.quantityOffered} (offered)`);
+  }
+});
+
+if (total > lineItem.quantityRequired) {
+  errors.push(`Total awarded (${total}) cannot exceed required quantity (${lineItem.quantityRequired})`);
+}
+if (availableBalance !== undefined && escrow > availableBalance) {
+  errors.push(`Insufficient balance. Required: ${formatETB(escrow)}, Available: ${formatETB(availableBalance)}`);
 }
 
-export const validateWalletForAward = (
-  awards: AwardDetail[],
-  wallet: Wallet
-): WalletValidationResult => {
-  // Calculate total escrow required
-  const totalEscrowRequired = awards.reduce(
-    (sum, award) => sum + award.totalAmount,
-    0
-  );
-
-  const availableBalance = wallet.availableBalance;
-  const shortfall = Math.max(0, totalEscrowRequired - availableBalance);
-
-  if (availableBalance >= totalEscrowRequired) {
-    return {
-      isValid: true,
-      requiredAmount: totalEscrowRequired,
-      availableBalance,
-      shortfall: 0,
-    };
-  }
-
-  // Calculate max affordable quantity
-  const maxAffordable = calculateMaxAffordableQuantity(awards, availableBalance);
-
-  return {
-    isValid: false,
-    requiredAmount: totalEscrowRequired,
-    availableBalance,
-    shortfall,
-    maxAffordableQuantity: maxAffordable.vehicleCount,
-    options: [
-      {
-        action: 'DEPOSIT',
-        amount: shortfall,
-        text: `Deposit ${formatCurrency(shortfall)} ETB to award all vehicles`,
-      },
-      {
-        action: 'PARTIAL_AWARD',
-        quantity: maxAffordable.vehicleCount,
-        text: `Award ${maxAffordable.vehicleCount} vehicles with current balance`,
-      },
-      {
-        action: 'CANCEL',
-        text: 'Cancel award',
-      },
-    ],
-  };
-};
-
-const calculateMaxAffordableQuantity = (
-  awards: AwardDetail[],
-  availableBalance: number
-): { vehicleCount: number; totalCost: number } => {
-  // Sort awards by unit price (lowest first) to maximize vehicle count
-  const sortedAwards = [...awards].sort((a, b) => a.unitPrice - b.unitPrice);
-
-  let runningTotal = 0;
-  let affordableVehicles = 0;
-
-  for (const award of sortedAwards) {
-    const costPerVehicle = award.unitPrice;
-    const affordableFromThisAward = Math.floor(
-      (availableBalance - runningTotal) / costPerVehicle
-    );
-    const actuallyAffordable = Math.min(
-      affordableFromThisAward,
-      award.quantityAwarded
-    );
-
-    affordableVehicles += actuallyAffordable;
-    runningTotal += actuallyAffordable * costPerVehicle;
-
-    if (runningTotal >= availableBalance) break;
-  }
-
-  return {
-    vehicleCount: affordableVehicles,
-    totalCost: runningTotal,
-  };
-};
+const isValid = validationErrors.length === 0 && totalAwarded > 0 && totalAwarded <= lineItem.quantityRequired;
 ```
 
-### Usage in Award Modal
-
-```typescript
-const AwardConfirmationModal = ({ selectedBids, bidsData }) => {
-  const { data: wallet } = useQuery({
-    queryKey: ['wallet', 'me'],
-    queryFn: () => walletService.getWallet(),
-  });
-
-  const validation = useMemo(() => {
-    if (!wallet || !bidsData) return null;
-    
-    const awards = calculateAwardDetails(selectedBids, bidsData);
-    return validateWalletForAward(awards, wallet);
-  }, [wallet, selectedBids, bidsData]);
-
-  return (
-    <Dialog>
-      {validation && !validation.isValid && (
-        <Alert variant="destructive">
-          <AlertTitle>Insufficient Funds</AlertTitle>
-          <AlertDescription>
-            <p>
-              Required: {formatCurrency(validation.requiredAmount)} ETB
-            </p>
-            <p>
-              Available: {formatCurrency(validation.availableBalance)} ETB
-            </p>
-            <p>
-              Shortfall: {formatCurrency(validation.shortfall)} ETB
-            </p>
-            {validation.maxAffordableQuantity && (
-              <p className="mt-2">
-                You can award up to {validation.maxAffordableQuantity} vehicles
-                with your current balance.
-              </p>
-            )}
-          </AlertDescription>
-        </Alert>
-      )}
-      
-      {validation?.options && (
-        <div className="space-y-2">
-          {validation.options.map((option, index) => (
-            <Button
-              key={index}
-              variant={option.action === 'CANCEL' ? 'outline' : 'default'}
-              onClick={() => handleOption(option)}
-              className="w-full"
-            >
-              {option.text}
-            </Button>
-          ))}
-        </div>
-      )}
-    </Dialog>
-  );
-};
-```
+What this means in practice:
+- **Partial award is just "award fewer than required"** — the dialog defaults every selected bid's quantity input to its full `quantityOffered`, and the business can lower any of them. There's no separate "partial award" mode or confirmation step; `totalAwarded < quantityRequired` is a perfectly valid award, it just leaves the rest of the line item open for a later award round.
+- **Split award across providers happens by selecting multiple bids** for the same line item before opening this dialog (`BidReviewPage.tsx` → `handleAwardClick`), then giving each one a quantity here. There's no separate "split award mode" toggle — one bid selected is a normal award, more than one is a split award, same dialog either way.
+- **There is no automatic "here's the max you can afford" suggestion.** If the total exceeds `availableBalance`, the Confirm button is simply disabled with an inline error — the business has to manually reduce quantities (or deposit more funds) and try again. There is no server-side or client-side algorithm that proposes an optimal affordable subset.
+- **This same escrow formula is duplicated** (not shared via an imported utility) in `BidCard.tsx` for the per-bid escrow preview shown before a bid is even selected for award — if you change the 30-day cap or the formula, both call sites need updating.
 
 ---
 
-## 📊 Partial Award Calculation
+## Blind Bidding — Including a Real Gap
 
-### Calculate Partial Award
+**Rule (epic-04, epic-05):** provider identity stays hashed to the business until the corresponding bid is awarded.
 
-**Rule BR-007:** Business can award partial quantities based on available balance.
+**Implementation:** `BidCard.tsx`/`BidRow`-equivalents render `bid.providerHash` (format `Provider •••4411`) while a bid is in `PENDING`/`SUBMITTED`/`BIDDING` state; once a contract exists for an awarded line item, the contract detail screens show the real provider name.
 
-```typescript
-// File: src/features/business/rfq/utils/partial-award.ts
-
-export interface PartialAwardCalculation {
-  originalAwards: AwardDetail[];
-  partialAwards: AwardDetail[];
-  totalVehiclesOriginal: number;
-  totalVehiclesAffordable: number;
-  totalCostOriginal: number;
-  totalCostAffordable: number;
-}
-
-export const calculatePartialAward = (
-  awards: AwardDetail[],
-  availableBalance: number
-): PartialAwardCalculation => {
-  const sortedAwards = [...awards].sort((a, b) => a.unitPrice - b.unitPrice);
-  
-  const partialAwards: AwardDetail[] = [];
-  let runningTotal = 0;
-
-  for (const award of sortedAwards) {
-    const costPerVehicle = award.unitPrice;
-    const affordableFromThisAward = Math.floor(
-      (availableBalance - runningTotal) / costPerVehicle
-    );
-    const actuallyAffordable = Math.min(
-      affordableFromThisAward,
-      award.quantityAwarded
-    );
-
-    if (actuallyAffordable > 0) {
-      partialAwards.push({
-        ...award,
-        quantityAwarded: actuallyAffordable,
-        totalAmount: actuallyAffordable * award.unitPrice,
-      });
-      runningTotal += actuallyAffordable * costPerVehicle;
-    }
-
-    if (runningTotal >= availableBalance) break;
-  }
-
-  return {
-    originalAwards: awards,
-    partialAwards,
-    totalVehiclesOriginal: awards.reduce((sum, a) => sum + a.quantityAwarded, 0),
-    totalVehiclesAffordable: partialAwards.reduce((sum, a) => sum + a.quantityAwarded, 0),
-    totalCostOriginal: awards.reduce((sum, a) => sum + a.totalAmount, 0),
-    totalCostAffordable: runningTotal,
-  };
-};
-```
+**Real, confirmed gap (per `18_Implementation_Coverage_Audit.md` §10.3, carried into the epic-05 rewrite):** the backend's `GetBidsByRFQQuery`/`GetBidQuery` handlers set `ProviderName` on the DTO **unconditionally, regardless of award status** — blind bidding is enforced entirely by the web UI choosing not to render that field, not by the API withholding it. A business with browser dev tools open (or any other API consumer) can already see provider identity before award by inspecting the raw response. This is a documented, fix-required gap, not something to assume is closed — do not describe blind bidding as "enforced server-side" anywhere in new docs or code comments until this is actually fixed.
 
 ---
 
-## 🔀 Split Award Logic
+## OTP Flow — Two Different OTPs, Not One
 
-### Multiple Providers Per Line Item
+There are **two independent, structurally different** OTP mechanisms in the real system. Conflating them is a common documentation error (v1.0 only described one, generically).
 
-**Rule:** Business can award a single line item to multiple providers.
+### 1. Delivery-confirmation OTP (`Modules/Delivery`)
 
-**Implementation:**
+**File:** `src/core/services/delivery-service.ts`
 
 ```typescript
-// File: src/features/business/rfq/utils/split-award.ts
-
-export interface SplitAward {
-  lineItemId: string;
-  awards: {
-    bidId: string;
-    providerHash: string;
-    quantityAwarded: number;
-    unitPrice: number;
-    totalAmount: number;
-  }[];
-  totalQuantityAwarded: number;
-  totalAmount: number;
-}
-
-export const validateSplitAward = (
-  lineItemId: string,
-  awards: AwardDetail[],
-  lineItem: RFQLineItem
-): { isValid: boolean; error?: string } => {
-  // All awards must be for the same line item
-  const allSameLineItem = awards.every(a => a.lineItemId === lineItemId);
-  if (!allSameLineItem) {
-    return {
-      isValid: false,
-      error: 'All selected bids must be for the same line item',
-    };
-  }
-
-  // Total quantity cannot exceed required
-  const totalQuantity = awards.reduce((sum, a) => sum + a.quantityAwarded, 0);
-  if (totalQuantity > lineItem.quantityRequired) {
-    return {
-      isValid: false,
-      error: `Total quantity (${totalQuantity}) cannot exceed required quantity (${lineItem.quantityRequired})`,
-    };
-  }
-
-  // Each award quantity cannot exceed bid's offered quantity
-  for (const award of awards) {
-    const bid = getBidById(award.bidId);
-    if (award.quantityAwarded > bid.quantityOffered) {
-      return {
-        isValid: false,
-        error: `Awarded quantity cannot exceed bid's offered quantity`,
-      };
-    }
-  }
-
-  return { isValid: true };
-};
-
-export const groupAwardsByLineItem = (
-  awards: AwardDetail[]
-): Map<string, SplitAward> => {
-  const grouped = new Map<string, SplitAward>();
-
-  awards.forEach((award) => {
-    const existing = grouped.get(award.lineItemId);
-    
-    if (existing) {
-      existing.awards.push({
-        bidId: award.bidId,
-        providerHash: award.providerHash,
-        quantityAwarded: award.quantityAwarded,
-        unitPrice: award.unitPrice,
-        totalAmount: award.totalAmount,
-      });
-      existing.totalQuantityAwarded += award.quantityAwarded;
-      existing.totalAmount += award.totalAmount;
-    } else {
-      grouped.set(award.lineItemId, {
-        lineItemId: award.lineItemId,
-        awards: [{
-          bidId: award.bidId,
-          providerHash: award.providerHash,
-          quantityAwarded: award.quantityAwarded,
-          unitPrice: award.unitPrice,
-          totalAmount: award.totalAmount,
-        }],
-        totalQuantityAwarded: award.quantityAwarded,
-        totalAmount: award.totalAmount,
-      });
-    }
-  });
-
-  return grouped;
-};
+generateOTP: (sessionId: string) => apiClient.post(`/delivery/sessions/${sessionId}/otp/generate`, {}),
+verifyOTP: (sessionId: string, code: string) => apiClient.post(`/delivery/sessions/${sessionId}/otp/verify`, { code }),
+// A parallel pair exists for the return leg:
+generateReturnOTP: (sessionId: string) => apiClient.post(`/delivery/sessions/${sessionId}/return-otp/generate`, {}),
 ```
+
+Confirms the vehicle handover (and, separately, the return handover) between provider and business. Per the audit, **the OTP code is never exposed by the API response for security** — the backend's `GenerateOTPResponseDto` intentionally omits it; delivery of the code to the business is via SMS/notification only. Treat any UI that displays a raw OTP code fetched from this endpoint as suspect and re-verify against the current backend contract before relying on it.
+
+### 2. Contract e-signature OTP (`Modules/Contracts` — `ContractTermsAcceptance`)
+
+A **separate**, dual-party mechanism gating `PendingSigning → Signed` in the contract lifecycle: both the business and the provider must independently generate + verify an OTP to accept contract terms before the contract can proceed toward delivery. This is not the same OTP as delivery confirmation, has its own endpoints (`terms/otp/generate` / `terms/otp/verify`), and is not documented at all in the original epic-06/epic-07 text — see `backlog/mvp/epic-06-contract-management.md` for the full state machine. `BusinessPendingOTPsPage.tsx` on the business side surfaces contracts waiting on this signing step.
+
+**Do not merge these two into one "OTP flow" section when writing new docs or onboarding new engineers** — they hit different endpoints, gate different state transitions, and have different failure semantics.
 
 ---
 
-## 🎭 Blind Bidding Implementation
+## Contract "Renewal" Is Actually Extension
 
-### Display Hashed Provider ID
+**Real rule (epic-06):** there is no `renew` endpoint anywhere in the backend, and no second contract is ever created for a renewal. What v1.0 (and the original epic-06 doc) called "renewal" is implemented as **extension of the existing contract**.
 
-**Rule BR-004:** Provider identity is hashed until award.
-
-**Implementation:**
+**File:** `src/features/business/pages/contracts/ExtendContractDialog.tsx`
 
 ```typescript
-// File: src/features/business/rfq/components/BidRow.tsx
+const currentEnd = parseISO(currentEndDate);
+const proposedEndDate = endOfMonth(addMonths(currentEnd, extensionMonths)); // always rounds to end-of-month
 
-interface BidRowProps {
-  bid: Bid;
-  isSelected: boolean;
-  onSelect: () => void;
-}
-
-export const BidRow: FC<BidRowProps> = ({ bid, isSelected, onSelect }) => {
-  // Provider hash is already provided by backend
-  // Format: "Provider •••4411"
-  return (
-    <TableRow>
-      <TableCell>
-        <Checkbox checked={isSelected} onCheckedChange={onSelect} />
-      </TableCell>
-      <TableCell className="font-mono text-sm">
-        {bid.providerHash}
-      </TableCell>
-      <TableCell>{bid.quantityOffered}</TableCell>
-      <TableCell>{formatCurrency(bid.unitPrice)} ETB</TableCell>
-      <TableCell>{formatCurrency(bid.totalPrice)} ETB</TableCell>
-      <TableCell>
-        {bid.trustScore ? (
-          <Badge variant="outline">{bid.trustScore}/100</Badge>
-        ) : (
-          '-'
-        )}
-      </TableCell>
-      <TableCell>{formatDateTime(bid.submittedAt)}</TableCell>
-    </TableRow>
-  );
-};
-```
-
-### After Award - Reveal Provider
-
-```typescript
-// After award, provider identity is revealed
-const { data: contract } = useContract(contractId);
-
-// Contract line items now include providerName (revealed)
-contract.lineItems.forEach((lineItem) => {
-  console.log(`Provider: ${lineItem.providerName}`); // Now visible
-  console.log(`Provider ID: ${lineItem.providerId}`); // Now visible
+await contractService.extendContract(contractId, {
+  newEndDate: proposedEndDate.toISOString(),
+  reason,
 });
 ```
 
----
-
-## 🔐 OTP Flow
-
-### OTP Generation & Verification
-
-**Rule BR-014:** OTP-based delivery verification.
-
-**Implementation:**
-
-```typescript
-// File: src/features/provider/delivery/hooks/useOTPFlow.ts
-
-export const useOTPFlow = (sessionId: string) => {
-  const [otp, setOtp] = useState<string | null>(null);
-  const [otpStatus, setOtpStatus] = useState<'PENDING' | 'GENERATED' | 'VERIFIED' | 'EXPIRED'>('PENDING');
-
-  const generateOTP = useMutation({
-    mutationFn: () => deliveryService.generateOTP(sessionId),
-    onSuccess: (result) => {
-      setOtp(result.otp);
-      setOtpStatus('GENERATED');
-      toast.success('OTP sent to business contact');
-    },
-  });
-
-  const verifyOTP = useMutation({
-    mutationFn: (code: string) => deliveryService.verifyOTP(sessionId, code),
-    onSuccess: () => {
-      setOtpStatus('VERIFIED');
-      toast.success('OTP verified successfully');
-    },
-    onError: (error: any) => {
-      if (error.response?.data?.error?.code === 'INVALID_OTP') {
-        const attemptsRemaining = error.response.data.error.details.attemptsRemaining;
-        if (attemptsRemaining === 0) {
-          setOtpStatus('EXPIRED');
-          toast.error('OTP expired. Please generate a new one.');
-        } else {
-          toast.error(`Invalid OTP. ${attemptsRemaining} attempts remaining.`);
-        }
-      } else {
-        handleApiError(error);
-      }
-    },
-  });
-
-  return {
-    otp,
-    otpStatus,
-    generateOTP: generateOTP.mutate,
-    verifyOTP: verifyOTP.mutate,
-    isGenerating: generateOTP.isPending,
-    isVerifying: verifyOTP.isPending,
-  };
-};
-```
-
-### OTP Display Component
-
-```typescript
-export const OTPDisplay = ({ otp, onRegenerate }) => {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>OTP Generated</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="text-center space-y-4">
-          <div className="text-4xl font-mono font-bold tracking-widest">
-            {otp}
-          </div>
-          <p className="text-sm text-gray-600">
-            This OTP has been sent to the business contact via SMS.
-            Ask them to share the OTP with you to proceed.
-          </p>
-          <Button variant="outline" onClick={onRegenerate}>
-            Regenerate OTP
-          </Button>
-        </div>
-      </CardContent>
-    </Card>
-  );
-};
-```
+Key real behavior:
+- **Only offered for long-term contracts** (`isLongTerm` prop) — the dialog renders a "not applicable" state otherwise.
+- **Business-initiated only, no provider accept/reject step** — unlike the epic's original "provider accepts/rejects renewal" framing, extension is a unilateral request from the business (an admin approval step may exist server-side; there's no counter-party approval UI on the provider portal).
+- **Always rounds the new end date to end-of-month**, regardless of how many months were requested — a 1-month extension from the 15th of a month does not add exactly 30 days, it extends through the end of the target month.
+- **Same contract ID throughout** — no new contract number, no new escrow lock event distinct from whatever the extension triggers server-side.
 
 ---
 
-## 📅 Early Return Calculation
+## Early Return — No Client-Side Penalty Calculator
 
-### Penalty Calculation
+**Real rule (epic-06):** `Contract.Terminate()`/`Contract.TerminateEarly()` domain methods exist on the backend with penalty math already written, alongside `ContractPenalty`/`EarlyReturnNotice` entities — but per the audit, **`Terminate()`/`TerminateEarly()` have zero callers anywhere in the backend**, and the web UI has no client-side preview of what a return would cost.
 
-**Rule BR-019, BR-021:** Early return with notice period penalties.
-
-**Implementation:**
+**File:** `src/features/admin/pages/operations/contracts/AdminEarlyReturnPage.tsx`
 
 ```typescript
-// File: src/features/business/contracts/utils/early-return.ts
+const initiateEarlyReturnMutation = useMutation({
+  mutationFn: ({ contractId, lineItemId, vehicleId, reason, initiatorType }) =>
+    apiClient.post(`/contracts/${contractId}/line-items/${lineItemId}/early-return`, {
+      vehicleId,
+      initiatedBy: adminUserId,
+      initiatorType, // 'BUSINESS' | 'PROVIDER' | 'ADMIN'
+      reason,
+    }),
+});
+```
 
-import { differenceInDays, isBefore, subDays } from 'date-fns';
+What this means for anyone extending early-return UI:
+- **There is no prorated-amount / penalty-rate / refund preview anywhere in the web app.** The admin (or business/provider, via `initiatorType`) picks a contract, line item, and vehicle, types a free-text reason, and submits — the backend computes whatever it computes, with no client-side estimate shown first.
+- **If a penalty-preview feature is requested, it does not exist yet** — this would be new work, not a bug fix, and should be scoped as such rather than assumed to be "just wiring up an existing calculation."
+- **Do not resurrect the v1.0 `calculateEarlyReturn()` tiered-rate logic (7+/3-6/0-2 day notice bands, tier multipliers) as if it reflects a real, shipped calculation** — it was invented for the v1.0 doc, not observed in code. If the actual notice-period/penalty-rate policy needs documenting, source it from the backend's `ContractPolicyVersion/Rule`/`EscrowPolicyVersion/Rule` master-data tables (see `markdown-documentations/Master_Data_Specification.md`), not from client code — none of that policy logic lives in the frontend.
 
-export interface EarlyReturnCalculation {
-  totalDays: number;
-  daysUsed: number;
-  daysRemaining: number;
-  proratedAmount: number;
-  penaltyRate: number;
-  penaltyAmount: number;
-  refundAmount: number;
-  noticePeriod: number;
-  noticePeriodCategory: '7_PLUS' | '3_TO_6' | '0_TO_2';
+---
+
+## Trust Score — Real Formula, Not Wired Into Production
+
+**Real formula** (`TrustScoreCalculator.cs`, backend — confirmed by `backlog/mvp/epic-12-risk-trust-scoring.md`):
+
+```
+TrustScore = Base(50 if provider is verified, 0 if not)
+           + CompletionRate × 20
+           + OnTimeRate × 20
+           − NoShowRate × 30
+           + RejectionPenalty
+```
+
+**File:** `src/shared/components/business/TrustScoreDisplay.tsx`
+
+The gauge component's tooltip breakdown is already correctly modeled on this formula, not the generic five-metric breakdown v1.0 described:
+
+```typescript
+interface TrustScoreBreakdown {
+  baseScore: number;
+  completionRateBonus: number;
+  onTimeRateBonus: number;
+  noShowPenalty: number;
+  rejectionPenalty: number;
+  totalScore: number;
 }
-
-export const calculateEarlyReturn = (
-  contract: Contract,
-  assignment: VehicleAssignment,
-  returnDate: Date,
-  businessTier: BusinessTier
-): EarlyReturnCalculation => {
-  const startDate = new Date(assignment.startDateActual);
-  const endDate = new Date(contract.endDate);
-  const returnDateObj = returnDate;
-
-  const totalDays = differenceInDays(endDate, startDate);
-  const daysUsed = differenceInDays(returnDateObj, startDate);
-  const daysRemaining = totalDays - daysUsed;
-
-  // Get line item amount
-  const lineItem = contract.lineItems.find(
-    li => li.id === assignment.contractLineItemId
-  );
-  const totalAmount = lineItem?.totalAmount || 0;
-
-  // Prorated amount (amount for days used)
-  const proratedAmount = (totalAmount / totalDays) * daysUsed;
-
-  // Notice period (days before return date)
-  const noticePeriod = differenceInDays(returnDateObj, new Date());
-
-  // Determine notice period category
-  let noticePeriodCategory: '7_PLUS' | '3_TO_6' | '0_TO_2';
-  if (noticePeriod >= 7) {
-    noticePeriodCategory = '7_PLUS';
-  } else if (noticePeriod >= 3) {
-    noticePeriodCategory = '3_TO_6';
-  } else {
-    noticePeriodCategory = '0_TO_2';
-  }
-
-  // Penalty rate based on notice period and tier
-  const penaltyRate = getPenaltyRate(noticePeriodCategory, businessTier);
-
-  // Remaining amount (what would be refunded without penalty)
-  const remainingAmount = totalAmount - proratedAmount;
-
-  // Penalty amount
-  const penaltyAmount = remainingAmount * penaltyRate;
-
-  // Refund amount (after penalty)
-  const refundAmount = remainingAmount - penaltyAmount;
-
-  return {
-    totalDays,
-    daysUsed,
-    daysRemaining,
-    proratedAmount,
-    penaltyRate,
-    penaltyAmount,
-    refundAmount,
-    noticePeriod,
-    noticePeriodCategory,
-  };
-};
-
-const getPenaltyRate = (
-  category: '7_PLUS' | '3_TO_6' | '0_TO_2',
-  tier: BusinessTier
-): number => {
-  // Base penalty rates
-  const baseRates = {
-    '7_PLUS': 0.00,    // 0% penalty
-    '3_TO_6': 0.02,   // 2% penalty
-    '0_TO_2': 0.15,   // 15% penalty
-  };
-
-  // Tier adjustments (Enterprise/GOV_NGO may have lower rates)
-  const tierMultipliers = {
-    STANDARD: 1.0,
-    BUSINESS_PRO: 0.95,
-    ENTERPRISE: 0.90,
-    GOV_NGO: 0.85,
-  };
-
-  return baseRates[category] * tierMultipliers[tier];
-};
 ```
 
-### Early Return Request Component
+Score bands used for color/label across the app (`getScoreColor`/`getScoreLabel`): **≥85 Excellent (emerald)**, **≥70 Good (blue)**, **≥50 Fair (amber)**, **<50 Poor (red)** — consistent between `TrustScoreDisplay` and `BidCard`/`SplitAwardDialog`'s inline usage.
 
-```typescript
-export const EarlyReturnRequest = ({ contractId, assignmentId }) => {
-  const [returnDate, setReturnDate] = useState<Date | null>(null);
-  const [calculation, setCalculation] = useState<EarlyReturnCalculation | null>(null);
-  const { data: contract } = useContract(contractId);
-  const { data: business } = useBusiness();
+**Critical caveat, confirmed by the audit (§10.2) — do not skip this when discussing trust score with anyone:** `TrustScoreCalculator`/`ITrustScoreCalculator` is fully implemented, unit-tested, and DI-registered, but has **zero production call sites**. No event handler for contract completion, on-time delivery, no-show, or bid rejection ever invokes it. In practice, **every provider's trust score is frozen at its registration-time default (50 if verified, 0 if not)** unless an admin manually triggers tier assignment. If a task assumes trust score updates automatically as a provider completes contracts, that assumption is currently false in production — flag it rather than build on top of it silently.
 
-  useEffect(() => {
-    if (returnDate && contract && business) {
-      const assignment = contract.lineItems
-        .flatMap(li => li.assignments)
-        .find(a => a.id === assignmentId);
-      
-      if (assignment) {
-        const calc = calculateEarlyReturn(
-          contract,
-          assignment,
-          returnDate,
-          business.tier
-        );
-        setCalculation(calc);
-      }
-    }
-  }, [returnDate, contract, business, assignmentId]);
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Request Early Return</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        <FormField label="Return Date" required>
-          <DatePicker
-            value={returnDate}
-            onChange={setReturnDate}
-            minDate={new Date()}
-            maxDate={new Date(contract?.endDate)}
-          />
-        </FormField>
-
-        {calculation && (
-          <div className="bg-gray-50 p-4 rounded space-y-2">
-            <div className="flex justify-between">
-              <span>Total Contract Days:</span>
-              <span className="font-semibold">{calculation.totalDays} days</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Days Used:</span>
-              <span className="font-semibold">{calculation.daysUsed} days</span>
-            </div>
-            <div className="flex justify-between">
-              <span>Days Remaining:</span>
-              <span className="font-semibold">{calculation.daysRemaining} days</span>
-            </div>
-            <div className="border-t pt-2 mt-2">
-              <div className="flex justify-between">
-                <span>Prorated Amount:</span>
-                <span>{formatCurrency(calculation.proratedAmount)} ETB</span>
-              </div>
-              <div className="flex justify-between text-red-600">
-                <span>Penalty ({calculation.penaltyRate * 100}%):</span>
-                <span>-{formatCurrency(calculation.penaltyAmount)} ETB</span>
-              </div>
-              <div className="flex justify-between font-bold text-lg border-t pt-2 mt-2">
-                <span>Refund Amount:</span>
-                <span className="text-green-600">
-                  {formatCurrency(calculation.refundAmount)} ETB
-                </span>
-              </div>
-            </div>
-          </div>
-        )}
-
-        <Button onClick={handleSubmit} disabled={!returnDate || !calculation}>
-          Submit Early Return Request
-        </Button>
-      </CardContent>
-    </Card>
-  );
-};
-```
+A second, competing tier-threshold scheme (`TierCalculationService` + seeded `ProviderTierRule` data) also exists and is also never called in production — two disagreeing threshold definitions coexist in code (hardcoded 50/70/85 for admin list-filtering vs. a seeded 60/75/90-plus-criteria scheme). Don't treat either as the single source of truth without checking which one, if either, a given feature actually reads from.
 
 ---
 
-## ⭐ Trust Score Display
+## Tier System — Real Commission Rates, Stub Admin UI
 
-### Trust Score Component
+**Real seeded commission rates** (confirmed 2026-07-23, do not use older figures from project memory without reconciling first): **Bronze 10% / Silver 8% / Gold 6% / Platinum 5%**. **There is no "Red Zone" tier anywhere in code.**
 
-**Rule BR-025:** Simple trust score calculation (0-100).
+**File:** `src/features/admin/pages/master-data/TiersPage.tsx`
 
-**Implementation:**
+The admin tier-management page's edit dialog is a **stub** — `toast.info('Update functionality coming soon')` — admins cannot actually change tier thresholds or commission rates through the UI today, despite the page appearing to offer an edit action. If asked to build tier-threshold editing, this is new work on an existing placeholder, not a bug fix.
 
-```typescript
-// File: src/features/provider/profile/components/TrustScoreGauge.tsx
-
-interface TrustScoreData {
-  score: number;
-  tier: ProviderTier;
-  breakdown: {
-    completionRate: number;
-    onTimeRate: number;
-    reliability: number;
-    quality: number;
-    disputeHistory: number;
-  };
-}
-
-export const TrustScoreGauge = ({ data }: { data: TrustScoreData }) => {
-  const percentage = data.score;
-  const circumference = 2 * Math.PI * 45; // radius = 45
-  const offset = circumference - (percentage / 100) * circumference;
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Trust Score</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <div className="flex items-center justify-center">
-          <div className="relative w-48 h-48">
-            <svg className="transform -rotate-90 w-48 h-48">
-              <circle
-                cx="96"
-                cy="96"
-                r="90"
-                stroke="currentColor"
-                strokeWidth="8"
-                fill="transparent"
-                className="text-gray-200"
-              />
-              <circle
-                cx="96"
-                cy="96"
-                r="90"
-                stroke="currentColor"
-                strokeWidth="8"
-                fill="transparent"
-                strokeDasharray={circumference}
-                strokeDashoffset={offset}
-                className={`transition-all ${
-                  percentage >= 85 ? 'text-green-600' :
-                  percentage >= 70 ? 'text-blue-600' :
-                  percentage >= 50 ? 'text-yellow-600' :
-                  'text-red-600'
-                }`}
-              />
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-              <div className="text-4xl font-bold">{data.score}</div>
-              <div className="text-sm text-gray-600">/ 100</div>
-              <Badge className="mt-2">{data.tier}</Badge>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-6 space-y-3">
-          <div>
-            <div className="flex justify-between text-sm mb-1">
-              <span>Completion Rate</span>
-              <span>{data.breakdown.completionRate}%</span>
-            </div>
-            <Progress value={data.breakdown.completionRate} />
-          </div>
-          <div>
-            <div className="flex justify-between text-sm mb-1">
-              <span>On-Time Delivery</span>
-              <span>{data.breakdown.onTimeRate}%</span>
-            </div>
-            <Progress value={data.breakdown.onTimeRate} />
-          </div>
-          <div>
-            <div className="flex justify-between text-sm mb-1">
-              <span>Reliability</span>
-              <span>{data.breakdown.reliability}%</span>
-            </div>
-            <Progress value={data.breakdown.reliability} />
-          </div>
-          <div>
-            <div className="flex justify-between text-sm mb-1">
-              <span>Quality (Ratings)</span>
-              <span>{data.breakdown.quality}/5</span>
-            </div>
-            <Progress value={(data.breakdown.quality / 5) * 100} />
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  );
-};
-```
+`TierDisplay`-style components (provider-facing tier card, showing current tier, commission rate, and progress to next tier) should pull thresholds from whichever of the two competing schemes above the specific screen is wired to — check the actual query/service call before assuming a number.
 
 ---
 
-## 🏆 Tier System Display
+## Validation Helpers Still Worth Having
 
-### Provider Tier Display
-
-**Rule BR-040, BR-042:** Hybrid tier determination (trust score + active fleet).
-
-```typescript
-// File: src/features/provider/profile/components/TierDisplay.tsx
-
-interface TierInfo {
-  currentTier: ProviderTier;
-  trustScore: number;
-  activeVehicles: number;
-  nextTier?: ProviderTier;
-  progressToNextTier?: {
-    trustScoreNeeded: number;
-    vehiclesNeeded: number;
-  };
-  commissionRate: number;
-  benefits: string[];
-}
-
-export const TierDisplay = ({ tierInfo }: { tierInfo: TierInfo }) => {
-  const tierColors = {
-    BRONZE: 'bg-amber-100 text-amber-800 border-amber-300',
-    SILVER: 'bg-gray-100 text-gray-800 border-gray-300',
-    GOLD: 'bg-yellow-100 text-yellow-800 border-yellow-300',
-    PLATINUM: 'bg-purple-100 text-purple-800 border-purple-300',
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Provider Tier</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="flex items-center gap-4">
-          <Badge className={`text-lg px-4 py-2 ${tierColors[tierInfo.currentTier]}`}>
-            {tierInfo.currentTier}
-          </Badge>
-          <div>
-            <p className="text-sm text-gray-600">Commission Rate</p>
-            <p className="text-2xl font-bold">{tierInfo.commissionRate * 100}%</p>
-          </div>
-        </div>
-
-        <div className="bg-gray-50 p-4 rounded">
-          <h4 className="font-semibold mb-2">Tier Requirements</h4>
-          <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span>Trust Score:</span>
-              <span className={tierInfo.trustScore >= getTierMinScore(tierInfo.currentTier) ? 'text-green-600' : 'text-red-600'}>
-                {tierInfo.trustScore} / {getTierMinScore(tierInfo.currentTier)}+
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span>Active Vehicles:</span>
-              <span className={tierInfo.activeVehicles >= getTierMinVehicles(tierInfo.currentTier) ? 'text-green-600' : 'text-red-600'}>
-                {tierInfo.activeVehicles} / {getTierMinVehicles(tierInfo.currentTier)}+
-              </span>
-            </div>
-          </div>
-        </div>
-
-        {tierInfo.nextTier && tierInfo.progressToNextTier && (
-          <div>
-            <h4 className="font-semibold mb-2">Progress to {tierInfo.nextTier}</h4>
-            <div className="space-y-2">
-              <div>
-                <div className="flex justify-between text-sm mb-1">
-                  <span>Trust Score</span>
-                  <span>
-                    {tierInfo.trustScore} / {tierInfo.progressToNextTier.trustScoreNeeded}
-                  </span>
-                </div>
-                <Progress
-                  value={(tierInfo.trustScore / tierInfo.progressToNextTier.trustScoreNeeded) * 100}
-                />
-              </div>
-              <div>
-                <div className="flex justify-between text-sm mb-1">
-                  <span>Active Vehicles</span>
-                  <span>
-                    {tierInfo.activeVehicles} / {tierInfo.progressToNextTier.vehiclesNeeded}
-                  </span>
-                </div>
-                <Progress
-                  value={(tierInfo.activeVehicles / tierInfo.progressToNextTier.vehiclesNeeded) * 100}
-                />
-              </div>
-            </div>
-          </div>
-        )}
-
-        <div>
-          <h4 className="font-semibold mb-2">Tier Benefits</h4>
-          <ul className="list-disc list-inside space-y-1 text-sm">
-            {tierInfo.benefits.map((benefit, index) => (
-              <li key={index}>{benefit}</li>
-            ))}
-          </ul>
-        </div>
-      </CardContent>
-    </Card>
-  );
-};
-
-const getTierMinScore = (tier: ProviderTier): number => {
-  const requirements = {
-    BRONZE: 0,
-    SILVER: 50,
-    GOLD: 70,
-    PLATINUM: 85,
-  };
-  return requirements[tier];
-};
-
-const getTierMinVehicles = (tier: ProviderTier): number => {
-  const requirements = {
-    BRONZE: 0,
-    SILVER: 5,
-    GOLD: 15,
-    PLATINUM: 30,
-  };
-  return requirements[tier];
-};
-```
-
-### Business Tier Display
-
-Similar implementation for business tiers with different criteria (completed contracts + active fleet).
-
----
-
-## 📊 Market Price Guidance
-
-### Display Market Price Range
-
-```typescript
-// File: src/features/business/rfq/components/MarketPriceGuidance.tsx
-
-export const MarketPriceGuidance = ({ vehicleType }: { vehicleType: string }) => {
-  const { data: priceRange } = useQuery({
-    queryKey: ['market-prices', vehicleType],
-    queryFn: () => masterDataService.getMarketPriceRange(vehicleType),
-  });
-
-  if (!priceRange) return null;
-
-  return (
-    <div className="bg-blue-50 border border-blue-200 rounded p-3 mt-2">
-      <p className="text-sm font-semibold text-blue-900 mb-1">Market Price Guidance</p>
-      <div className="text-xs text-blue-800 space-y-1">
-        <p>Average: {formatCurrency(priceRange.average)} ETB</p>
-        <p>Range: {formatCurrency(priceRange.floor)} - {formatCurrency(priceRange.ceiling)} ETB</p>
-        <p className="text-blue-600 mt-2">
-          Your bid price should be within this range to be considered.
-        </p>
-      </div>
-    </div>
-  );
-};
-```
-
----
-
-## ✅ Validation Helpers
-
-### Date Validation
-
-```typescript
-// File: src/shared/utils/date-validation.ts
-
-export const validateRFQDates = (
-  startDate: Date,
-  endDate: Date,
-  bidDeadline: Date
-): { isValid: boolean; errors: string[] } => {
-  const errors: string[] = [];
-  const today = new Date();
-  const minStartDate = addDays(today, 3);
-
-  if (!isAfter(startDate, minStartDate)) {
-    errors.push('Start date must be at least 3 days from now');
-  }
-
-  if (!isAfter(endDate, startDate)) {
-    errors.push('End date must be after start date');
-  }
-
-  if (!isBefore(bidDeadline, startDate)) {
-    errors.push('Bid deadline must be before start date');
-  }
-
-  if (isBefore(bidDeadline, today)) {
-    errors.push('Bid deadline cannot be in the past');
-  }
-
-  return {
-    isValid: errors.length === 0,
-    errors,
-  };
-};
-```
-
-### Price Validation
-
-```typescript
-export const validateBidPrice = (
-  price: number,
-  vehicleType: string,
-  priceRange: MarketPriceRange
-): { isValid: boolean; error?: string } => {
-  if (price < priceRange.floor) {
-    return {
-      isValid: false,
-      error: `Price must be at least ${formatCurrency(priceRange.floor)} ETB`,
-    };
-  }
-
-  if (price > priceRange.ceiling) {
-    return {
-      isValid: false,
-      error: `Price cannot exceed ${formatCurrency(priceRange.ceiling)} ETB`,
-    };
-  }
-
-  return { isValid: true };
-};
-```
-
----
-
-**END OF BUSINESS LOGIC IMPLEMENTATION GUIDE**
-
-*For business rules reference, see [MVP_AUTHORITATIVE_BUSINESS_RULES.md](./MVP_MODULAR/MVP_final_docs/MVP_AUTHORITATIVE_BUSINESS_RULES.md)*
-
+The v1.0 doc's generic `validateRFQDates`/`validateBidPrice` helpers describe reasonable client-side guardrails (start date buffer, bid-deadline-before-start-date, price-within-market-range) that are a sound pattern in principle, but **were not confirmed to exist as standalone utility files** in this pass — if you find or add equivalent validation, prefer colocating it with the form it guards (matching the rest of this codebase's convention of inline `useMemo`/`useState`-driven validation over shared generic utility modules) rather than assuming a shared `src/shared/utils/date-validation.ts` already exists.

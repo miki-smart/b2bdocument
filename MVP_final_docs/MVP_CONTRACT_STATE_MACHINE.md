@@ -1,25 +1,26 @@
 # Movello MVP - Contract State Machine Specification
-## Complete State Definitions, Transitions & Timeouts - Version 1.0
 
-**Document Status:** AUTHORITATIVE  
-**Date:** December 22, 2025  
-**Related Documents:** 
-- MVP_AUTHORITATIVE_BUSINESS_RULES.md
-- MVP_EVENT_CATALOG_AND_HANDLERS.md
-- MVP_MODULE_INTEGRATION_SPECIFICATION.md  
-**Review Status:** ✅ Approved by Business Owner
+## Complete State Definitions, Transitions & Timeouts — Version 2.0
+
+**Document Status:** AUTHORITATIVE — rewritten against running code
+**Last verified against code:** 2026-07-23
+**Supersedes:** Version 1.0 (December 22, 2025), which described states (`FAILED`, `UNDER_DISPUTE`, `PENDING_ALTERATION`, `ALTERED`) that were never implemented, and omitted five states that were (`Draft`, `PendingActivation`, `EscrowLockFailed`, `TerminationRequested`, `PartiallyReturned`).
+**Ground truth files:** `backend/src/Marketplace.API/Modules/Contracts/Domain/Enums/ContractStatus.cs`, `Domain/Entities/Contract.cs`, `Domain/Entities/ContractLineItem.cs`, `Domain/Entities/ContractVehicleAssignment.cs`, `Controllers/Contracts/ContractsController.cs`, and every command handler under `Application/Contract/Commands/**`.
+**Related documents:** `04_MODULE_SPECIFICATIONS/Contracts_Module.md`, `backlog/mvp/epic-06-contract-management.md`, `project-docs/partial-fulfillment-spec.md`.
 
 ---
 
 ## Document Purpose
 
-This document defines the complete contract lifecycle state machine for the Movello MVP platform, including:
-- All contract states and their meanings
-- State transition rules and triggers
-- Timeout definitions and actions
-- State validation rules
-- Error states and recovery procedures
-- Visual state diagrams
+This document defines the complete contract lifecycle state machine **as actually implemented** in `Marketplace.API`, including:
+- All contract, line-item, and vehicle-assignment states and their real meanings
+- State transition rules and the exact code that triggers each one
+- Timeout definitions and the background jobs that enforce them
+- State validation rules (assignment/blocking rule tables)
+- Known dead code, unreachable states, and gaps between what's modeled and what's wired to an endpoint
+- Event flow between the Contracts module and Finance/Delivery/Notifications
+
+**A critical fact that shapes this entire document:** `Contract.Status` is a plain `string` column. A C# `ContractStatus` enum exists with 17 PascalCase members, but it is referenced **nowhere** in the codebase outside its own file (confirmed: zero matches for `ContractStatus.` across the backend). The actual system persists `UPPER_SNAKE_CASE` string literals set directly by domain methods, and there are **18** distinct values in practice — one (`CANCELLED`) isn't in the enum at all. This document treats the string values as ground truth and calls out every enum/reality mismatch explicitly.
 
 ---
 
@@ -27,1742 +28,546 @@ This document defines the complete contract lifecycle state machine for the Move
 
 1. [Contract State Overview](#1-contract-state-overview)
 2. [Contract State Definitions](#2-contract-state-definitions)
-3. [Contract Line Item State Definitions](#2a-contract-line-item-state-definitions)
-4. [Vehicle Assignment State Definitions](#2b-vehicle-assignment-state-definitions)
-5. [State Transition Matrix](#3-state-transition-matrix)
-6. [State Machine Diagram](#4-state-machine-diagram)
-7. [Timeout Rules](#5-timeout-rules)
-8. [State Validation Rules](#6-state-validation-rules)
-9. [Error States & Recovery](#7-error-states--recovery)
-10. [State Change Event Flow](#8-state-change-event-flow)
-11. [Business Rules Mapping](#9-business-rules-mapping)
-12. [Status Aggregation Rules](#10-status-aggregation-rules)
+3. [Contract Line Item State Definitions](#3-contract-line-item-state-definitions)
+4. [Vehicle Assignment State Definitions](#4-vehicle-assignment-state-definitions)
+5. [State Transition Matrix](#5-state-transition-matrix)
+6. [State Machine Diagram](#6-state-machine-diagram)
+7. [Timeout Rules](#7-timeout-rules)
+8. [State Validation Rules](#8-state-validation-rules)
+9. [Dead Code, Vestigial States & Unwired Commands](#9-dead-code-vestigial-states--unwired-commands)
+10. [State Change Event Flow](#10-state-change-event-flow)
+11. [Status Aggregation Rules](#11-status-aggregation-rules)
+12. [API Surface Reference](#12-api-surface-reference)
 
 ---
 
 ## 1. CONTRACT STATE OVERVIEW
 
-### 1.1 State Categories
+### 1.1 The 18 real status values
 
-**Pending States** (Contract Not Yet Active):
-- `PENDING_ESCROW` - Waiting for escrow lock
-- `PENDING_VEHICLE_ASSIGNMENT` - Waiting for vehicle assignment
-- `PENDING_DELIVERY` - Waiting for delivery confirmation
-- `PARTIALLY_DELIVERED` - Some vehicles delivered, waiting for remaining vehicles
-- `TIMEOUT_PENDING` - Activation timeout reached
+| # | String value | In `ContractStatus` enum? | Reachable in current code? |
+|---|---|---|---|
+| 1 | `DRAFT` | ✅ `Draft` | ❌ backing-field default only; every factory overrides it before save |
+| 2 | `PENDING_ESCROW` | ✅ `PendingEscrow` | ✅ |
+| 3 | `ESCROW_LOCK_FAILED` | ✅ `EscrowLockFailed` | ✅ |
+| 4 | `PENDING_VEHICLE_ASSIGNMENT` | ✅ `PendingVehicleAssignment` | ✅ |
+| 5 | `PENDING_ACTIVATION` | ✅ `PendingActivation` | ❌ vestigial — guarded against, never set |
+| 6 | `PENDING_SIGNING` | ✅ `PendingSigning` | ✅ |
+| 7 | `SIGNED` | ✅ `Signed` | ⚠️ momentary/in-memory only, never persisted as a distinct row |
+| 8 | `PENDING_DELIVERY` | ✅ `PendingDelivery` | ✅ |
+| 9 | `PARTIALLY_DELIVERED` | ✅ `PartiallyDelivered` | ✅ |
+| 10 | `ACTIVE` | ✅ `Active` | ✅ |
+| 11 | `TERMINATION_REQUESTED` | ✅ `TerminationRequested` | ✅ |
+| 12 | `TERMINATED` | ✅ `Terminated` | ✅ (only via request→approve pair) |
+| 13 | `COMPLETED` | ✅ `Completed` | ✅ |
+| 14 | `DISPUTED` | ✅ `Disputed` | ❌ vestigial — guarded against, never set |
+| 15 | `ON_HOLD` | ✅ `OnHold` | ❌ vestigial — guarded against, never set |
+| 16 | `TIMEOUT_PENDING` | ✅ `TimeoutPending` | ✅ |
+| 17 | `PARTIALLY_RETURNED` | ✅ `PartiallyReturned` | ✅ |
+| 18 | `CANCELLED` | ❌ not in enum | ✅ |
 
-**Active States** (Contract Running):
-- `ACTIVE` - Contract is active and running
-- `ON_HOLD` - Contract temporarily suspended
+Three of the 17 enum members (`PendingActivation`, `Disputed`, `OnHold`) are never produced by any transition in the current build — they exist only as guard-clause literals (e.g. "don't overwrite this status during aggregation," "this status is required to call this endpoint") that nothing ever actually satisfies. `Draft` is the EF Core backing-field default but is always overwritten before the first save. `Signed` is set and then overwritten within the same method call before `SaveChanges`, so it is real in the sense that the code briefly holds it, but it can never be observed in the database or in `GetContractStatusHistory`. `CANCELLED` is the opposite case: fully real and reachable, but completely undocumented in the enum.
 
-**Completion States** (Contract Ended):
-- `COMPLETED` - Contract successfully completed
-- `TERMINATED` - Contract cancelled/terminated early
-- `FAILED` - Contract failed during setup
+There is **no `SUSPENDED` state and no suspension mechanism of any kind.** Nothing in the Contracts module re-checks business wallet balance once a contract is `ACTIVE`. This is the single biggest divergence from earlier drafts of this document and from `backlog/mvp/epic-06-contract-management.md`'s pre-rewrite text.
 
-**Administrative States**:
-- `UNDER_DISPUTE` - Contract has active dispute
-- `PENDING_ALTERATION` - Contract modification requested
-- `ALTERED` - Contract has been modified
+### 1.2 State categories
 
----
+**Setup states** (contract not yet operational):
+- `PENDING_ESCROW` — waiting for the automatic escrow lock
+- `ESCROW_LOCK_FAILED` — escrow lock exhausted 5 retries
+- `PENDING_VEHICLE_ASSIGNMENT` — waiting for provider to assign specific vehicles
+- `PENDING_SIGNING` — all vehicles assigned, waiting for dual-party OTP terms acceptance
+- `PENDING_DELIVERY` — terms signed, waiting for first physical delivery
 
-### 1.2 State Lifecycle Overview
+**Operational states** (vehicles moving/in service):
+- `PARTIALLY_DELIVERED` — some but not all awarded vehicles delivered
+- `ACTIVE` — every awarded vehicle delivered; contract fully in service
+- `PARTIALLY_RETURNED` — some or all vehicles returned; gate for the two-party completion flow
+- `TIMEOUT_PENDING` — contract end date reached with vehicles still outstanding
+
+**Exit/administrative states:**
+- `TERMINATION_REQUESTED` — one party asked to end the contract early
+- `TERMINATED` — termination approved
+- `COMPLETED` — two-party (or admin-override) completion approved
+- `CANCELLED` — cancelled pre-signing (admin abort or escrow timeout); not in the `ContractStatus` enum
+
+**Vestigial (defined, never reached):**
+- `PENDING_ACTIVATION`, `DISPUTED`, `ON_HOLD`
+
+### 1.3 Real lifecycle path (happy path, RFQ-sourced contract)
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                     CONTRACT LIFECYCLE                            │
-└──────────────────────────────────────────────────────────────────┘
+CreateContract (BidAwardedEvent)
+  └─▶ PENDING_ESCROW
+        └─▶ [escrow locked] ─▶ PENDING_VEHICLE_ASSIGNMENT
+                                   └─▶ [all line items fully assigned] ─▶ PENDING_SIGNING
+                                          └─▶ [both parties OTP-confirm terms] ─▶ (SIGNED, in-memory only) ─▶ PENDING_DELIVERY
+                                                 └─▶ [first vehicle delivered] ─▶ PARTIALLY_DELIVERED
+                                                        └─▶ [last vehicle delivered] ─▶ ACTIVE
+                                                               └─▶ [some vehicles returned] ─▶ PARTIALLY_RETURNED
+                                                                      └─▶ [two-party completion approved] ─▶ COMPLETED
 
-CREATION → PENDING_ESCROW → PENDING_VEHICLE_ASSIGNMENT → 
-PENDING_DELIVERY → [PARTIALLY_DELIVERED] → ACTIVE → COMPLETED
-
-Note: PARTIALLY_DELIVERED is optional - only occurs when contract has multiple vehicles and some but not all are delivered.
-
-                    ↓ (if issues)
-              TIMEOUT_PENDING
-                    ↓
-            ON_HOLD / FAILED
+Side branches:
+  PENDING_ESCROW  ──(5 retries exhausted)──▶ ESCROW_LOCK_FAILED ──(manual retry)──▶ PENDING_ESCROW
+  PENDING_ESCROW  ──(24h timeout, job)─────▶ CANCELLED
+  {PENDING_VEHICLE_ASSIGNMENT, PENDING_ESCROW, PENDING_SIGNING} ──(admin abort)──▶ CANCELLED
+  {ACTIVE, PARTIALLY_RETURNED} ──(request)──▶ TERMINATION_REQUESTED ──(approve)──▶ TERMINATED
+  {contract past EndDate, vehicles still out} ──(daily job)──▶ TIMEOUT_PENDING (settlement still runs; not a dead end)
 ```
+
+Direct Rental contracts follow the same status machine; the only difference is that a Direct Rental contract may already have vehicle assignments at creation (chosen during booking), so `ActivateAfterEscrowLock()` can send it straight to `PENDING_SIGNING` instead of `PENDING_VEHICLE_ASSIGNMENT`.
 
 ---
 
 ## 2. CONTRACT STATE DEFINITIONS
 
-**Note:** Contract status aggregates from Contract Line Item statuses. See [Section 2A](#2a-contract-line-item-state-definitions) and [Section 10](#10-status-aggregation-rules) for details.
-
 ### 2.1 PENDING_ESCROW
 
-**Description:** Contract created after bid award, waiting for escrow funds to be locked.
+**Description:** Contract just created (from bid award or Direct Rental acceptance); escrow not yet locked.
 
-**Entry Conditions:**
-- `BidAwardedEvent` received
-- Contract created successfully
-- Escrow lock NOT yet confirmed
+**Entry:** `Contract.Create()` / `CreateFromBid()` / `CreateFromDirectRental()` — this is the initial status for every contract, always, regardless of source.
 
-**Exit Conditions:**
-- `EscrowLockedEvent` received → Transition to `PENDING_VEHICLE_ASSIGNMENT`
-- `EscrowLockFailedEvent` received (after retries) → Transition to `FAILED`
-- Timeout (5 days) → Transition to `TIMEOUT_PENDING`
+**Exit:**
+- `ContractCreatedEventHandler` locks escrow successfully → `Contract.ActivateAfterEscrowLock()` → `PENDING_VEHICLE_ASSIGNMENT` (or `PENDING_SIGNING` if already fully assigned)
+- 5 lock retries exhausted → `Contract.MarkAsEscrowLockFailed()` → `ESCROW_LOCK_FAILED`
+- `EscrowTimeoutJob` (every 15 min) finds the contract older than the configurable timeout (`ESCROW_RELEASE_DELAY_HOURS` MasterData setting, default 24h) → `Contract.Cancel()` → `CANCELLED`
+- Admin `abort-before-signing` → `CANCELLED` (with escrow refund if a lock happens to already exist)
 
-**Allowed Actions:**
-- System: Retry escrow lock (background job)
-- Business: Deposit funds to wallet
-- Provider: None (waiting)
-- Admin: Cancel contract
+**Escrow amount formula:** `Σ over line items of (UnitAmount × QuantityAwarded × min(DurationDays, 30))` — capped at 30 days per line item even for long-term contracts, so escrow only ever covers the first billing cycle.
 
-**Key Attributes:**
-```typescript
-{
-  status: 'PENDING_ESCROW',
-  escrowLockAttempts: number,
-  lastEscrowAttemptAt: timestamp,
-  createdAt: timestamp,
-  timeoutAt: timestamp (createdAt + 5 days)
-}
-```
-
-**Business Rule Reference:** BR-010, BR-011
+**Business rule reference:** BR-010 (auto escrow lock), BR-011 (5-retry backoff).
 
 ---
 
-### 2.2 PENDING_VEHICLE_ASSIGNMENT
+### 2.2 ESCROW_LOCK_FAILED
 
-**Description:** Escrow locked successfully, waiting for provider to assign vehicles.
+**Description:** Escrow lock failed on all 5 attempts (1s/2s/4s/8s/16s backoff).
 
-**Entry Conditions:**
-- `EscrowLockedEvent` received
-- Contract status = `PENDING_ESCROW`
-- Escrow amount locked in business wallet
+**Entry:** `ContractCreatedEventHandler`, after the 5th failed attempt.
 
-**Exit Conditions:**
-- All required vehicles assigned → Transition to `PENDING_DELIVERY`
-- Timeout (5 days) → Transition to `TIMEOUT_PENDING`
-- Provider rejects contract → Transition to `FAILED`
-
-**Allowed Actions:**
-- Provider: Assign vehicles to contract
-- Provider: Request contract cancellation
-- Business: View contract status
-- Admin: Assign vehicles manually, cancel contract
-
-**Key Attributes:**
-```typescript
-{
-  status: 'PENDING_VEHICLE_ASSIGNMENT',
-  escrowLockedAt: timestamp,
-  requiredVehicles: number,
-  assignedVehicles: number,
-  assignedVehicleIds: string[],
-  timeoutAt: timestamp (escrowLockedAt + 5 days)
-}
-```
-
-**Business Rule Reference:** BR-013
+**Exit:**
+- `RetryEscrowLockCommand` (admin or business-triggered) pre-validates wallet balance, then `Contract.ResetForEscrowRetry()` → back to `PENDING_ESCROW`, republishes `ContractCreatedEvent`.
+- No automatic notification is sent on entry — the handler only logs a `LogCritical` line and has two `// TODO` comments for business/admin notification and an admin task queue, neither implemented.
 
 ---
 
-### 2.3 PENDING_DELIVERY
+### 2.3 PENDING_VEHICLE_ASSIGNMENT
 
-**Description:** Vehicles assigned, waiting for delivery confirmation via OTP.
+**Description:** Escrow locked; provider must attach specific vehicles to each line item before the contract can move to signing.
 
-**Entry Conditions:**
-- All required vehicles assigned
-- Contract status = `PENDING_VEHICLE_ASSIGNMENT`
-- Delivery scheduled
+**Entry:**
+- `ActivateAfterEscrowLock()` when at least one operational line item isn't fully assigned
+- `ResetVehicleAssignmentsCommand` (wipes all assignments/delivery sessions/OTPs, returns here) — admin or provider
+- `ResetContractToPendingVehicleAssignmentCommand` (admin-only) — **guarded on `Status == PENDING_ACTIVATION`, which nothing ever sets; this endpoint's precondition can never be satisfied today**
+- `AbortContractBeforeSigningCommand` resets line items here as part of cancelling (though the contract itself ends up `CANCELLED`, not this status)
 
-**Exit Conditions:**
-- First vehicle delivered (OTP verified) → Transition to `PARTIALLY_DELIVERED` (if contract has multiple vehicles)
-- All vehicles delivered (OTP verified) → Transition to `ACTIVE` (if all vehicles delivered in one batch or last vehicle delivered)
-- `DeliveryRejectedEvent` received → Transition to `FAILED`
-- Timeout (5 days from delivery date) → Transition to `TIMEOUT_PENDING`
+**Exit:** Once `Σ QuantityActive == Σ QuantityAwarded` across operational line items → `PENDING_SIGNING` (propagated by `IContractVehicleAssignmentService.TryPropagateContractStatusFromLineItems` after each `AssignVehicleCommand`).
 
-**Allowed Actions:**
-- Provider: Generate OTP, deliver vehicles, verify OTP
-- Business: Inspect vehicles, share OTP if satisfied, reject if not satisfied
-- Admin: Cancel contract, manually activate
-
-**Key Attributes:**
-```typescript
-{
-  status: 'PENDING_DELIVERY',
-  vehiclesAssignedAt: timestamp,
-  deliveryScheduledDate: date,
-  deliveryLocation: object,
-  otpAttempts: number,
-  timeoutAt: timestamp (deliveryScheduledDate + 5 days)
-}
-```
-
-**Business Rule Reference:** BR-014, BR-015
+**Allowed actions:** Provider assigns vehicles (`POST .../assign-vehicle`, `1..N` vehicle IDs per call); provider/admin can unassign or reset.
 
 ---
 
-### 2.4 PARTIALLY_DELIVERED
+### 2.4 PENDING_SIGNING
 
-**Description:** Some vehicles have been delivered and verified via OTP, but not all vehicles assigned to the contract have been delivered yet.
+**Description:** Every awarded vehicle is assigned; contract now needs both parties to OTP-confirm the current contract-terms version.
 
-**Entry Conditions:**
-- Contract status = `PENDING_DELIVERY`
-- At least one vehicle delivery confirmed via OTP (`DeliveryConfirmedEvent` received)
-- Not all vehicles have been delivered yet (quantityDelivered < quantityAwarded)
+**Entry:** Full assignment reached (see 2.3), or `ActivateAfterEscrowLock()` directly for Direct Rental contracts whose vehicles were pre-assigned.
 
-**Exit Conditions:**
-- All vehicles delivered (last vehicle OTP verified) → Transition to `ACTIVE`
-- Remaining vehicles not delivered within timeout → Transition to `TIMEOUT_PENDING` or remain `PARTIALLY_DELIVERED` until resolved
-- All remaining vehicles rejected → Transition to `FAILED`
+**Exit:**
+- `VerifyContractTermsOtpCommandHandler`, once both `BusinessOtpConfirmed` and `ProviderOtpConfirmed` are true → `Contract.MarkTermsSigned()` → `SIGNED` then immediately `PENDING_DELIVERY` in the same call (see 2.5).
+- Admin `abort-before-signing` → `CANCELLED`.
 
-**Allowed Actions:**
-- Provider: Continue delivering remaining vehicles, generate OTP for each vehicle
-- Business: Inspect and accept/reject remaining vehicle deliveries
-- System: Process partial activation (contract activates with delivered vehicles only)
-- Admin: Cancel contract, manually activate with partial delivery
-
-**Key Attributes:**
-```typescript
-{
-  status: 'PARTIALLY_DELIVERED',
-  firstDeliveryAt: timestamp,
-  quantityAwarded: number,
-  quantityDelivered: number,
-  quantityActive: number,
-  deliveredVehicleIds: string[],
-  pendingVehicleIds: string[],
-  lastDeliveryAt: timestamp,
-  timeoutAt: timestamp (firstDeliveryAt + 5 days for remaining vehicles)
-}
-```
-
-**Business Rule Reference:** BR-016, BR-016A
-
-**Note: Contract-Level Schedule, Vehicle-Level Earnings (Partial Delivery/Return Safe)**
-
-Contracts in `PARTIALLY_DELIVERED` status are considered operational for delivered vehicles only. To keep settlement deterministic under partial delivery, late delivery, and partial return:
-- **Schedule windows are contract-level** (cycle boundaries). They define **when** settlement is calculated.
-- **Earnings are vehicle-level** and computed from actual activity inside a window:
-  - `Gross = Σ(UnitPricePerDay × ActiveDaysInWindow)` across delivered vehicles
-  - `ActiveDaysInWindow` is the overlap of `[DeliveredAt, ReturnedAt)` with the settlement window.
-- **Undelivered vehicles** contribute `0` until delivered (OTP verified). **Late-delivered vehicles** start contributing from `DeliveredAt`. **Returned vehicles** stop contributing after `ReturnedAt`.
+**Mechanism:** `POST /contracts/{id}/terms/otp/generate` creates/refreshes a `ContractTermsAcceptance` row bound to the active `ContractTermsVersion`; each party gets an independent 6-digit OTP (5-min expiry, 60s resend cooldown). `POST /contracts/{id}/terms/otp/verify` lets only the authenticated caller's own party confirm their own code — there is no cross-party verification path. This is a completely separate mechanism from the delivery-confirmation OTP in Epic 07.
 
 ---
 
-### 2.5 ACTIVE
+### 2.5 SIGNED (transient, not persisted)
 
-**Description:** Contract is active, all vehicles delivered and in use.
-
-**Entry Conditions:**
-- All vehicles delivered and verified via OTP (`DeliveryConfirmedEvent` received for all vehicles)
-- All activation prerequisites met:
-  - ✅ Escrow locked
-  - ✅ Vehicles assigned
-  - ✅ All deliveries confirmed
-- OR contract status = `PARTIALLY_DELIVERED` and last remaining vehicle delivered
-
-**Exit Conditions:**
-- Contract end date reached + vehicle returned → Transition to `COMPLETED`
-- `EarlyReturnApprovedEvent` received → Transition to `COMPLETED`
-- `ContractTerminatedEvent` → Transition to `TERMINATED`
-- Dispute created → Transition to `UNDER_DISPUTE`
-- Contract alteration requested → Transition to `PENDING_ALTERATION`
-
-**Allowed Actions:**
-- Business: Request early return (7 day notice required), request contract alteration, raise dispute
-- Provider: Request early return (7 day notice required), request contract alteration, raise dispute
-- System: Process monthly settlements (for long-term contracts)
-- Admin: Terminate contract, alter contract
-
-**Key Attributes:**
-```typescript
-{
-  status: 'ACTIVE',
-  activatedAt: timestamp,
-  actualStartDate: date,
-  expectedEndDate: date,
-  lastSettlementDate: date (for long-term contracts),
-  nextSettlementDate: date (for long-term contracts),
-  totalSettlementsPaid: number
-}
+**Description:** Logically, "both parties have signed." In code, `Contract.MarkTermsSigned()` does:
+```csharp
+Status = "SIGNED";       // assigned in-memory
+UpdatedAt = ...;
+Status = "PENDING_DELIVERY";  // immediately overwritten, same method, before SaveChanges
+UpdatedAt = ...;
 ```
-
-**Business Rule Reference:** BR-016, BR-018
+No `SaveChanges` occurs between the two assignments, and `VerifyContractTermsOtpCommandHandler` does not write a `ContractStatusHistory` row for the `SIGNED` step. **A contract's `Status` column can never be observed as `"SIGNED"` in the database, and there is no audit-trail evidence that a "signed, awaiting delivery" moment ever separately existed.** Treat this as a logical/instantaneous state useful for narrating the flow, not a queryable state.
 
 ---
 
-### 2.6 TIMEOUT_PENDING
+### 2.6 PENDING_DELIVERY
 
-**Description:** Contract stuck in pending state beyond timeout threshold, requires manual intervention.
+**Description:** Terms fully signed; waiting for the first vehicle to be physically delivered and OTP-confirmed (Epic 07 flow).
 
-**Entry Conditions:**
-- Contract in any pending state for > 5 days
-- System timeout job detected expired contract
+**Entry:** End of dual-OTP signing (2.5).
 
-**Exit Conditions:**
-- Admin resolves issue → Transition to previous pending state or `FAILED`
-- Business/Provider resolves issue → Transition to next pending state
-- Admin cancels → Transition to `FAILED`
-
-**Allowed Actions:**
-- System: Send notifications to both parties
-- Admin: Investigate, resolve, or cancel
-- Business: Resolve blocking issue (deposit funds, etc.)
-- Provider: Resolve blocking issue (assign vehicles, etc.)
-
-**Key Attributes:**
-```typescript
-{
-  status: 'TIMEOUT_PENDING',
-  previousStatus: string,
-  timeoutReachedAt: timestamp,
-  timeoutReason: string,
-  notificationsSent: number,
-  lastNotificationAt: timestamp
-}
-```
-
-**Business Rule Reference:** BR-017
+**Exit:** First `DeliveryConfirmedEvent` → `DeliveryConfirmedEventHandler` → `Contract.UpdateStatusBasedOnDelivery()` → `PARTIALLY_DELIVERED` (if more remain) or `ACTIVE` (if that one delivery covers the entire awarded quantity, e.g. a single-vehicle contract).
 
 ---
 
-### 2.7 ON_HOLD
+### 2.7 PARTIALLY_DELIVERED
 
-**Description:** Contract temporarily suspended due to payment default or other issues. Awaiting provider decision on grace period.
+**Description:** Some, but not all, awarded vehicles have been delivered and OTP-confirmed.
 
-**Entry Conditions:**
-- Business failed to deposit for next billing cycle (payment default)
-- Insurance expired during contract
-- Dispute requires temporary suspension
-- Admin manually places on hold
+**Entry/Exit:** Managed entirely by `Contract.UpdateStatusBasedOnDelivery()`, called from `DeliveryConfirmedEventHandler` and `DeliveryReturnConfirmedEventHandler`. Moves to `ACTIVE` once `totalDelivered == totalAwarded && totalReturned == 0`; can also be re-entered from `ACTIVE`-adjacent states if a vehicle is unassigned/replaced pre-completion (rare in practice, since post-delivery removal is effectively blocked — see §9).
 
-**Exit Conditions:**
-- Provider grants grace period AND business deposits → Transition to `ACTIVE`
-- Provider denies grace period OR grace period expires without payment → Transition to `TERMINATED`
-- Issue resolved (for non-payment holds) → Transition to `ACTIVE`
-- Admin manually reactivates or terminates
-
-**Allowed Actions:**
-
-**For Payment Default (Business failed to deposit):**
-- **Provider (within 24 hours):** 
-  - Choose "Collect vehicles now" (terminate immediately)
-  - Choose "Grant grace period" (1-7 days) - provider bears risk
-- **Business:** 
-  - Wait for provider decision
-  - If grace period granted: Deposit funds immediately
-- **Admin:** Override decision, terminate, or manually resolve
-
-**For Other Hold Reasons:**
-- Business: Resolve issue (e.g., renew insurance)
-- Provider: Update insurance
-- Admin: Reactivate or terminate
-
-**Notifications:**
-
-**When ON_HOLD due to payment default:**
-- **To Business:** "Payment overdue. Contract suspended. Awaiting provider's decision on whether to collect vehicles or grant grace period."
-- **To Provider:** "Business [Name] failed to pay 30,000 ETB for Month 2. Choose: (1) Collect vehicles now (Recommended), OR (2) Grant grace period (1-7 days) - you bear the risk if business doesn't pay."
-
-**If Provider Grants Grace Period:**
-- **To Business:** "Provider granted you [X] days grace period. Deposit [Amount] + late fee by [Date] or vehicles will be collected. Total due: [Amount + Late Fee + Next Month Escrow]"
-- **To Provider:** "Grace period active. Business has until [Date] to deposit. You will be paid for grace period days if business deposits."
-
-**If Grace Period Expires Without Payment:**
-- **To Business:** "Grace period expired. Contract terminated. Account suspended until debt cleared. Debt: [Amount] ETB."
-- **To Provider:** "Business failed to pay. Contract terminated. Collect your vehicles. Outstanding debt recorded: [Amount] ETB."
-
-**Key Attributes:**
-```typescript
-{
-  status: 'ON_HOLD',
-  holdReason: 'PAYMENT_DEFAULT' | 'INSURANCE_EXPIRED' | 'DISPUTE' | 'ADMIN',
-  holdStartedAt: timestamp,
-  previousStatus: string,
-  
-  // For payment default holds
-  providerDecisionRequired: boolean,
-  providerDecisionDeadline: timestamp (holdStartedAt + 24 hours),
-  gracePeriodGranted: boolean | null,
-  gracePeriodDays: number | null,
-  gracePeriodDeadline: timestamp | null,
-  gracePeriodAmount: number | null,
-  lateFeeAmount: number | null
-}
-```
-
-**Business Rule Reference:** BR-012, BR-028
+**Vehicles can still be assigned during this state** (`ContractAssignmentRules.AssignableContractStatuses` includes it) — useful for filling in vehicles that weren't ready at initial assignment time.
 
 ---
 
-### 2.8 COMPLETED
+### 2.8 ACTIVE
 
-**Description:** Contract successfully completed, all obligations fulfilled.
+**Description:** Every awarded vehicle across every line item has been delivered; the contract is fully in service.
 
-**Entry Conditions:**
-- Contract status = `ACTIVE`
-- Contract end date reached
-- Vehicles returned and verified
-- No outstanding disputes
+**Entry:** `Contract.UpdateStatusBasedOnDelivery()` when `totalDelivered == totalAwarded && totalReturned == 0`; `ActivatedAt` is stamped on first entry only. `DeliveryConfirmedEventHandler` publishes `ContractActivatedEvent` at this exact moment (the one true "activation" event in the system) and triggers settlement-schedule generation anchored to the **first** delivery date (not contract creation date, not this activation moment).
 
-**Exit Conditions:**
-- None (final state)
+**Exit:**
+- Any return (`DeliveryReturnConfirmedEvent`) → `PARTIALLY_RETURNED` (even a single vehicle returning moves the whole contract out of `ACTIVE`)
+- `RequestTerminationCommand` → `TERMINATION_REQUESTED`
+- Contract end date reached with vehicles still outstanding → `TIMEOUT_PENDING` (daily job)
 
-**Allowed Actions:**
-- System: Process final settlement
-- Business: View contract history, download documents
-- Provider: View settlement details
-- Admin: View audit trail
-
-**Key Attributes:**
-```typescript
-{
-  status: 'COMPLETED',
-  completedAt: timestamp,
-  actualEndDate: date,
-  totalDaysActive: number,
-  finalSettlementAmount: number,
-  finalSettlementProcessed: boolean,
-  vehiclesReturned: boolean,
-  completionType: 'NORMAL' | 'EARLY_RETURN'
-}
-```
-
-**Business Rule Reference:** BR-018, BR-030
+**Protected from aggregation overwrite** alongside `ON_HOLD`, `TERMINATED`, `TIMEOUT_PENDING`, `DISPUTED` — i.e. `UpdateStatusBasedOnDelivery()` will not silently move a contract out of these five statuses based on quantity math; `ACTIVE` itself is not in that protected list, so it *is* subject to being recalculated (e.g. down to `PARTIALLY_RETURNED`) as returns happen.
 
 ---
 
-### 2.9 TERMINATED
+### 2.9 TERMINATION_REQUESTED
 
-**Description:** Contract cancelled or terminated before normal completion.
+**Description:** One party has asked to end the contract before its natural completion.
 
-**Entry Conditions:**
-- Contract terminated by business/provider/admin
-- Mutual agreement to cancel
-- Force majeure or breach of contract
+**Entry:** `RequestTerminationCommand`. Note a real gap between two layers of validation:
+- The **domain method** `Contract.RequestTermination()` allows this from `ACTIVE`, `PENDING_ACTIVATION`, `PENDING_ESCROW`, or `PARTIALLY_RETURNED`.
+- The **command handler** actually wired to the API only allows `ACTIVE` or `PARTIALLY_RETURNED` — the other two branches of the domain guard are unreachable through the real endpoint.
 
-**Exit Conditions:**
-- None (final state)
-
-**Allowed Actions:**
-- System: Process refunds/settlements
-- Business: View termination details
-- Provider: View termination details
-- Admin: Review termination
-
-**Key Attributes:**
-```typescript
-{
-  status: 'TERMINATED',
-  terminatedAt: timestamp,
-  terminationReason: string,
-  terminatedBy: 'BUSINESS' | 'PROVIDER' | 'ADMIN' | 'SYSTEM',
-  daysActive: number,
-  refundProcessed: boolean,
-  penaltyApplied: boolean,
-  penaltyAmount: number
-}
-```
-
-**Business Rule Reference:** BR-020, BR-021
+**Exit:** `ApproveTerminationCommand` (any of business/provider/admin — no self-vs-other-party restriction, unlike completion) → `TERMINATED`; all currently `ACTIVE` line items are individually force-`TERMINATED` too. There is no reject/withdraw endpoint for a termination request.
 
 ---
 
-### 2.10 FAILED
+### 2.10 TERMINATED
 
-**Description:** Contract setup failed, could not be activated.
+**Description:** Contract formally ended via the termination-request/approve pair.
 
-**Entry Conditions:**
-- Escrow lock failed (after all retries)
-- Provider rejected contract
-- Delivery rejected by business
-- Critical validation failure
+**Entry:** `ApproveTerminationCommand` only, in the current build. The lower-level domain methods `Contract.Terminate()` and `Contract.TerminateEarly()` (the latter computes an early-termination penalty amount and writes it into `TerminationReason` as text) **have zero callers anywhere in the codebase** — fully dead code today, despite being fully implemented and documented in the entity.
 
-**Exit Conditions:**
-- None (final state)
+**Exit:** None — terminal state.
 
-**Allowed Actions:**
-- System: Release any locked escrow
-- Business: Create new RFQ or re-award bid
-- Provider: None
-- Admin: Review failure reason
+---
 
-**Key Attributes:**
-```typescript
-{
-  status: 'FAILED',
-  failedAt: timestamp,
-  failureReason: string,
-  failureStage: 'ESCROW' | 'VEHICLE_ASSIGNMENT' | 'DELIVERY',
-  refundProcessed: boolean
-}
+### 2.11 COMPLETED
+
+**Description:** Contract successfully wound down; every vehicle returned, all settlement cycles cleared, both parties (or an admin) agreed it's done.
+
+**Entry:**
+- `ApproveContractCompletionCommand` (the *other* party from whoever requested) → `Contract.ApproveCompletion()` → `Complete()`
+- `CompleteContractCommand` (admin/super-admin override) — same prerequisite checks, bypasses the two-party requirement, resolves any pending `ContractCompletionRequest` as `ADMIN_OVERRIDE`
+
+**Prerequisites (enforced identically by request/approve/admin-complete):** every `ContractVehicleAssignment` is `RETURNED`; no `MonthlySettlementSchedule` is `LOCKED` or overdue `PENDING`; `ContractCompletionSettlementGuard` confirms every returned vehicle's service window is covered by a `COMPLETED` settlement payout, and there's no unresolved `AVAILABLE` escrow rollover.
+
+**Exit:** None — terminal state.
+
+---
+
+### 2.12 DISPUTED / ON_HOLD (vestigial)
+
+**Description (as designed, never realized):** Both appear in `Contract.UpdateStatusBasedOnDelivery()`'s `protectedStatuses` array (meaning if a contract were ever in one of these, the aggregation logic wouldn't silently overwrite it), and `DISPUTED` is separately counted by an admin dashboard stats query (`openDisputesCount`). **No command, handler, controller, or background job anywhere sets a `Contract.Status` to `"DISPUTED"` or `"ON_HOLD"`.** These read as fully designed states with zero implementation behind them — the same conclusion the audit reached about the absence of a dedicated Dispute Engine (`11_Trust_Escrow_Dispute_Engines_Spec.md`). Note: `EscrowLock` and `ContractPenalty` entities have their *own*, unrelated `"DISPUTED"` status values (escrow-lock disputes, penalty disputes) — those are real and reachable, just not the same field as `Contract.Status`.
+
+---
+
+### 2.13 TIMEOUT_PENDING
+
+**Description:** Contract has passed its `EndDate` but still has vehicle assignments that are neither `RETURNED` nor `REPLACED`.
+
+**Entry:** `ContractEndLifecycleJob` — a daily background job (targets 00:45 UTC) that scans all non-`COMPLETED`/`TERMINATED`/`CANCELLED` contracts with `EndDate.Date <= today`, and for each one with outstanding vehicles: sets `TIMEOUT_PENDING` (once), triggers due-settlement generation for that contract (approval stays manual), and notifies both parties to return/collect vehicles (once, only on the actual transition).
+
+**Exit:** Not automated — as vehicles get returned via the normal delivery-return flow, `UpdateStatusBasedOnDelivery()` would recompute status, but `TIMEOUT_PENDING` is in the protected-statuses list, so **it will not automatically fall through to `PARTIALLY_RETURNED` on its own** — this is a genuine ambiguity in the current implementation worth flagging to engineering: a contract that enters `TIMEOUT_PENDING` and then has all its vehicles returned has no automated path back into the normal completion pipeline today; it would need manual/admin intervention to move it forward.
+
+---
+
+### 2.14 PARTIALLY_RETURNED
+
+**Description:** At least one vehicle has been returned; gate for the two-party completion flow.
+
+**Entry:** `Contract.UpdateStatusBasedOnDelivery()`, whenever `0 < totalReturned < totalAwarded`, **or** when `totalReturned == totalAwarded` too (the same branch fires for "some" and "all" returned — the method does not have a separate branch that jumps straight to `COMPLETED` on full return; full return still lands here so the two-party completion gate is never bypassed automatically). This is deliberate: the code comment on `UpdateStatusBasedOnDelivery()` explicitly says auto-setting `COMPLETED` here would bypass the completion flow.
+
+**Exit:** `PARTIALLY_RETURNED` is where `RequestTerminationCommand` (still allowed here) and the whole completion-request pipeline (§2.11) both operate.
+
+---
+
+### 2.15 CANCELLED (not in the `ContractStatus` enum)
+
+**Description:** Contract cancelled before it was ever signed.
+
+**Entry:**
+- `AbortContractBeforeSigningCommand` (admin/super-admin, from `PENDING_VEHICLE_ASSIGNMENT`/`PENDING_ESCROW`/`PENDING_SIGNING`) — soft-removes vehicle assignments, resets line items, releases vehicles, refunds any locked escrow, writes a `ContractStatusHistory` row (`USER_CANCEL`)
+- `EscrowTimeoutJob` (from `PENDING_ESCROW` only, past the configurable timeout) — **does not write a `ContractStatusHistory` row**, an inconsistency with the admin path
+
+**Exit:** None — terminal state.
+
+---
+
+## 3. CONTRACT LINE ITEM STATE DEFINITIONS
+
+`ContractLineItem.Status` (string, default `"PENDING_ACTIVATION"` on the backing field but always set to `"PENDING_VEHICLE_ASSIGNMENT"` by both `Create()` factories) uses 7 real values:
+
+| Status | Meaning | Set by |
+|---|---|---|
+| `PENDING_VEHICLE_ASSIGNMENT` | No vehicles assigned yet | `ContractLineItem.Create()` / `CreateFromDirectRental()` |
+| `PENDING_ACTIVATION` | Assigned quantity reached, none delivered yet | `UpdateStatusBasedOnDelivery()`/`UpdateStatusBasedOnReturn()`/`UpdateStatus()` internal branches, once `QuantityActive > 0` |
+| `PARTIALLY_DELIVERED` | Some, not all, awarded vehicles delivered | same internal methods |
+| `ACTIVE` | All awarded vehicles delivered, none returned | same |
+| `PARTIALLY_RETURNED` | Some, not all, delivered vehicles returned | same |
+| `COMPLETED` | All awarded vehicles returned | same |
+| `TERMINATED` | Line item force-closed (contract termination approval terminates all `ACTIVE` line items) | `ContractLineItem.Terminate()` |
+
+The separate `ContractLineStatus` C# enum (`PendingActivation, PartiallyDelivered, Active, PartiallyReturned, Completed, Terminated, OnHold, Disputed`) **does not match this list**: it's missing `PendingVehicleAssignment` (the real, heavily-used initial value) and carries `OnHold`/`Disputed`, neither of which is ever set at line-item level. Same enum/reality gap pattern as the contract-level enum.
+
+Line items track quantities, not just status: `QuantityAwarded`, `QuantityActive` (currently assigned & not yet returned/removed), `QuantityDelivered` (cumulative, OTP-confirmed), `QuantityReturned` (cumulative). `TotalAmount = QuantityAwarded × UnitAmount × DurationDays`.
+
+---
+
+## 4. VEHICLE ASSIGNMENT STATE DEFINITIONS
+
+`ContractVehicleAssignment.Status` is a plain string with **no dedicated enum type at all**. The entity's own doc comment lists 4 values; the real code uses 5:
+
+| Status | Meaning | Set by | In entity's own comment? |
+|---|---|---|---|
+| `ASSIGNED` | Vehicle attached to a line item, not yet delivered | `ContractVehicleAssignment.Create()` | ✅ |
+| `DELIVERED` | OTP-confirmed physical handover | `MarkDelivered()`, from `DeliveryConfirmedEventHandler` | ✅ |
+| `RETURNED` | Vehicle handed back | `Release()`, from `DeliveryReturnConfirmedEventHandler` or `InitiateEarlyReturnCommandHandler` (unreachable — see §9) | ✅ |
+| `REPLACED` | Superseded by a replacement assignment | `Replace()` | ✅ |
+| `REMOVED` | Unassigned pre-delivery, or force-cleared by admin reset/abort | `SetStatus("REMOVED")` in `UnassignVehicleCommandHandler`, `ResetVehicleAssignmentsCommandHandler`, `AbortContractBeforeSigningCommandHandler` | ❌ not documented in the entity comment |
+
+`ContractVehicleBlockingRules.ActiveAssignmentStatuses = { ASSIGNED, DELIVERED }` — only these two statuses hold a slot open against the line item's awarded quantity and block the underlying `Vehicle` from being reused elsewhere.
+
+---
+
+## 5. STATE TRANSITION MATRIX
+
+| From | To | Trigger | Handler |
+|---|---|---|---|
+| *(new)* | `PENDING_ESCROW` | Bid awarded / Direct Rental accepted | `CreateContractCommand` / `CreateDirectRentalContractCommand` |
+| `PENDING_ESCROW` | `PENDING_VEHICLE_ASSIGNMENT` or `PENDING_SIGNING` | Escrow locked | `ContractCreatedEventHandler` → `ActivateAfterEscrowLock()` |
+| `PENDING_ESCROW` | `ESCROW_LOCK_FAILED` | 5 lock retries failed | `ContractCreatedEventHandler` |
+| `PENDING_ESCROW` | `CANCELLED` | Timeout (default 24h) | `EscrowTimeoutJob` |
+| `PENDING_ESCROW` | `CANCELLED` | Admin pre-signing abort | `AbortContractBeforeSigningCommand` |
+| `ESCROW_LOCK_FAILED` | `PENDING_ESCROW` | Manual retry, balance re-checked | `RetryEscrowLockCommand` |
+| `PENDING_VEHICLE_ASSIGNMENT` | `PENDING_SIGNING` | All line items fully assigned | `AssignVehicleCommand` → status propagation |
+| `PENDING_VEHICLE_ASSIGNMENT` | `CANCELLED` | Admin pre-signing abort | `AbortContractBeforeSigningCommand` |
+| any assignable status | `PENDING_VEHICLE_ASSIGNMENT` | Full assignment reset | `ResetVehicleAssignmentsCommand` |
+| `PENDING_SIGNING` | `PENDING_DELIVERY` (via momentary `SIGNED`) | Both parties OTP-confirm terms | `VerifyContractTermsOtpCommand` → `MarkTermsSigned()` |
+| `PENDING_SIGNING` | `CANCELLED` | Admin pre-signing abort | `AbortContractBeforeSigningCommand` |
+| `PENDING_DELIVERY` | `PARTIALLY_DELIVERED` or `ACTIVE` | First delivery confirmed | `DeliveryConfirmedEventHandler` |
+| `PARTIALLY_DELIVERED` | `ACTIVE` | Last vehicle delivered | `DeliveryConfirmedEventHandler` |
+| `ACTIVE` | `PARTIALLY_RETURNED` | Any vehicle returned | `DeliveryReturnConfirmedEventHandler` |
+| `ACTIVE` / `PARTIALLY_RETURNED` | `TERMINATION_REQUESTED` | Termination requested | `RequestTerminationCommand` |
+| `TERMINATION_REQUESTED` | `TERMINATED` | Termination approved | `ApproveTerminationCommand` |
+| `PARTIALLY_RETURNED` | `COMPLETED` | Two-party approval or admin override | `ApproveContractCompletionCommand` / `CompleteContractCommand` |
+| `PARTIALLY_RETURNED` | `PARTIALLY_RETURNED` | Completion rejected (no-op transition) | `RejectContractCompletionCommand` |
+| any non-`COMPLETED`/`TERMINATED`/`CANCELLED` past `EndDate` with open vehicles | `TIMEOUT_PENDING` | Daily end-of-term scan | `ContractEndLifecycleJob` |
+
+Not real transitions (documented for completeness, never fired): anything into/out of `PENDING_ACTIVATION`, `DISPUTED`, `ON_HOLD` at the contract level.
+
+---
+
+## 6. STATE MACHINE DIAGRAM
+
+```mermaid
+stateDiagram-v2
+    [*] --> PENDING_ESCROW: bid awarded / DR accepted
+
+    PENDING_ESCROW --> PENDING_VEHICLE_ASSIGNMENT: escrow locked (RFQ, unassigned)
+    PENDING_ESCROW --> PENDING_SIGNING: escrow locked (DR, pre-assigned)
+    PENDING_ESCROW --> ESCROW_LOCK_FAILED: 5 retries failed
+    PENDING_ESCROW --> CANCELLED: timeout job / admin abort
+    ESCROW_LOCK_FAILED --> PENDING_ESCROW: manual retry
+
+    PENDING_VEHICLE_ASSIGNMENT --> PENDING_SIGNING: all line items fully assigned
+    PENDING_VEHICLE_ASSIGNMENT --> CANCELLED: admin abort
+
+    PENDING_SIGNING --> PENDING_DELIVERY: both parties OTP-confirm terms
+    PENDING_SIGNING --> CANCELLED: admin abort
+
+    PENDING_DELIVERY --> PARTIALLY_DELIVERED: some vehicles delivered
+    PENDING_DELIVERY --> ACTIVE: all vehicles delivered (single-vehicle contract)
+    PARTIALLY_DELIVERED --> ACTIVE: last vehicle delivered
+
+    ACTIVE --> PARTIALLY_RETURNED: any vehicle returned
+    ACTIVE --> TERMINATION_REQUESTED: termination requested
+    ACTIVE --> TIMEOUT_PENDING: end date reached, vehicles still out
+
+    PARTIALLY_RETURNED --> TERMINATION_REQUESTED: termination requested
+    PARTIALLY_RETURNED --> COMPLETED: two-party approval / admin override
+    PARTIALLY_RETURNED --> TIMEOUT_PENDING: end date reached, vehicles still out
+
+    TERMINATION_REQUESTED --> TERMINATED: approved
+
+    COMPLETED --> [*]
+    TERMINATED --> [*]
+    CANCELLED --> [*]
+
+    note right of PENDING_ACTIVATION
+        PENDING_ACTIVATION, DISPUTED, ON_HOLD:
+        defined in enum + guard code,
+        never produced by any transition
+    end note
 ```
 
 ---
 
-### 2.11 UNDER_DISPUTE
+## 7. TIMEOUT RULES
 
-**Description:** Contract has active dispute, certain actions blocked until resolution.
+| Job | Frequency | Scans for | Action |
+|---|---|---|---|
+| `EscrowTimeoutJob` | Every 15 minutes | Contracts in `PENDING_ESCROW` older than `ESCROW_RELEASE_DELAY_HOURS` (MasterData setting, default 24h) | `Contract.Cancel()` → `CANCELLED` (no status-history row written) |
+| `ContractEndLifecycleJob` | Daily, targets 00:45 UTC | Contracts with `EndDate.Date <= today`, status not `COMPLETED`/`TERMINATED`/`CANCELLED`, with any vehicle assignment not `RETURNED`/`REPLACED` | First time only: `TIMEOUT_PENDING` + party notifications. Every run: attempts due-settlement generation for that contract (`GenerateSettlementCommand`, swallows `InvalidOperationException` if nothing's due) |
 
-**Entry Conditions:**
-- Dispute created by business or provider
-- Dispute category affects contract status
+There is **no** timeout for a contract stuck in `PENDING_VEHICLE_ASSIGNMENT`, `PENDING_SIGNING`, or `PENDING_DELIVERY` — only the pre-escrow window is time-boxed. A contract can sit in `PENDING_SIGNING` indefinitely if one party never completes their OTP.
 
-**Exit Conditions:**
-- Dispute resolved → Transition to previous state or `ACTIVE`
-- Dispute resolved with termination → Transition to `TERMINATED`
+Escrow-lock retry backoff (not a "timeout" but time-based): 5 attempts at 1s, 2s, 4s, 8s, 16s (≈31 seconds total) inside a single synchronous handler invocation — this is not a background job, it happens within the initial `ContractCreatedEvent` handling.
 
-**Allowed Actions:**
-- Business/Provider: Submit evidence, add comments
-- System: Continue monthly settlements (if applicable)
-- Admin: Resolve dispute
-- Both parties: Limited actions based on dispute type
-
-**Key Attributes:**
-```typescript
-{
-  status: 'UNDER_DISPUTE',
-  disputeId: string,
-  disputeCreatedAt: timestamp,
-  previousStatus: string,
-  disputeCategory: string,
-  blockedActions: string[]
-}
-```
-
-**Business Rule Reference:** BR-034, BR-035, BR-036
+Early-return notice period (`InitiateEarlyReturnCommand`): reads `ContractPolicyRule` scenario `EARLY_RETURN`'s `GracePeriodHours` (converted to days, ceiling), defaulting to 7 days if unconfigured. **This command has no controller endpoint anywhere and is never invoked from any other module — it is unreachable in the running system today** (see §9). Actual vehicle returns, early or on-schedule, happen exclusively through the Delivery module's return-confirmation flow (`DeliveryReturnConfirmedEvent`), which has no notice-period concept at all.
 
 ---
 
-### 2.12 PENDING_ALTERATION
+## 8. STATE VALIDATION RULES
 
-**Description:** Contract modification requested, awaiting approval.
+### 8.1 `ContractAssignmentRules` — where vehicles may be assigned
 
-**Entry Conditions:**
-- Business or provider requested contract alteration
-- Contract status = `ACTIVE`
+- **Assignable contract statuses:** `PENDING_VEHICLE_ASSIGNMENT`, `PENDING_ACTIVATION`, `PENDING_SIGNING`, `PARTIALLY_DELIVERED`, `PARTIALLY_RETURNED`. (Note `PENDING_ACTIVATION` appears here even though it's unreachable at contract level — harmless dead branch.)
+- **Assignable line-item statuses:** `PENDING_VEHICLE_ASSIGNMENT`, `PENDING_ACTIVATION`, `PARTIALLY_DELIVERED`, `PARTIALLY_RETURNED`, `COMPLETED` — `COMPLETED` is intentionally included so a fully-returned line item can still receive a replacement vehicle before the whole contract is closed out.
+- **Quantity math:** open slots = `QuantityAwarded − (count of assignments with status ASSIGNED or DELIVERED)`.
 
-**Exit Conditions:**
-- Alteration approved by both parties → Transition to `ALTERED`
-- Alteration rejected → Transition to `ACTIVE`
+### 8.2 `ContractVehicleBlockingRules` — when an assigned vehicle can't be reused elsewhere
 
-**Allowed Actions:**
-- Business/Provider: Review alteration, approve/reject
-- Admin: Review alteration
-- System: Continue existing contract terms
+- **Blocking contract statuses:** `PENDING_ESCROW`, `PENDING_VEHICLE_ASSIGNMENT`, `PENDING_ACTIVATION`, `PENDING_SIGNING`, `SIGNED`, `PENDING_DELIVERY`, `PARTIALLY_DELIVERED`, `PARTIALLY_RETURNED`, `ACTIVE` — includes `PENDING_ESCROW` because Direct Rental contracts may pre-assign vehicles before escrow even locks.
+- **Active assignment statuses:** `ASSIGNED`, `DELIVERED` only — `RETURNED`/`REPLACED`/`REMOVED` never block reuse.
 
-**Key Attributes:**
-```typescript
-{
-  status: 'PENDING_ALTERATION',
-  alterationRequestedAt: timestamp,
-  requestedBy: 'BUSINESS' | 'PROVIDER',
-  alterationType: string,
-  alterationDetails: object,
-  businessApproval: boolean | null,
-  providerApproval: boolean | null
-}
-```
+### 8.3 Vehicle prerequisites for assignment
+
+- Vehicle must belong to the awarded provider and have `Status == APPROVED`.
+- Vehicle must not already hold an `ASSIGNED`/`DELIVERED` assignment on a *different* contract or a *different* line item within the same contract.
+
+### 8.4 Two-party completion prerequisites (§2.11) — identical across request/approve/admin-complete
+
+1. Every `ContractVehicleAssignment` (non-deleted) has `Status == RETURNED`.
+2. No `MonthlySettlementSchedule` for the contract is `LOCKED`, or `PENDING` with `SettlementDate <= today` (future-dated `PENDING` cycles don't block).
+3. `ContractCompletionSettlementGuard`: every returned vehicle's `[DeliveredAt, ReleasedAt)` service window must be covered by a `COMPLETED` `SettlementPayout`/`SettlementPayoutLineItem` for every settlement cycle that window overlaps; and there must be no `AVAILABLE` `EscrowRollover` left unresolved for the contract.
+4. Requester ≠ approver/rejecter (self-approval and self-rejection are both explicitly blocked; admin is exempt from this check).
 
 ---
 
-### 2.13 ALTERED
+## 9. DEAD CODE, VESTIGIAL STATES & UNWIRED COMMANDS
 
-**Description:** Contract has been modified, new terms in effect.
+This section exists because a spec that only describes "the happy path" would misrepresent how much of the modeled richness is actually reachable. Verified by exhaustive grep across the backend (0 call sites found for each):
 
-**Entry Conditions:**
-- Contract alteration approved by both parties
-- Contract status = `PENDING_ALTERATION`
+| Component | Status | Evidence |
+|---|---|---|
+| `Contract.Terminate()`, `Contract.TerminateEarly()` | Fully implemented (incl. early-termination penalty math), **zero callers** | `ApproveTermination()` is the only real path to `TERMINATED` |
+| `ExtendContractCommand`/Handler | Fully implemented (settlement-schedule regeneration), **no controller route anywhere** | Web's `ExtendContractDialog.tsx` calls `POST /contracts/{id}/extend`, which does not exist on any controller — the shipped "Extend Contract" button has no working backend |
+| `ReplaceVehicleCommand`/Handler | Fully implemented, **no controller route anywhere** | Vehicle replacement can only theoretically happen through `UnassignVehicleCommand`'s replacement branch |
+| `InitiateEarlyReturnCommand`/Handler | Fully implemented (notice-period logic, policy-driven grace period), **no controller route, no event-handler invocation anywhere** | Only reference to the command is its own command/handler/validator files |
+| `ContractAmendment.Create()` | Entity fully modeled (`Sign()`/`Reject()`), **zero callers** | `UnassignVehicleCommand`'s post-delivery replacement branch requires a signed `SCOPE_CHANGE` amendment that nothing can ever create — that branch is unreachable in practice |
+| `ContractPenalty.Create()` | Entity fully modeled (`MarkPaid()`/`Waive()`/`Dispute()`), **zero callers** | No termination, early-return, or replacement flow produces a penalty record despite UI copy (e.g. `AdminContractTerminationPage`) implying penalties are applied |
+| `PENDING_ACTIVATION` contract status | Defined in enum, referenced in 2 rule tables and 1 termination guard | Never set by any transition |
+| `DISPUTED` / `ON_HOLD` contract status | Defined in enum, protected in aggregation logic, `DISPUTED` counted in an admin dashboard query | Never set by any transition |
+| `ResetContractToPendingVehicleAssignmentCommand` | Fully wired to `PATCH /contracts/{id}/reset-to-pending-vehicle-assignment` | Precondition (`Status == PENDING_ACTIVATION`) can never be true, so the endpoint always 400s |
+| `SIGNED` status | Set in-memory | Overwritten before `SaveChanges`; no history row |
 
-**Exit Conditions:**
-- Continue normal lifecycle → Transition to `ACTIVE`
-- Contract ends → Transition to `COMPLETED`
-
-**Allowed Actions:**
-- System: Apply new terms, process adjustments
-- Business/Provider: View updated contract
-- Admin: View alteration history
-
-**Key Attributes:**
-```typescript
-{
-  status: 'ALTERED',
-  alteredAt: timestamp,
-  alterationType: string,
-  previousTerms: object,
-  newTerms: object,
-  financialAdjustment: number
-}
-```
-
-**Note:** After alteration is processed, contract typically returns to `ACTIVE` status with updated terms.
+**Practical implication:** the *actually reachable* end-to-end contract flow is narrower than the domain layer suggests. Treat anything in this table as "modeled, not delivered" — don't spec new work assuming it functions, and don't count it as done in coverage audits without re-verifying wiring first.
 
 ---
 
-## 3. STATE TRANSITION MATRIX
-
-### 3.1 Valid State Transitions
-
-| From State | To State | Trigger | Event |
-|-----------|----------|---------|-------|
-| `PENDING_ESCROW` | `PENDING_VEHICLE_ASSIGNMENT` | Escrow locked | `EscrowLockedEvent` |
-| `PENDING_ESCROW` | `TIMEOUT_PENDING` | 5 days elapsed | System timeout job |
-| `PENDING_ESCROW` | `FAILED` | Escrow lock failed (all retries) | `EscrowLockFailedEvent` |
-| `PENDING_VEHICLE_ASSIGNMENT` | `PENDING_DELIVERY` | All vehicles assigned | `VehicleAssignedEvent` |
-| `PENDING_VEHICLE_ASSIGNMENT` | `TIMEOUT_PENDING` | 5 days elapsed | System timeout job |
-| `PENDING_VEHICLE_ASSIGNMENT` | `FAILED` | Provider rejected | `ProviderRejectedAwardEvent` |
-| `PENDING_DELIVERY` | `PARTIALLY_DELIVERED` | First vehicle(s) delivered (if multiple vehicles) | `DeliveryConfirmedEvent` (partial) |
-| `PENDING_DELIVERY` | `ACTIVE` | All vehicles delivered in one batch | `DeliveryConfirmedEvent` (all) |
-| `PENDING_DELIVERY` | `TIMEOUT_PENDING` | 5 days elapsed | System timeout job |
-| `PENDING_DELIVERY` | `FAILED` | Delivery rejected | `DeliveryRejectedEvent` |
-| `PARTIALLY_DELIVERED` | `ACTIVE` | Last remaining vehicle(s) delivered | `DeliveryConfirmedEvent` (completion) |
-| `PARTIALLY_DELIVERED` | `TIMEOUT_PENDING` | Remaining vehicles not delivered (5 days) | System timeout job |
-| `PARTIALLY_DELIVERED` | `FAILED` | All remaining vehicles rejected | `DeliveryRejectedEvent` (all remaining) |
-| `TIMEOUT_PENDING` | Previous pending state | Issue resolved | Manual resolution |
-| `TIMEOUT_PENDING` | `FAILED` | Cannot be resolved | Admin cancellation |
-| `ACTIVE` | `PARTIALLY_RETURNED` | First vehicle returned | `VehicleReturnedEvent` |
-| `PARTIALLY_RETURNED` | `COMPLETED` | All vehicles returned | All line items completed |
-| `ACTIVE` | `COMPLETED` | Contract period ended, all vehicles returned | `ContractCompletedEvent` |
-| `ACTIVE` | `COMPLETED` | Early return approved, all vehicles returned | `EarlyReturnApprovedEvent` |
-| `ACTIVE` | `TERMINATED` | Contract terminated | `ContractTerminatedEvent` |
-| `ACTIVE` | `UNDER_DISPUTE` | Dispute created | `DisputeCreatedEvent` |
-| `ACTIVE` | `PENDING_ALTERATION` | Alteration requested | `ContractAlterationRequestedEvent` |
-| `ACTIVE` | `ON_HOLD` | Payment/insurance issue | System check |
-| `ON_HOLD` | `ACTIVE` | Issue resolved | System verification |
-| `ON_HOLD` | `TERMINATED` | Cannot resolve | Admin decision |
-| `UNDER_DISPUTE` | `ACTIVE` | Dispute resolved | `DisputeResolvedEvent` |
-| `UNDER_DISPUTE` | `TERMINATED` | Dispute resolved with termination | `DisputeResolvedEvent` |
-| `PENDING_ALTERATION` | `ALTERED` | Both parties approved | `ContractAlteredEvent` |
-| `PENDING_ALTERATION` | `ACTIVE` | Alteration rejected | Rejection action |
-| `ALTERED` | `ACTIVE` | Adjustments processed | System processing |
-
-### 3.2 Invalid State Transitions
-
-**Cannot transition from completion states:**
-- `COMPLETED` → Any state ❌
-- `TERMINATED` → Any state ❌
-- `FAILED` → Any state ❌
-
-**Cannot skip pending states:**
-- `PENDING_ESCROW` → `PENDING_DELIVERY` ❌ (must go through `PENDING_VEHICLE_ASSIGNMENT`)
-- `PENDING_ESCROW` → `ACTIVE` ❌
-
----
-
-## 4. STATE MACHINE DIAGRAM
-
-### 4.1 Happy Path Flow
+## 10. STATE CHANGE EVENT FLOW
 
 ```
-┌────────────────┐
-│ BidAwardedEvent│
-└───────┬────────┘
-        │
-        ▼
-┌─────────────────────┐
-│  PENDING_ESCROW     │
-│                     │
-│ Waiting for escrow  │
-│ lock                │
-└──────────┬──────────┘
-           │ EscrowLockedEvent
-           ▼
-┌─────────────────────────────┐
-│ PENDING_VEHICLE_ASSIGNMENT  │
-│                             │
-│ Waiting for provider to     │
-│ assign vehicles             │
-└──────────┬──────────────────┘
-           │ VehicleAssignedEvent
-           ▼
-┌─────────────────────┐
-│ PENDING_DELIVERY    │
-│                     │
-│ Waiting for OTP     │
-│ verification        │
-└──────────┬──────────┘
-           │ DeliveryConfirmedEvent
-           ▼
-┌─────────────────────┐
-│      ACTIVE         │
-│                     │
-│ Contract running    │
-│ (Monthly settlements│
-│ for long contracts) │
-└──────────┬──────────┘
-           │ ContractCompletedEvent
-           ▼
-┌─────────────────────┐
-│    COMPLETED        │
-│                     │
-│ Final settlement    │
-│ processed           │
-└─────────────────────┘
-```
+BidAwardedEvent (Marketplace module)
+  └─▶ BidAwardedEventHandler ─▶ CreateContractCommand ─▶ ContractCreatedEvent
 
-### 4.2 Complete State Diagram with Error Paths
+DirectRentalRequestAcceptedEvent / ...PartiallyAcceptedEvent (Marketplace module)
+  └─▶ DirectRentalRequestAcceptedEventHandler ─▶ CreateDirectRentalContractCommand ─▶ ContractCreatedEvent
 
-```
-                    ┌──────────────────┐
-                    │ BidAwardedEvent  │
-                    └────────┬─────────┘
-                             │
-                             ▼
-        ┌────────────────────────────────────────┐
-        │         PENDING_ESCROW                 │
-        │  Retry escrow lock (5 attempts)        │
-        └─┬──────────┬────────────────┬─────────┘
-          │          │                │
-  EscrowLocked  Timeout (5d)    Lock Failed (all retries)
-          │          │                │
-          │          ▼                ▼
-          │   ┌─────────────────┐  ┌──────────┐
-          │   │TIMEOUT_PENDING  │  │ FAILED   │
-          │   │                 │  └──────────┘
-          │   └─────────────────┘
-          │
-          ▼
-        ┌────────────────────────────────────────┐
-        │   PENDING_VEHICLE_ASSIGNMENT           │
-        │   Provider assigns vehicles            │
-        └─┬──────────┬────────────────┬─────────┘
-          │          │                │
-  Vehicles     Timeout (5d)    Provider Rejects
-  Assigned       │                │
-          │          │                │
-          │          ▼                ▼
-          │   ┌─────────────────┐  ┌──────────┐
-          │   │TIMEOUT_PENDING  │  │ FAILED   │
-          │   └─────────────────┘  └──────────┘
-          │
-          ▼
-        ┌────────────────────────────────────────┐
-        │      PENDING_DELIVERY                  │
-        │      OTP verification                  │
-        └─┬──────────┬────────────────┬─────────┘
-          │          │                │
-  First Vehicle  Timeout (5d)   Business Rejects
-  Delivered (if  │                │
-  multiple)      │                │
-          │          ▼                ▼
-          │   ┌─────────────────┐  ┌──────────┐
-          │   │TIMEOUT_PENDING  │  │ FAILED   │
-          │   └─────────────────┘  └──────────┘
-          │
-          ▼
-        ┌────────────────────────────────────────┐
-        │    PARTIALLY_DELIVERED (optional)      │
-        │    Some vehicles delivered, waiting    │
-        │    for remaining vehicles              │
-        └─┬──────────┬────────────────┬─────────┘
-          │          │                │
-  All Vehicles  Timeout (5d)   Remaining
-  Delivered      │            Rejected
-          │          │                │
-          │          ▼                ▼
-          │   ┌─────────────────┐  ┌──────────┐
-          │   │TIMEOUT_PENDING  │  │ FAILED   │
-          │   └─────────────────┘  └──────────┘
-          │
-          ▼
-        ┌────────────────────────────────────────┐
-        │           ACTIVE                       │
-        │     Monthly settlements                │
-        │     (for long contracts)               │
-        └─┬────┬──────┬──────┬──────────────┬───┘
-          │    │      │      │              │
-    Normal End │  Dispute Payment/Ins  Alteration
-          │  Early  Created  Issue      Request
-          │  Return   │      │              │
-          │    │      │      │              │
-          │    │      ▼      ▼              ▼
-          │    │  ┌──────────────┐  ┌──────────────┐
-          │    │  │UNDER_DISPUTE │  │PENDING_      │
-          │    │  │              │  │ALTERATION    │
-          │    │  └──────┬───────┘  └───┬──────────┘
-          │    │         │              │
-          │    │    Resolved        Approved
-          │    │         │              │
-          │    │         └──────►┌──────▼──────┐
-          │    │                 │   ALTERED   │
-          │    │                 └──────┬──────┘
-          │    │                        │
-          │    │                        ▼
-          │    │                  Back to ACTIVE
-          │    │
-          │    └────────────┐
-          │                 │
-          ▼                 ▼
-        ┌─────────────────────┐
-        │     COMPLETED       │
-        │                     │
-        │ Final settlement    │
-        └─────────────────────┘
-        
-        
-        Termination Path:
-        ACTIVE → TERMINATED (forced cancellation)
-        ON_HOLD → TERMINATED (cannot resolve)
+ContractCreatedEvent
+  └─▶ ContractCreatedEventHandler (Finance module)
+        ├─▶ success ─▶ ContractEscrowLockedEvent
+        └─▶ 5 failures ─▶ Contract marked ESCROW_LOCK_FAILED (no event published)
+
+AssignVehicleCommand (per call)
+  └─▶ VehicleAssignedEvent (per newly-assigned vehicle)
+  └─▶ contract status propagated in the same transaction if fully assigned
+
+VerifyContractTermsOtpCommand (both parties confirmed)
+  └─▶ ContractTermsAcceptedEvent
+
+DeliveryConfirmedEvent (Delivery module, per vehicle)
+  └─▶ DeliveryConfirmedEventHandler (Contracts module)
+        ├─▶ first delivery ─▶ settlement schedule generated
+        └─▶ last delivery ─▶ ContractActivatedEvent
+
+DeliveryReturnConfirmedEvent (Delivery module, per vehicle)
+  └─▶ DeliveryReturnConfirmedEventHandler (Contracts module)
+        └─▶ all returned ─▶ in-app admin notification "contract_completion_eligible_admin"
+            (no automatic settlement, no automatic completion)
+
+RequestTerminationCommand / ApproveTerminationCommand
+  └─▶ in-app notifications to both parties (no domain event published on these two paths)
+
+RequestContractCompletionCommand / Approve.../Reject.../Cancel...
+  └─▶ in-app notifications to the relevant party/parties (no domain event published)
+
+ContractEndLifecycleJob (daily)
+  └─▶ TIMEOUT_PENDING + party notifications (first transition only)
+  └─▶ GenerateSettlementCommand attempt (every run)
+
+EscrowTimeoutJob (every 15 min)
+  └─▶ Contract.Cancel() — no event, no notification, no status-history row
 ```
 
 ---
 
-## 5. TIMEOUT RULES
+## 11. STATUS AGGREGATION RULES
 
-### 5.1 Timeout Configuration
+`Contract.UpdateStatusBasedOnDelivery()` is the single function that derives contract status from line-item quantities after any delivery or return. Its precedence, in order:
 
-| State | Timeout Duration | Action on Timeout |
-|-------|-----------------|-------------------|
-| `PENDING_ESCROW` | 5 days from contract creation | → `TIMEOUT_PENDING` + Notify both parties |
-| `PENDING_VEHICLE_ASSIGNMENT` | 5 days from escrow lock | → `TIMEOUT_PENDING` + Notify both parties |
-| `PENDING_DELIVERY` | 5 days from scheduled delivery date | → `TIMEOUT_PENDING` + Notify both parties |
-| `PARTIALLY_DELIVERED` | 5 days from first delivery | → `TIMEOUT_PENDING` + Notify both parties (remaining vehicles) |
-| `TIMEOUT_PENDING` | No timeout | Manual intervention required |
-| `ON_HOLD` | 7 days from hold start | → `TERMINATED` (if not resolved) |
-| `PENDING_ALTERATION` | 3 days from request | Auto-reject alteration, → `ACTIVE` |
+1. If status is in `{ ON_HOLD, TERMINATED, TIMEOUT_PENDING, DISPUTED }` → return immediately, do not touch status (protected).
+2. If every operational (non-`TERMINATED`/`COMPLETED`) line item has been fully returned → `PARTIALLY_RETURNED` (deliberately not `COMPLETED` — see §2.14).
+3. Else, using aggregated `totalAwarded`/`totalDelivered`/`totalReturned` across operational line items:
+   - `0 < totalReturned < totalAwarded` → `PARTIALLY_RETURNED`
+   - `0 < totalDelivered < totalAwarded` → `PARTIALLY_DELIVERED`
+   - `totalDelivered == totalAwarded && totalReturned == 0` → `ACTIVE` (stamps `ActivatedAt` on first entry)
+   - `totalDelivered == 0`, with `totalAssigned >= totalAwarded` → `PENDING_SIGNING`
+   - `totalDelivered == 0`, with `totalAssigned == 0` → `PENDING_VEHICLE_ASSIGNMENT`
 
-### 5.2 Timeout Check Job
+`ContractStatusProgression.TryUpgradeContractFromLineItems()` is a separate, one-directional helper (used by the RFQ and Direct Rental assignment services) that walks a fixed hierarchy — `PENDING_VEHICLE_ASSIGNMENT → PENDING_ACTIVATION → PENDING_SIGNING → SIGNED → PENDING_DELIVERY → PARTIALLY_DELIVERED → ACTIVE → PARTIALLY_RETURNED → COMPLETED` — and only ever moves the contract *forward* to the least-advanced line item's position, never backward. Note this hierarchy array itself includes `PENDING_ACTIVATION` and `SIGNED` as named rungs even though, per §1.1/§2.5, neither is ever the contract's actual persisted status — they're included for ordinal-index purposes only, not because a contract ever stops there.
 
-**Runs:** Every 1 hour
-
-**Process:**
-```typescript
-@Cron('0 * * * *') // Every hour
-async checkContractTimeouts() {
-  const now = new Date();
-  
-  // Check PENDING_ESCROW timeouts
-  const pendingEscrowTimeouts = await this.contractRepository.find({
-    status: 'PENDING_ESCROW',
-    createdAt: LessThan(new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000))
-  });
-  
-  for (const contract of pendingEscrowTimeouts) {
-    await this.transitionToTimeoutPending(contract, 'ESCROW_LOCK_TIMEOUT');
-  }
-  
-  // Check PENDING_VEHICLE_ASSIGNMENT timeouts
-  const pendingVehicleTimeouts = await this.contractRepository.find({
-    status: 'PENDING_VEHICLE_ASSIGNMENT',
-    escrowLockedAt: LessThan(new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000))
-  });
-  
-  for (const contract of pendingVehicleTimeouts) {
-    await this.transitionToTimeoutPending(contract, 'VEHICLE_ASSIGNMENT_TIMEOUT');
-  }
-  
-  // Check PENDING_DELIVERY timeouts
-  const pendingDeliveryTimeouts = await this.contractRepository.find({
-    status: 'PENDING_DELIVERY',
-    deliveryScheduledDate: LessThan(new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000))
-  });
-  
-  for (const contract of pendingDeliveryTimeouts) {
-    await this.transitionToTimeoutPending(contract, 'DELIVERY_TIMEOUT');
-  }
-  
-  // Check PARTIALLY_DELIVERED timeouts (remaining vehicles not delivered)
-  const partiallyDeliveredTimeouts = await this.contractRepository.find({
-    status: 'PARTIALLY_DELIVERED',
-    firstDeliveryAt: LessThan(new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000))
-  });
-  
-  for (const contract of partiallyDeliveredTimeouts) {
-    await this.transitionToTimeoutPending(contract, 'PARTIAL_DELIVERY_TIMEOUT');
-  }
-  
-  // Check ON_HOLD timeouts
-  const onHoldTimeouts = await this.contractRepository.find({
-    status: 'ON_HOLD',
-    holdStartedAt: LessThan(new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000))
-  });
-  
-  for (const contract of onHoldTimeouts) {
-    await this.terminateContract(contract, 'HOLD_TIMEOUT_UNRESOLVED');
-  }
-}
-```
-
-### 5.3 Timeout Notifications
-
-**Notification Schedule:**
-
-| Timeout Type | Notification Timing |
-|-------------|---------------------|
-| Approaching timeout | 24 hours before timeout |
-| Timeout reached | Immediately when timeout detected |
-| Timeout pending | Daily reminder until resolved |
-
-**Notification Content:**
-- Contract ID and details
-- Current status and blocking issue
-- Action required from user
-- Deadline for resolution
-- Consequences of non-resolution
+`ContractStatusProgression.TryRepairFullyAssignedContractStatus()` is a defensive repair helper: if a contract is stuck in `PENDING_VEHICLE_ASSIGNMENT` but its line items are actually fully assigned, it forces a re-run of `UpdateStatusBasedOnDelivery()` to unstick it.
 
 ---
 
-## 6. STATE VALIDATION RULES
-
-### 6.1 Validation Rules by State
-
-#### PENDING_ESCROW Validations
-```typescript
-function validatePendingEscrow(contract: Contract): ValidationResult {
-  const errors = [];
-  
-  // Must have valid business and provider
-  if (!contract.businessId || !contract.providerId) {
-    errors.push('Missing business or provider ID');
-  }
-  
-  // Must have escrow amount
-  if (!contract.escrowAmount || contract.escrowAmount <= 0) {
-    errors.push('Invalid escrow amount');
-  }
-  
-  // Must have valid rental period
-  if (!contract.rentalPeriod || contract.rentalPeriod.startDate > contract.rentalPeriod.endDate) {
-    errors.push('Invalid rental period');
-  }
-  
-  return { valid: errors.length === 0, errors };
-}
-```
-
-#### PENDING_VEHICLE_ASSIGNMENT Validations
-```typescript
-function validatePendingVehicleAssignment(contract: Contract): ValidationResult {
-  const errors = [];
-  
-  // Escrow must be locked
-  if (!contract.escrowLockedAt) {
-    errors.push('Escrow not locked');
-  }
-  
-  // Must have escrow transaction ID
-  if (!contract.escrowTransactionId) {
-    errors.push('Missing escrow transaction ID');
-  }
-  
-  return { valid: errors.length === 0, errors };
-}
-```
-
-#### PENDING_DELIVERY Validations
-```typescript
-function validatePendingDelivery(contract: Contract): ValidationResult {
-  const errors = [];
-  
-  // Must have assigned vehicles
-  if (contract.assignedVehicles < contract.requiredVehicles) {
-    errors.push('Not all vehicles assigned');
-  }
-  
-  // Must have delivery scheduled
-  if (!contract.deliveryScheduledDate) {
-    errors.push('Delivery not scheduled');
-  }
-  
-  // All vehicles must have valid insurance
-  for (const vehicleId of contract.assignedVehicleIds) {
-    const vehicle = await getVehicle(vehicleId);
-    if (!vehicle.insuranceValid) {
-      errors.push(`Vehicle ${vehicleId} insurance invalid`);
-    }
-  }
-  
-  return { valid: errors.length === 0, errors };
-}
-```
-
-#### ACTIVE Validations
-```typescript
-function validateActive(contract: Contract): ValidationResult {
-  const errors = [];
-  
-  // Must have all activation prerequisites
-  if (!contract.escrowLockedAt) {
-    errors.push('Escrow not locked');
-  }
-  
-  if (!contract.vehiclesDeliveredAt) {
-    errors.push('Vehicles not delivered');
-  }
-  
-  if (!contract.activatedAt) {
-    errors.push('Missing activation timestamp');
-  }
-  
-  // For long-term contracts, validate monthly settlements
-  if (contract.rentalPeriod.durationDays >= 30) {
-    const monthsSinceStart = calculateMonthsSinceStart(contract.activatedAt);
-    if (contract.totalSettlementsPaid < monthsSinceStart) {
-      errors.push('Missing monthly settlements');
-    }
-  }
-  
-  return { valid: errors.length === 0, errors };
-}
-```
-
-### 6.2 Pre-Transition Validation
-
-**Before any state transition:**
-```typescript
-async function validateStateTransition(
-  contract: Contract, 
-  fromState: ContractState, 
-  toState: ContractState
-): Promise<ValidationResult> {
-  
-  // Check if transition is valid
-  const validTransitions = STATE_TRANSITION_MATRIX[fromState];
-  if (!validTransitions.includes(toState)) {
-    return { 
-      valid: false, 
-      errors: [`Invalid transition from ${fromState} to ${toState}`] 
-    };
-  }
-  
-  // Validate target state prerequisites
-  const targetStateValidation = await validateState(contract, toState);
-  if (!targetStateValidation.valid) {
-    return targetStateValidation;
-  }
-  
-  return { valid: true, errors: [] };
-}
-```
-
----
-
-## 7. ERROR STATES & RECOVERY
-
-### 7.1 Error State: FAILED
-
-**Recovery Options:**
-
-1. **Escrow Lock Failure:**
-```typescript
-async function recoverFromEscrowFailure(contract: Contract) {
-  // Notify business to deposit funds
-  await sendNotification(contract.businessId, {
-    type: 'ESCROW_LOCK_FAILED',
-    message: 'Please deposit funds to retry contract activation'
-  });
-  
-  // Allow manual retry by business
-  // Option 1: Business deposits funds → System retries escrow lock
-  // Option 2: Business cancels contract → Release bid for re-award
-}
-```
-
-2. **Delivery Rejection:**
-```typescript
-async function recoverFromDeliveryRejection(contract: Contract) {
-  // Give provider option to:
-  // 1. Replace vehicles
-  // 2. Cancel contract
-  
-  await sendNotification(contract.providerId, {
-    type: 'DELIVERY_REJECTED',
-    message: 'Business rejected delivery. Replace vehicles or cancel?',
-    actions: ['REPLACE_VEHICLES', 'CANCEL_CONTRACT']
-  });
-}
-```
-
-### 7.2 Error State: TIMEOUT_PENDING
-
-**Recovery Steps:**
-
-1. **Identify blocking issue:**
-```typescript
-async function identifyTimeoutReason(contract: Contract): Promise<string> {
-  switch (contract.previousStatus) {
-    case 'PENDING_ESCROW':
-      const wallet = await getWallet(contract.businessId);
-      if (wallet.balance < contract.escrowAmount) {
-        return 'INSUFFICIENT_FUNDS';
-      }
-      return 'ESCROW_LOCK_TECHNICAL_ISSUE';
-      
-    case 'PENDING_VEHICLE_ASSIGNMENT':
-      const assignedCount = contract.assignedVehicles;
-      if (assignedCount === 0) {
-        return 'NO_VEHICLES_ASSIGNED';
-      }
-      return 'PARTIAL_VEHICLE_ASSIGNMENT';
-      
-    case 'PENDING_DELIVERY':
-      return 'DELIVERY_NOT_CONFIRMED';
-  }
-}
-```
-
-2. **Provide resolution path:**
-```typescript
-async function provideResolutionPath(contract: Contract, reason: string) {
-  const resolutionActions = {
-    'INSUFFICIENT_FUNDS': {
-      party: 'BUSINESS',
-      action: 'Deposit funds to wallet',
-      deadline: '48 hours'
-    },
-    'NO_VEHICLES_ASSIGNED': {
-      party: 'PROVIDER',
-      action: 'Assign vehicles to contract',
-      deadline: '48 hours'
-    },
-    'DELIVERY_NOT_CONFIRMED': {
-      party: 'BOTH',
-      action: 'Complete delivery and OTP verification',
-      deadline: '48 hours'
-    }
-  };
-  
-  const resolution = resolutionActions[reason];
-  await sendResolutionNotification(contract, resolution);
-}
-```
-
-### 7.3 Error State: ON_HOLD
-
-**Auto-Recovery Checks:**
-
-```typescript
-@Cron('0 */4 * * *') // Every 4 hours
-async function checkOnHoldRecovery() {
-  const onHoldContracts = await this.contractRepository.find({
-    status: 'ON_HOLD'
-  });
-  
-  for (const contract of onHoldContracts) {
-    const canRecover = await this.checkRecoveryConditions(contract);
-    
-    if (canRecover) {
-      // Auto-recover
-      await this.transitionState(contract, 'ACTIVE');
-      await this.publishEvent({
-        eventType: 'ContractReactivatedEvent',
-        payload: { contractId: contract.id, reason: contract.holdReason }
-      });
-    }
-  }
-}
-
-async function checkRecoveryConditions(contract: Contract): Promise<boolean> {
-  switch (contract.holdReason) {
-    case 'INSUFFICIENT_WALLET_BALANCE':
-      const wallet = await getWallet(contract.businessId);
-      return wallet.balance >= contract.monthlyPayment;
-      
-    case 'INSURANCE_EXPIRED':
-      const vehicles = await getContractVehicles(contract.id);
-      return vehicles.every(v => v.insuranceValid);
-      
-    default:
-      return false; // Requires manual review
-  }
-}
-```
-
----
-
-## 8. STATE CHANGE EVENT FLOW
-
-### 8.1 State Transition Event Publishing
-
-**Every state change publishes an event:**
-
-```typescript
-async function transitionContractState(
-  contractId: string,
-  fromState: ContractState,
-  toState: ContractState,
-  reason: string,
-  metadata: object
-): Promise<void> {
-  
-  // 1. Validate transition
-  const validation = await validateStateTransition(contract, fromState, toState);
-  if (!validation.valid) {
-    throw new Error(`Invalid transition: ${validation.errors.join(', ')}`);
-  }
-  
-  // 2. Update contract state
-  await this.contractRepository.update(contractId, {
-    status: toState,
-    previousStatus: fromState,
-    statusChangedAt: new Date(),
-    statusChangeReason: reason
-  });
-  
-  // 3. Publish state change event
-  await this.eventPublisher.publish({
-    eventType: 'ContractStateChangedEvent',
-    aggregateId: contractId,
-    payload: {
-      contractId,
-      fromState,
-      toState,
-      reason,
-      changedAt: new Date(),
-      metadata
-    }
-  });
-  
-  // 4. Publish specific state events
-  switch (toState) {
-    case 'ACTIVE':
-      await this.publishEvent({ eventType: 'ContractActivatedEvent', ... });
-      break;
-    case 'COMPLETED':
-      await this.publishEvent({ eventType: 'ContractCompletedEvent', ... });
-      break;
-    case 'FAILED':
-      await this.publishEvent({ eventType: 'ContractFailedEvent', ... });
-      break;
-    // ... other states
-  }
-  
-  // 5. Trigger state-specific actions
-  await this.executeStateActions(contractId, toState);
-}
-```
-
-### 8.2 State-Specific Actions
-
-```typescript
-async function executeStateActions(contractId: string, state: ContractState) {
-  switch (state) {
-    case 'PENDING_ESCROW':
-      // Schedule escrow retry
-      await this.scheduleEscrowRetry(contractId);
-      break;
-      
-    case 'ACTIVE':
-      // Schedule first settlement (if long-term contract)
-      await this.scheduleMonthlySettlement(contractId);
-      break;
-      
-    case 'TIMEOUT_PENDING':
-      // Send timeout notifications
-      await this.sendTimeoutNotifications(contractId);
-      break;
-      
-    case 'COMPLETED':
-      // Process final settlement
-      await this.processFinalSettlement(contractId);
-      break;
-      
-    case 'FAILED':
-      // Release escrow if locked
-      await this.releaseEscrow(contractId);
-      break;
-  }
-}
-```
-
----
-
-## 9. BUSINESS RULES MAPPING
-
-### 9.1 State to Business Rule Mapping
-
-| State | Primary Business Rules | Secondary Rules |
-|-------|----------------------|-----------------|
-| `PENDING_ESCROW` | BR-010, BR-011 | BR-008, BR-009 |
-| `PENDING_VEHICLE_ASSIGNMENT` | BR-013 | BR-004 |
-| `PENDING_DELIVERY` | BR-014, BR-015 | BR-016 |
-| `PARTIALLY_DELIVERED` | BR-016, BR-016A | BR-014, BR-015 |
-| `TIMEOUT_PENDING` | BR-017 | - |
-| `ACTIVE` | BR-016, BR-018 | BR-012, BR-028 |
-| `ON_HOLD` | BR-012, BR-028 | - |
-| `COMPLETED` | BR-018, BR-030, BR-031 | BR-033 |
-| `TERMINATED` | BR-020, BR-021 | - |
-| `FAILED` | BR-009, BR-011 | - |
-| `UNDER_DISPUTE` | BR-034, BR-035, BR-036, BR-037 | - |
-| `PENDING_ALTERATION` | - | - |
-| `ALTERED` | - | - |
-
-### 9.2 State Enforcement of Business Rules
-
-**Example: ACTIVE state enforces wallet balance rule (BR-012)**
-
-```typescript
-@Cron('0 0 * * *') // Daily check at midnight
-async function enforceActiveContractRules() {
-  const activeContracts = await this.contractRepository.find({
-    status: 'ACTIVE'
-  });
-  
-  for (const contract of activeContracts) {
-    // BR-012: Check if current escrow period ends today
-    const escrowPeriodEndsToday = isEscrowPeriodEndingToday(contract);
-    
-    if (escrowPeriodEndsToday) {
-      const wallet = await getWallet(contract.businessId);
-      const nextPayment = calculateNextPayment(contract);
-      
-      if (wallet.balance < nextPayment) {
-        // Place contract on hold - payment default
-        await this.transitionState(contract, 'ON_HOLD', {
-          reason: 'PAYMENT_DEFAULT',
-          requiredAmount: nextPayment,
-          currentBalance: wallet.balance,
-          providerDecisionRequired: true,
-          providerDecisionDeadline: addHours(new Date(), 24)
-        });
-        
-        // Notify business - contract suspended
-        await sendNotification(contract.businessId, {
-          type: 'CONTRACT_SUSPENDED_PAYMENT_DEFAULT',
-          message: `Payment overdue. Contract suspended. Required: ${nextPayment} ETB. Awaiting provider's decision.`,
-          severity: 'CRITICAL'
-        });
-        
-        // Notify provider - request decision
-        await sendNotification(contract.providerId, {
-          type: 'PROVIDER_DECISION_REQUIRED',
-          message: `Business ${contract.businessName} failed to pay ${nextPayment} ETB for next period.`,
-          actions: [
-            {
-              id: 'COLLECT_NOW',
-              label: 'Collect Vehicles Now (Recommended)',
-              description: 'Terminate contract and collect vehicles immediately'
-            },
-            {
-              id: 'GRANT_GRACE',
-              label: 'Grant Grace Period (1-7 days)',
-              description: 'You bear the risk if business doesn\'t pay during grace period',
-              requiresInput: 'gracePeriodDays',
-              inputRange: [1, 7]
-            }
-          ],
-          deadline: addHours(new Date(), 24)
-        });
-        
-        // If provider doesn't respond within 24 hours, auto-terminate
-        await this.scheduleJob({
-          jobType: 'AUTO_TERMINATE_ON_PROVIDER_NO_RESPONSE',
-          contractId: contract.id,
-          executeAt: addHours(new Date(), 24)
-        });
-      }
-    }
-  }
-}
-
-// Handler for provider decision
-async function handleProviderGracePeriodDecision(
-  contractId: string,
-  decision: 'COLLECT_NOW' | 'GRANT_GRACE',
-  gracePeriodDays?: number
-) {
-  const contract = await this.contractRepository.findById(contractId);
-  
-  if (decision === 'COLLECT_NOW') {
-    // Terminate immediately
-    await this.transitionState(contract, 'TERMINATED', {
-      reason: 'PAYMENT_DEFAULT_PROVIDER_TERMINATED',
-      terminatedBy: 'PROVIDER'
-    });
-    
-    await sendNotification(contract.businessId, {
-      type: 'CONTRACT_TERMINATED',
-      message: 'Provider has chosen to collect vehicles due to payment default.'
-    });
-    
-  } else if (decision === 'GRANT_GRACE') {
-    // Grant grace period
-    const dailyRate = contract.totalAmount / contract.totalDays;
-    const gracePeriodAmount = dailyRate * gracePeriodDays;
-    const lateFee = gracePeriodAmount * 0.05; // 5% late fee
-    const nextMonthEscrow = calculateNextPayment(contract);
-    const totalDue = gracePeriodAmount + lateFee + nextMonthEscrow;
-    
-    await this.contractRepository.update(contractId, {
-      gracePeriodGranted: true,
-      gracePeriodDays,
-      gracePeriodDeadline: addDays(new Date(), gracePeriodDays),
-      gracePeriodAmount,
-      lateFeeAmount: lateFee
-    });
-    
-    await sendNotification(contract.businessId, {
-      type: 'GRACE_PERIOD_GRANTED',
-      message: `Provider granted you ${gracePeriodDays} days grace period. Deposit ${totalDue} ETB by ${formatDate(addDays(new Date(), gracePeriodDays))} or vehicles will be collected.`,
-      breakdown: {
-        gracePeriodDays: gracePeriodAmount,
-        lateFee: lateFee,
-        nextMonthEscrow: nextMonthEscrow,
-        total: totalDue
-      }
-    });
-    
-    await sendNotification(contract.providerId, {
-      type: 'GRACE_PERIOD_ACTIVE',
-      message: `Grace period active for ${gracePeriodDays} days. Business must deposit by ${formatDate(addDays(new Date(), gracePeriodDays))}. If business pays, you'll receive ${gracePeriodAmount + lateFee} ETB for grace period.`
-    });
-    
-    // Schedule auto-termination if business doesn't pay
-    await this.scheduleJob({
-      jobType: 'AUTO_TERMINATE_ON_GRACE_PERIOD_EXPIRY',
-      contractId: contract.id,
-      executeAt: addDays(new Date(), gracePeriodDays)
-    });
-  }
-}
-```
-
----
-
-## APPENDIX A: State Transition Examples
-
-### A.1 Example 1: Successful Contract Activation
-
-```
-Timeline:
-
-Day 0, 10:00 AM: Business awards bid
-  → Contract created with status: PENDING_ESCROW
-
-Day 0, 10:01 AM: Finance locks escrow
-  → Contract status: PENDING_VEHICLE_ASSIGNMENT
-
-Day 0, 11:00 AM: Provider assigns 3 vehicles
-  → Contract status: PENDING_DELIVERY
-
-Day 2, 09:00 AM: Provider delivers vehicles, generates OTP
-  → Business inspects, shares OTP
-  → Provider verifies OTP
-  → Contract status: ACTIVE
-
-Day 30, 23:59 PM: Month-end settlement processed
-  → Provider receives payment for first month
-
-Day 90, 18:00 PM: Contract period ends, vehicles returned
-  → Contract status: COMPLETED
-  → Final settlement processed
-```
-
-### A.2 Example 2: Contract with Escrow Failure
-
-```
-Timeline:
-
-Day 0, 10:00 AM: Business awards bid
-  → Contract created with status: PENDING_ESCROW
-
-Day 0, 10:01 AM: Finance attempts escrow lock
-  → FAILED: Insufficient balance
-  → Retry attempt 1 (after 30 min)
-
-Day 0, 10:31 AM: Retry attempt 1
-  → FAILED: Still insufficient balance
-  → Retry attempt 2 (after 1 hour)
-
-Day 0, 11:31 AM: Retry attempt 2
-  → FAILED
-  → Continue retries...
-
-Day 5, 10:00 AM: Timeout reached (5 days elapsed)
-  → Contract status: TIMEOUT_PENDING
-  → Notifications sent to business and provider
-
-Day 6, 14:00 PM: Business deposits funds
-  → Manual escrow lock triggered
-  → Contract status: PENDING_VEHICLE_ASSIGNMENT
-  → Continues normal flow
-```
-
-### A.3 Example 3: Contract with Early Return
-
-```
-Timeline:
-
-Day 0: Contract activated (90-day rental)
-  → Contract status: ACTIVE
-
-Day 30: Month-end settlement processed
-  → Provider receives first payment
-
-Day 50: Business requests early return (7 days notice)
-  → Contract status: PENDING_ALTERATION
-  → Provider receives notification
-
-Day 51: Provider approves early return
-  → Contract status: ACTIVE (continues until return date)
-
-Day 57: Vehicles returned
-  → Contract status: COMPLETED
-  → Final settlement with penalty processed:
-    - Remaining days: 33
-    - Penalty: 0% (7 days notice)
-    - Business receives refund for 33 days
-    - Provider receives payment for days used
-```
-
----
-
-## APPENDIX B: State Machine Implementation Guide
-
-### B.1 Database Schema for Contract State
-
-```sql
-CREATE TABLE contracts_schema.contracts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  bid_id UUID NOT NULL,
-  rfq_id UUID NOT NULL,
-  business_id UUID NOT NULL,
-  provider_id UUID NOT NULL,
-  
-  -- State management
-  status VARCHAR(50) NOT NULL,
-  previous_status VARCHAR(50),
-  status_changed_at TIMESTAMP,
-  status_change_reason TEXT,
-  
-  -- Pending escrow
-  escrow_amount DECIMAL(15,2) NOT NULL,
-  escrow_locked_at TIMESTAMP,
-  escrow_transaction_id UUID,
-  escrow_lock_attempts INTEGER DEFAULT 0,
-  last_escrow_attempt_at TIMESTAMP,
-  
-  -- Pending vehicle assignment
-  required_vehicles INTEGER NOT NULL,
-  assigned_vehicles INTEGER DEFAULT 0,
-  assigned_vehicle_ids UUID[],
-  
-  -- Pending delivery
-  delivery_scheduled_date TIMESTAMP,
-  delivery_location JSONB,
-  otp_attempts INTEGER DEFAULT 0,
-  
-  -- Active
-  activated_at TIMESTAMP,
-  actual_start_date DATE,
-  expected_end_date DATE,
-  last_settlement_date DATE,
-  next_settlement_date DATE,
-  total_settlements_paid INTEGER DEFAULT 0,
-  
-  -- Timeout management
-  timeout_at TIMESTAMP,
-  timeout_reached_at TIMESTAMP,
-  timeout_notifications_sent INTEGER DEFAULT 0,
-  
-  -- Completion
-  completed_at TIMESTAMP,
-  actual_end_date DATE,
-  total_days_active INTEGER,
-  final_settlement_amount DECIMAL(15,2),
-  final_settlement_processed BOOLEAN DEFAULT false,
-  
-  -- Termination
-  terminated_at TIMESTAMP,
-  termination_reason TEXT,
-  terminated_by VARCHAR(20),
-  
-  -- Failure
-  failed_at TIMESTAMP,
-  failure_reason TEXT,
-  failure_stage VARCHAR(50),
-  
-  -- Timestamps
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Indexes
-CREATE INDEX idx_contracts_status ON contracts_schema.contracts(status);
-CREATE INDEX idx_contracts_business_status ON contracts_schema.contracts(business_id, status);
-CREATE INDEX idx_contracts_provider_status ON contracts_schema.contracts(provider_id, status);
-CREATE INDEX idx_contracts_timeout ON contracts_schema.contracts(timeout_at) WHERE status IN ('PENDING_ESCROW', 'PENDING_VEHICLE_ASSIGNMENT', 'PENDING_DELIVERY');
-```
-
-### B.2 State Machine Service Implementation
-
-```typescript
-export class ContractStateMachine {
-  constructor(
-    private contractRepository: ContractRepository,
-    private eventPublisher: EventPublisher
-  ) {}
-  
-  async transitionTo(
-    contractId: string,
-    toState: ContractState,
-    reason: string,
-    metadata?: object
-  ): Promise<void> {
-    const contract = await this.contractRepository.findById(contractId);
-    
-    // Validate transition
-    await this.validateTransition(contract.status, toState);
-    
-    // Execute transition
-    const updatedContract = await this.contractRepository.update(contractId, {
-      status: toState,
-      previousStatus: contract.status,
-      statusChangedAt: new Date(),
-      statusChangeReason: reason,
-      ...this.getStateSpecificUpdates(toState, metadata)
-    });
-    
-    // Publish events
-    await this.publishStateChangeEvents(updatedContract, contract.status, toState);
-    
-    // Execute state actions
-    await this.executeStateActions(updatedContract, toState);
-  }
-  
-  private getStateSpecificUpdates(
-    state: ContractState, 
-    metadata: object
-  ): object {
-    switch (state) {
-      case 'PENDING_VEHICLE_ASSIGNMENT':
-        return { escrowLockedAt: new Date() };
-      case 'PENDING_DELIVERY':
-        return { vehiclesAssignedAt: new Date() };
-      case 'ACTIVE':
-        return { activatedAt: new Date(), actualStartDate: new Date() };
-      case 'COMPLETED':
-        return { completedAt: new Date(), actualEndDate: new Date() };
-      // ... other states
-      default:
-        return {};
-    }
-  }
-}
-```
-
----
-
-## 10. STATUS AGGREGATION RULES
-
-### 10.1 Contract Status Aggregation from Line Items
-
-Contract status is determined by aggregating delivery and return metrics from all Contract Line Items, with hierarchical priority rules.
-
-#### Aggregation Logic:
-
-```typescript
-// Step 1: Filter operational line items (exclude TERMINATED and COMPLETED)
-const operationalLineItems = lineItems.filter(li => 
-  li.status !== 'TERMINATED' && li.status !== 'COMPLETED'
-);
-
-// Step 2: Calculate aggregated metrics
-const totalAwarded = operationalLineItems.sum(li => li.quantityAwarded);
-const totalDelivered = operationalLineItems.sum(li => li.quantityDelivered);
-const totalReturned = operationalLineItems.sum(li => li.quantityReturned);
-const totalActive = operationalLineItems.sum(li => li.quantityActive);
-
-// Step 3: Determine contract status (hierarchical priority)
-if (allLineItemsCompleted) {
-  contractStatus = 'COMPLETED';
-} else if (contractLevelAction) {
-  // Contract-level actions override aggregation
-  if (terminated) contractStatus = 'TERMINATED';
-  if (onHold) contractStatus = 'ON_HOLD';
-  if (timeoutPending) contractStatus = 'TIMEOUT_PENDING';
-  if (disputed) contractStatus = 'DISPUTED';
-} else if (hasOperationalLineItems) {
-  // Operational states
-  if (totalReturned > 0 && totalReturned < totalAwarded) {
-    contractStatus = 'PARTIALLY_RETURNED';
-  } else if (totalDelivered > 0 && totalDelivered < totalAwarded) {
-    contractStatus = 'PARTIALLY_DELIVERED';
-  } else if (totalDelivered == totalAwarded && totalReturned == 0) {
-    contractStatus = 'ACTIVE';
-  }
-} else {
-  // Pending states
-  if (totalDelivered == 0 && totalActive > 0) {
-    contractStatus = 'PENDING_DELIVERY';
-  } else {
-    contractStatus = 'PENDING_VEHICLE_ASSIGNMENT';
-  }
-}
-```
-
-#### Priority Order:
-
-1. **Contract-Level Actions** (highest priority - override aggregation):
-   - `TERMINATED` - Contract terminated (cascades to all line items)
-   - `ON_HOLD` - Contract on hold (cascades to active line items)
-   - `TIMEOUT_PENDING` - Contract timeout
-   - `DISPUTED` - Contract under dispute
-
-2. **Operational States** (when any line items are operational):
-   - `PARTIALLY_RETURNED` - Some vehicles returned across all line items
-   - `PARTIALLY_DELIVERED` - Some vehicles delivered, not all
-   - `ACTIVE` - All vehicles delivered across all line items
-
-3. **Pending States** (when no operational line items):
-   - `PENDING_DELIVERY` - Vehicles assigned, waiting for delivery
-   - `PENDING_VEHICLE_ASSIGNMENT` - Waiting for vehicle assignment
-   - `PENDING_ESCROW` - Waiting for escrow lock
-
-4. **Final States**:
-   - `COMPLETED` - All line items completed (all vehicles returned)
-
-### 10.2 Handling Mixed Line Item States
-
-**Scenario: Some Line Items ACTIVE, Some COMPLETED**
-- **Contract Status:** `ACTIVE` or `PARTIALLY_RETURNED` (based on active line items)
-- **Business Logic:** Completed line items don't affect contract status. Contract remains operational. Settlement calculated only for active line items.
-
-**Scenario: Some Line Items ACTIVE, Some ON_HOLD**
-- **Contract Status:** `ACTIVE` (operational precedence)
-- **Business Logic:** Active line items continue operations. On-hold line items are suspended. Contract is operational but flagged.
-
-**Scenario: Some Line Items ACTIVE, Some TERMINATED**
-- **Contract Status:** `ACTIVE` or `PARTIALLY_DELIVERED` (based on active line items)
-- **Business Logic:** Active line items continue operations. Terminated line items excluded from calculations. Contract remains operational.
-
-**Scenario: Mix of PENDING_ACTIVATION, PARTIALLY_DELIVERED, ACTIVE**
-- **Contract Status:** `PARTIALLY_DELIVERED` (operational precedence)
-- **Business Logic:** Contract is operational with partially delivered state. Business can use delivered vehicles while waiting for remaining deliveries.
-
-### 10.3 Contract-Level Action Cascading
-
-When contract-level actions occur, they cascade to line items:
-
-**Contract Termination:**
-```typescript
-contract.Terminate() → 
-  For each lineItem in contract.lineItems:
-    if (lineItem.status != 'COMPLETED' && lineItem.status != 'TERMINATED')
-      lineItem.Terminate()
-```
-
-**Contract On Hold:**
-```typescript
-contract.PutOnHold() →
-  For each lineItem in contract.lineItems:
-    if (lineItem.status == 'ACTIVE' || lineItem.status == 'PARTIALLY_DELIVERED' || lineItem.status == 'PARTIALLY_RETURNED')
-      lineItem.status = 'ON_HOLD'
-```
-
----
-
-**END OF CONTRACT STATE MACHINE SPECIFICATION**
-
----
-
-**For Implementation:** Use this document as reference for:
-1. Contract status field values
-2. State transition logic
-3. Timeout handling
-4. Error recovery procedures
-5. State validation rules
-
-**For Testing:** Verify:
-1. All state transitions work correctly
-2. Invalid transitions are blocked
-3. Timeouts trigger correctly
-4. State-specific validations pass
-5. Events published for each transition
+## 12. API SURFACE REFERENCE
+
+All routes below are under `[Route("api/contracts")]` on `ContractsController` unless noted.
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/admin` | List all contracts (admin) |
+| GET | `/{contractId}` | Contract detail |
+| GET | `/{contractId}/status-history` | `ContractStatusHistory` rows |
+| GET | `/business/{businessId}` | Business's contracts |
+| GET | `/provider/{providerId}` | Provider's contracts |
+| GET | `/{contractId}/line-items/{lineItemId}/available-vehicles` | Assignable vehicles |
+| POST | `/{contractId}/line-items/{lineItemId}/assign-vehicle` | Assign vehicles |
+| POST | `/{contractId}/line-items/{lineItemId}/unassign-vehicle` | Unassign/replace |
+| POST | `/{contractId}/reset-vehicle-assignments` | Wipe & reset all assignments |
+| PATCH | `/{contractId}/reset-to-pending-vehicle-assignment` | Admin nudge (unreachable precondition, §9) |
+| POST | `/{contractId}/terms/otp/generate` | Start/refresh dual-OTP signing |
+| POST | `/{contractId}/terms/otp/verify` | Confirm caller's own OTP |
+| GET | `/{contractId}/terms` | Terms content + acceptance status |
+| POST | `/{contractId}/termination/request` | Request termination |
+| POST | `/{contractId}/termination/approve` | Approve termination |
+| GET | `/{contractId}/completion/readiness` | Completion blockers/readiness |
+| POST | `/{contractId}/completion/request` | Request completion |
+| POST | `/{contractId}/completion/approve` | Approve completion (other party/admin) |
+| POST | `/{contractId}/completion/reject` | Reject completion (other party/admin) |
+| POST | `/{contractId}/completion/cancel` | Cancel own pending request |
+| POST | `/{contractId}/complete` | Admin-override completion |
+| POST | `/{contractId}/abort-before-signing` | Admin pre-signing cancel + escrow refund |
+
+**Not on this controller, or any other, despite having a handler:** `POST /{contractId}/extend`, any replace-vehicle route, any early-return route. See §9.

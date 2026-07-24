@@ -1,676 +1,272 @@
-# Admin Portal Development Guide
-## Movello Frontend - React Implementation
+# Admin Portal — As-Built Reference
+## Movello Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
 
-**Version:** 1.0  
-**Related:** [LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md](./LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md)
+**Last verified against code: 2026-07-23**
 
----
+> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable). The admin portal has been built for a long time and has grown far beyond that original scope. This version is a **reference of what actually exists in code today** — real routes, real components, real flows — verified against `marketplace-project-implementation/movello-marketplace-core/src/features/admin/**` and the route table in `src/App.tsx`. Treat code as the source of truth if this drifts again; re-derive from `project-docs/18_Implementation_Coverage_Audit.md` first.
 
-## 📋 Table of Contents
-
-1. [Dashboard](#dashboard)
-2. [KYC/KYB Verification](#kyckyb-verification)
-3. [User Management](#user-management)
-4. [Transaction Monitoring](#transaction-monitoring)
-5. [System Settings](#system-settings)
+All admin routes live under `/admin` inside `AdminLayout`, gated by `ProtectedRoute allowedRoles={['admin']}`. The admin portal is dramatically larger than the original guide's 5 sections (Dashboard, KYC/KYB, User Management, Transaction Monitoring, System Settings) — in practice it has **seven** functional areas: Dashboard, Verifications (incl. admin-initiated onboarding), Master Data / Settings, Users, Operations (RFQ/Bids/Contracts/Settlements/Wallet Accounts/Monitoring/Direct Rental), Wallets, Finance, and Notifications (Templates/Providers). This doc is organized around those seven, each with its real route table.
 
 ---
 
-## 📊 Dashboard
+## Table of Contents
 
-### Route
-`/admin/dashboard`
-
-### Features
-- **Stat Cards:**
-  - Pending Verifications (KYC/KYB)
-  - Active Users (Business/Provider)
-  - Total Transactions (Today/Month)
-  - Platform Revenue
-- **Charts:**
-  - User Growth (line chart)
-  - Transaction Volume (bar chart)
-  - Revenue by Month (area chart)
-- **Recent Activity:**
-  - Latest verifications
-  - Recent transactions
-  - System alerts
+1. [Dashboard](#1-dashboard)
+2. [Verifications (KYB/KYC/Vehicle)](#2-verifications-kybkycvehicle)
+3. [Admin-Initiated Onboarding](#3-admin-initiated-onboarding)
+4. [Master Data & Settings](#4-master-data--settings)
+5. [Users](#5-users)
+6. [Operations — RFQ, Bids, Contracts](#6-operations--rfq-bids-contracts)
+7. [Operations — Settlements, Wallet Accounts, Monitoring](#7-operations--settlements-wallet-accounts-monitoring)
+8. [Direct Rental Oversight](#8-direct-rental-oversight)
+9. [Wallets](#9-wallets)
+10. [Finance — Settlement/Withdrawal/Deposit/Invoice Queues](#10-finance--settlementwithdrawaldepositinvoice-queues)
+11. [Notifications — Templates & Providers](#11-notifications--templates--providers)
+12. [Cross-Cutting Notes & Divergences](#12-cross-cutting-notes--divergences)
 
 ---
 
-## ✅ KYC/KYB Verification
+## 1. Dashboard
 
-### Verification Queue
+**Route:** `/admin/dashboard`
+**Component:** `src/features/admin/pages/dashboard/AdminDashboard.tsx`
 
-**Route:** `/admin/verifications`  
-**Component:** `src/features/admin/verifications/pages/VerificationQueuePage.tsx`
-
-**Tabs:**
-- Pending Business (KYB)
-- Pending Provider (KYC)
-- Approved
-- Rejected
-
-**Verification Card:**
-- Entity Name
-- Type (Business/Provider)
-- Submitted Date
-- Document Count
-- Status Badge
-- Actions: Review, Approve, Reject
-
-### Verification Detail Page
-
-**Route:** `/admin/verifications/{id}`  
-**Component:** `src/features/admin/verifications/pages/VerificationDetailPage.tsx`
-
-**Sections:**
-1. **Entity Information**
-   - Name, Type, TIN
-   - Contact Information
-   - Address
-
-2. **Documents Gallery**
-   - All uploaded documents
-   - Document viewer (PDF/Image)
-   - Download buttons
-
-3. **Verification Actions**
-   - Approve button
-   - Reject button (with reason)
-   - Request Additional Documents
-
-**Implementation:**
-
-```typescript
-export const VerificationDetailPage = () => {
-  const { id } = useParams();
-  const { data: verification } = useQuery({
-    queryKey: ['verification', id],
-    queryFn: () => adminService.getVerification(id!),
-  });
-
-  const approveMutation = useMutation({
-    mutationFn: () => adminService.approveVerification(id!),
-    onSuccess: () => {
-      toast.success('Verification approved');
-      navigate('/admin/verifications');
-    },
-  });
-
-  const rejectMutation = useMutation({
-    mutationFn: (reason: string) => adminService.rejectVerification(id!, reason),
-    onSuccess: () => {
-      toast.success('Verification rejected');
-      navigate('/admin/verifications');
-    },
-  });
-
-  return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle>Entity Information</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {/* Display entity info */}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Documents</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="grid md:grid-cols-2 gap-4">
-            {verification?.documents.map((doc) => (
-              <DocumentViewer key={doc.id} document={doc} />
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Verification Actions</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Button
-            onClick={() => approveMutation.mutate()}
-            disabled={approveMutation.isPending}
-            className="w-full"
-          >
-            Approve Verification
-          </Button>
-          <RejectVerificationDialog
-            onReject={(reason) => rejectMutation.mutate(reason)}
-          />
-        </CardContent>
-      </Card>
-    </div>
-  );
-};
-```
+Stat cards, charts and recent-activity feed drawing from platform-wide queries (users, transactions, verifications). Functionally similar to what the original guide described — this area has not drifted much. Treat the detailed chart/stat inventory as illustrative, not contractual; the important fact is that everything else in this document is a *sibling* of the dashboard, not a subset of it — the admin portal is not "dashboard + settings," it's the seven areas below.
 
 ---
 
-## 👥 User Management
+## 2. Verifications (KYB/KYC/Vehicle)
 
-### User List Page
+This is the real home of what the original guide called "KYC/KYB Verification." It is list+detail per entity type, not a single unified queue with tabs.
 
-**Route:** `/admin/users`  
-**Component:** `src/features/admin/users/pages/UserListPage.tsx`
+| Route | Component |
+|---|---|
+| `/admin/verifications` | redirects to `/admin/verifications/businesses` |
+| `/admin/verifications/businesses` | `BusinessVerificationListPage.tsx` |
+| `/admin/verifications/businesses/:id` | `BusinessVerificationDetailPage.tsx` |
+| `/admin/verifications/providers` | `ProviderVerificationListPage.tsx` |
+| `/admin/verifications/providers/:id` | `ProviderVerificationDetailPage.tsx` |
+| `/admin/verifications/providers/:id/add-vehicle` | `AdminAddVehiclePage.tsx` |
+| `/admin/verifications/vehicles` | `VehicleVerificationListPage.tsx` |
+| `/admin/verifications/vehicles/:id` | `VehicleVerificationDetailPage.tsx` |
+| `/admin/verifications/vehicles/:id/edit` | `AdminVehicleEditPage.tsx` |
 
-**Filters:**
-- Role (Business, Provider, Admin)
-- Status (Active, Suspended, Pending)
-- Search by name/email
-- Date range (registration)
+Each list page is its own dedicated page — there is **no single "Verification Queue" page with Pending/Approved/Rejected tabs** the way the original guide assumed; business, provider, and vehicle verification are three separate list+detail pairs, each with its own filters (status, search, date range).
 
-**Table Columns:**
-- Name/Email
-- Role
-- Status
-- Registration Date
-- Last Active
-- Actions: View, Suspend, Activate
+Detail pages (`BusinessVerificationDetailPage.tsx` 366 lines, `ProviderVerificationDetailPage.tsx` 598 lines, `VehicleVerificationDetailPage.tsx` 766 lines — these are substantial, not simple approve/reject screens) render as stacked sections rather than tabs: entity info, document gallery (`DocumentGallery.tsx`/`DocumentViewer.tsx`/`PhotoGallery.tsx`/`VehiclePhotoGallery.tsx`), a `VerificationChecklist.tsx`, and action buttons (Approve, `RejectDialog.tsx` with a required reason). Supporting edit dialogs exist per entity: `EditBusinessDialog.tsx`, `EditProviderDialog.tsx`, `EditVehicleDialog.tsx`, `EditInsuranceDialog.tsx`, `AddInsuranceDialog.tsx`.
 
-### User Detail Page
-
-**Route:** `/admin/users/{id}`  
-**Component:** `src/features/admin/users/pages/UserDetailPage.tsx`
-
-**Tabs:**
-1. **Profile** - User information
-2. **Activity** - Login history, actions
-3. **Transactions** - Financial transactions
-4. **Contracts** - Active/completed contracts
+The provider detail page has an **"Add Vehicle" action** (`AdminAddVehiclePage.tsx`) that lets an admin register a vehicle on a provider's behalf — this is a real, separate page, not a modal, and isn't mentioned in the original guide.
 
 ---
 
-## 💰 Transaction Monitoring
+## 3. Admin-Initiated Onboarding
 
-### Transaction List
+Not in the original guide at all, and a real, fully-built feature (flagged as undocumented in the coverage audit, §1 item 1 / §8).
 
-**Route:** `/admin/transactions`  
-**Component:** `src/features/admin/transactions/pages/TransactionListPage.tsx`
+| Route | Component |
+|---|---|
+| `/admin/verifications/businesses/create` | `AdminBusinessOnboarding.tsx` |
+| `/admin/verifications/providers/create` | `AdminProviderOnboarding.tsx` |
 
-**Filters:**
-- Type (Deposit, Settlement, Escrow, etc.)
-- Date Range
-- User (Business/Provider)
-- Amount Range
-- Status
-
-**Table Columns:**
-- Transaction ID
-- Type
-- User
-- Amount
-- Status
-- Date
-- Actions: View Details
-
-### Transaction Detail
-
-**Route:** `/admin/transactions/{id}`  
-**Component:** `src/features/admin/transactions/pages/TransactionDetailPage.tsx`
-
-**Display:**
-- Full transaction details
-- Related entities (contract, RFQ)
-- Ledger entries
-- Audit trail
+Both wizards mirror the self-service onboarding wizards (see `ONBOARDING_GUIDE.md`) but add a **pre-step** (`AdminBusinessPreStep.tsx` / equivalent for provider) that creates the login account itself (email, password, first/last name, phone, preferred language) before the same Business Info → Contact & Address → Documents → Review sequence. If the admin lands on the page with a `?businessId=`/`?providerId=` query param, the pre-step is skipped and the wizard resumes an existing draft instead of creating a new account. Onboarding created this way is tagged distinctly in status history so it's traceable as admin-initiated rather than self-service.
 
 ---
 
-## 📦 Master Data Management
+## 4. Master Data & Settings
 
-### Document Types Management
+This is the area the original guide underspecified the most — it called it "Master Data Management" with 3 sub-pages (Document Types, KYC Requirements, Business/Provider Tiers, Commission Strategies). The real surface, all under `/admin/settings/*`, has **16 distinct pages**:
 
-**Route:** `/admin/master-data/document-types`  
-**Component:** `src/features/admin/master-data/pages/DocumentTypesPage.tsx`
+| Route | Component | Purpose |
+|---|---|---|
+| `/admin/settings` → `/admin/settings/system` | `AdminSettingsPage.tsx` | General system settings |
+| `/admin/settings/documents` | `DocumentTypesPage.tsx` | Document type catalog |
+| `/admin/settings/lookups` | `LookupsPage.tsx` | Generic key/value lookup tables (fuel types, engine types, etc.) |
+| `/admin/settings/banks` | `BanksPage.tsx` | Bank master list (for bank-account forms across the platform) |
+| `/admin/settings/platform-bank-accounts` | `PlatformBankAccountsPage.tsx` | Movello's own settlement/receiving bank accounts |
+| `/admin/settings/tiers` | `TiersPage.tsx` | Business tiers (STANDARD/BUSINESS_PRO/ENTERPRISE/GOV_NGO) + Provider tiers (BRONZE/SILVER/GOLD/PLATINUM), tabbed |
+| `/admin/settings/geography` | `GeographyPage.tsx` | Cities/regions used across address and location pickers |
+| `/admin/settings/rules` | `RulesPage.tsx` | **Combined versioned-policy manager** — escrow / settlement / contract / commission rules in one tabbed UI, backed by `RuleForms.tsx` |
+| `/admin/settings/escrow-policies` | `EscrowPoliciesPage.tsx` | Dedicated escrow policy version list (also reachable via Rules) |
+| `/admin/settings/settlement-policies` | `SettlementPoliciesPage.tsx` | Dedicated settlement policy version list |
+| `/admin/settings/contract-policies` | `ContractPoliciesPage.tsx` | Dedicated contract policy version list |
+| `/admin/settings/contract-terms` | `ContractTermsPage.tsx` (+ `ContractTermsFormPage.tsx` new/edit, `ContractTermsPreviewPage.tsx`) | Contract terms & conditions templates shown to both parties before e-signature |
+| `/admin/settings/commission-strategies` | `CommissionStrategiesPage.tsx` | Commission strategy versions per provider tier |
+| `/admin/settings/financials` | `FinancialsPage.tsx` | Financial parameters |
+| `/admin/settings/checklist-templates` | `ChecklistTemplatesPage.tsx` | Delivery/return vehicle-inspection checklist templates |
 
-**Features:**
-- List all document types
-- Create new document type
-- Update existing document type
-- Activate/Deactivate document types
+**Key correction vs. the original guide:** these are **versioned policies**, not simple CRUD rows. `RulesPage.tsx` and its per-policy siblings work against `PolicyVersion`/`*PolicyRule` types (`CommissionStrategyVersion/Rule`, `ContractPolicyVersion/Rule`, `EscrowPolicyVersion/Rule`, `SettlementPolicyVersion/Rule`) — an admin creates a new version, edits its rules, then **activates** a specific version number (`activatePolicy(versionNumber)`), rather than editing one live row in place. This versioning layer is real, backend-enforced, and completely absent from the original guide, which described flat `POST/PUT /api/document-types` style CRUD for everything.
 
-**API Endpoints:**
-- `GET /api/document-types` - List document types
-- `POST /api/document-types` - Create document type
-- `PUT /api/document-types/{id}` - Update document type
-- `DELETE /api/document-types/{id}` - Delete document type
+**Known dead-code confirmed in code (not a documentation gap — an actual stub):** `TiersPage.tsx` is annotated `// @ts-nocheck - TODO: Fix type issues`, and its edit-tier mutation is a no-op that only calls `toast.info('Update functionality coming soon')` before resolving — **admins cannot actually edit tier thresholds or commission rates through this UI today**, only view the seeded list. Any workflow description that assumes tier editing works end-to-end is aspirational, not real.
 
-**Form Fields:**
-- Name (required)
-- Code (required, unique)
-- Description (optional)
-- Max File Size (optional)
-- Allowed File Types (array)
-- Is Active (boolean)
-
-### KYC Requirements Management
-
-**Route:** `/admin/master-data/kyc-requirements`  
-**Component:** `src/features/admin/master-data/pages/KYCRequirementsPage.tsx`
-
-**Features:**
-- List all KYC requirements
-- Filter by entity type (BUSINESS, PROVIDER, VEHICLE)
-- Create new KYC requirement
-- Update existing requirement
-- Set requirement as required/optional
-
-**API Endpoints:**
-- `GET /api/kyc-requirements?entityType={type}` - List requirements
-- `POST /api/kyc-requirements` - Create requirement
-- `PUT /api/kyc-requirements/{id}` - Update requirement
-- `DELETE /api/kyc-requirements/{id}` - Delete requirement
-
-**Form Fields:**
-- Entity Type (BUSINESS, PROVIDER, VEHICLE)
-- Document Type (dropdown from document types)
-- Is Required (boolean)
-- Description (optional)
-- Max File Size (optional)
-- Allowed File Types (array)
-
-### Business Tiers Management
-
-**Route:** `/admin/master-data/business-tiers`  
-**Component:** `src/features/admin/master-data/pages/BusinessTiersPage.tsx`
-
-**Features:**
-- List all business tiers (STANDARD, BUSINESS_PRO, ENTERPRISE, GOV_NGO)
-- Create new tier
-- Update tier limits and benefits
-- Configure tier rules
-
-**API Endpoints:**
-- `GET /api/business-tiers` - List tiers
-- `POST /api/business-tiers` - Create tier
-- `PUT /api/business-tiers/{id}` - Update tier
-- `DELETE /api/business-tiers/{id}` - Delete tier
-
-**Form Fields:**
-- Code (required, unique: STANDARD, BUSINESS_PRO, ENTERPRISE, GOV_NGO)
-- Name (required)
-- Description (optional)
-- Max RFQs Per Month (optional, null = unlimited)
-- Max Active Contracts (optional)
-- Max Vehicles Per RFQ (optional)
-- Color Code (hex color for UI)
-- Display Order (number)
-
-### Provider Tiers Management
-
-**Route:** `/admin/master-data/provider-tiers`  
-**Component:** `src/features/admin/master-data/pages/ProviderTiersPage.tsx`
-
-**Features:**
-- List all provider tiers (BRONZE, SILVER, GOLD, PLATINUM)
-- Create new tier
-- Update commission rates per tier
-- Configure tier rules
-
-**API Endpoints:**
-- `GET /api/provider-tiers` - List tiers
-- `POST /api/provider-tiers` - Create tier
-- `PUT /api/provider-tiers/{id}` - Update tier
-- `DELETE /api/provider-tiers/{id}` - Delete tier
-
-**Form Fields:**
-- Code (required, unique: BRONZE, SILVER, GOLD, PLATINUM)
-- Name (required)
-- Description (optional)
-- Commission Rate (required, decimal: 0.05 = 5%)
-- Color Code (hex color for UI)
-- Display Order (number)
-
-### Commission Strategies Management
-
-**Route:** `/admin/master-data/commission-strategies`  
-**Component:** `src/features/admin/master-data/pages/CommissionStrategiesPage.tsx`
-
-**Features:**
-- List commission strategy versions
-- Create new version
-- Activate/deactivate versions
-- View commission rules per tier
-
-**API Endpoints:**
-- `GET /api/commission-strategies/versions` - List strategies
-- `POST /api/commission-strategies/versions` - Create strategy
-- `PUT /api/commission-strategies/versions/{id}` - Update strategy
+Both `settings/rules` (combined) and the dedicated per-policy pages (`escrow-policies`, `settlement-policies`, `contract-policies`) exist and route independently — they are not duplicates by accident, they're two different entry points into the same versioned-policy data.
 
 ---
 
-## 📋 RFQ Management (On Behalf of Businesses)
+## 5. Users
 
-### RFQ List (Admin View)
+| Route | Component |
+|---|---|
+| `/admin/users` → `/admin/users/businesses` | redirect |
+| `/admin/users/businesses` | `BusinessUsersPage.tsx` |
+| `/admin/users/businesses/:id` | `UserDetailPage.tsx` (`userType="business"`) |
+| `/admin/users/providers` | `ProviderUsersPage.tsx` |
+| `/admin/users/providers/:id` | `UserDetailPage.tsx` (`userType="provider"`) |
 
-**Route:** `/admin/rfqs`  
-**Component:** `src/features/admin/rfqs/pages/AdminRFQListPage.tsx`
-
-**Features:**
-- View all RFQs (no limitations)
-- Filter by business, status, date range
-- Create RFQ on behalf of business
-- Edit/Delete any RFQ
-- View bid details for any RFQ
-
-**API Endpoints:**
-- `GET /api/marketplace/rfqs` - List all RFQs (admin sees all)
-- `POST /api/marketplace/rfqs` - Create RFQ (must provide BusinessId)
-- `PUT /api/marketplace/rfqs/{id}` - Update RFQ
-- `DELETE /api/marketplace/rfqs/{id}` - Delete RFQ
-
-**Implementation:**
-
-```typescript
-export const AdminRFQListPage = () => {
-  const { data: rfqs } = useQuery({
-    queryKey: ['admin', 'rfqs'],
-    queryFn: () => rfqService.getAllRFQs(), // Admin endpoint
-  });
-
-  const createRFQMutation = useMutation({
-    mutationFn: (data: CreateRFQRequest & { businessId: string }) => 
-      rfqService.createRFQ(data),
-  });
-
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold">RFQ Management</h1>
-        <CreateRFQDialog
-          onSuccess={(data) => createRFQMutation.mutate(data)}
-        />
-      </div>
-      
-      <RFQList rfqs={rfqs} showBusinessInfo={true} />
-    </div>
-  );
-};
-```
-
-### Create RFQ on Behalf of Business
-
-**Component:** `src/features/admin/rfqs/components/CreateRFQDialog.tsx`
-
-**Additional Field:**
-- Business Selection (required dropdown)
-- All standard RFQ creation fields
+`UserDetailPage.tsx` is a single shared component parameterized by `userType`, not two separate detail pages. Suspend/reactivate actions live here. This is distinct from the Verifications list pages (§2) — Users is the account-management view (status, suspension, activity), Verifications is the KYC/KYB approval workflow view. They both exist and are not the same screen, contrary to the original guide's single "User Management" section.
 
 ---
 
-## 💼 Bid Management (On Behalf of Providers)
+## 6. Operations — RFQ, Bids, Contracts
 
-### Bid List (Admin View)
+`OperationsPage.tsx` (`/admin/operations`) is a **launcher/search hub**, not a data table. It lets an admin search a verified business (to create an RFQ on their behalf) or a verified provider + RFQ (to submit a bid on their behalf), then navigates into the dedicated pages below. This matches the original guide's intent ("RFQ/Bid on behalf of") but the actual entry point is this hub page plus a duplicate, flatter set of routes without the `/operations` prefix (both work; `/admin/rfqs`, `/admin/bids`, `/admin/contracts` are aliases that resolve to the same components as their `/admin/operations/...` counterparts).
 
-**Route:** `/admin/bids`  
-**Component:** `src/features/admin/bids/pages/AdminBidListPage.tsx`
+**RFQ management:**
 
-**Features:**
-- View all bids (no limitations)
-- Filter by provider, RFQ, status
-- Submit bid on behalf of provider
-- Withdraw any bid
-- View bid details
+| Route | Component |
+|---|---|
+| `/admin/marketplace` (or `/operations/marketplace`) | `AdminMarketplacePage.tsx` — browse open RFQs across all businesses; `AdminBidModal.tsx` for quick bid actions |
+| `/admin/rfqs/manage` (or `/operations/rfqs/manage`) | `AdminRFQManagementPage.tsx` |
+| `/admin/rfqs/create` (or `/operations/rfqs/create`) | `AdminCreateRFQPage.tsx` — reuses the same `RFQCreateWizard` the business portal uses, with a `businessId` prop so the RFQ is attributed to the selected business (see BUSINESS_PORTAL_GUIDE.md for the wizard's real 3-step / line-item shape — **not** a single vehicle-type/date-range form) |
+| `/admin/rfqs/:rfqId/edit` | `AdminRFQEditPage.tsx` |
+| `/admin/rfqs/business/:businessId` | `AdminRFQManagementPage.tsx` filtered to one business |
 
-**API Endpoints:**
-- `GET /api/marketplace/bids` - List all bids (admin sees all)
-- `POST /api/marketplace/bids` - Submit bid (must provide ProviderId)
-- `DELETE /api/marketplace/bids/{id}` - Withdraw bid
+**Bid management:**
 
-**Implementation:**
+| Route | Component |
+|---|---|
+| `/admin/bids/provider` (or `/operations/bids/provider`) | `AdminProviderBidsPage.tsx` |
+| `/admin/bids/provider/:providerId` | same, filtered |
+| `/admin/bids/provider/:providerId/rfq/:rfqId` | `ProviderBidLineItemsPage.tsx` — per-line-item bid detail |
+| `/admin/bids/submit` (or `/operations/bids/submit`) | `AdminSubmitBidPage.tsx` — submit a bid on a provider's behalf |
+| `/admin/bids/award` (or `/operations/bids/award`) | `AdminAwardBidsPage.tsx` — award bids on a business's behalf; supporting dialogs `AssignVehicleDialog.tsx`, `EditBidDialog.tsx` |
 
-```typescript
-export const AdminBidListPage = () => {
-  const { data: bids } = useQuery({
-    queryKey: ['admin', 'bids'],
-    queryFn: () => bidService.getAllBids(), // Admin endpoint
-  });
+Bidding here follows the same **per-line-item, split-award-capable** model as the business portal (`BidReviewPage`/`SplitAwardDialog`) — awarding is scoped to a single RFQ line item at a time, and multiple providers can each be awarded a partial quantity of the same line item.
 
-  const submitBidMutation = useMutation({
-    mutationFn: (data: SubmitBidCommand & { providerId: string }) => 
-      bidService.submitBid(data),
-  });
+**Contract management:**
 
-  return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-bold">Bid Management</h1>
-        <SubmitBidDialog
-          onSuccess={(data) => submitBidMutation.mutate(data)}
-        />
-      </div>
-      
-      <BidList bids={bids} showProviderInfo={true} />
-    </div>
-  );
-};
-```
+| Route | Component |
+|---|---|
+| `/admin/contracts/business` (or `/operations/contracts/business`) | `AdminBusinessContractsPage.tsx` |
+| `/admin/contracts/provider` (or `/operations/contracts/provider`) | `AdminProviderContractsPage.tsx` |
+| `/admin/contracts/business/:businessId/contract/:contractId` | shared `ContractDetailPage.tsx` (same component as the business/provider portals, admin-aware via `location.pathname` checks) |
+| `.../contract/:contractId/delivery` | `AdminDeliveryPage.tsx` |
+| `/admin/operations/contracts/assign-vehicle[/:contractId]` | `AdminAssignVehiclePage.tsx` — admin can assign vehicles to a contract on a provider's behalf |
+| `/admin/operations/contracts/terminate` | `AdminContractTerminationPage.tsx` |
 
-### Submit Bid on Behalf of Provider
+**What the admin can do on the shared `ContractDetailPage` that business/provider users cannot** (verified in code, `isAdmin` branches):
+- **Abort Before Signing** — available only while status is `PENDING_VEHICLE_ASSIGNMENT`, `PENDING_ESCROW`, or `PENDING_SIGNING`; requires a reason; calls `contractService.abortContractBeforeSigning`.
+- **Settle Current Cycle** — triggers `financeService.generateCurrentCycleSettlement` for whatever settlement cycle is currently due, independent of the automated schedule.
+- **Admin Override: Complete** — force-completes a contract that's in a completion-request standoff, bypassing the normal request/approve/reject cycle between business and provider.
 
-**Component:** `src/features/admin/bids/components/SubmitBidDialog.tsx`
+**Real contract lifecycle, corrected vs. the original guide:** the original guide assumed `pending → active → suspended → completed` with manual "renewal" creating a brand-new contract. The real system has no `SUSPENDED` state at all. Instead: `Contract.Status` is a plain string (not an enforced backend enum — the nominal `ContractStatus` C# enum exists but has zero references outside its own file), producing states including `PENDING_VEHICLE_ASSIGNMENT`, `PENDING_SIGNING` (a dual-party OTP e-signature step, separate from delivery OTP — both business and provider must OTP-sign contract terms), `PENDING_DELIVERY`, `PARTIALLY_DELIVERED`, `ACTIVE`, `TERMINATION_REQUESTED`, `PARTIALLY_RETURNED`, `COMPLETED`, `CANCELLED`, and others. "Renewal" does not exist as a concept anywhere — what the web app calls **extension** (`ExtendContractDialog.tsx`, business portal only) lengthens the *same* contract's end date by 1–12 months (rounded to end-of-month) and is **only available for long-term contracts**; there is no provider accept/reject step and no new contract entity created. See `BUSINESS_PORTAL_GUIDE.md` §Contracts for the full state detail and `project-docs/18_Implementation_Coverage_Audit.md` §3 and §10.1 for the full forensic history of this divergence.
 
-**Additional Field:**
-- Provider Selection (required dropdown)
-- All standard bid submission fields
+Contract completion is a **request/approve/reject/cancel** negotiation between business and provider (visible on the shared detail page as color-coded banners), gated on all vehicles being returned and all settlement cycles for the contract being settled — not a simple end-date auto-completion.
 
 ---
 
-## 🏢 Business Management
+## 7. Operations — Settlements, Wallet Accounts, Monitoring
 
-### Business List
+| Route | Component |
+|---|---|
+| `/admin/operations/settlements` | `AdminSettlementManagementPage.tsx` |
+| `/admin/operations/settlements/:payoutId` | `AdminSettlementDetailPage.tsx` |
+| `/admin/operations/wallet-accounts` | `AdminWalletAccountsPage.tsx` |
+| `/admin/operations/monitoring/vehicles` | `VehicleLifecycleMonitoringPage.tsx` |
 
-**Route:** `/admin/businesses`  
-**Component:** `src/features/admin/businesses/pages/BusinessListPage.tsx`
-
-**Features:**
-- List all businesses
-- Filter by status, tier, type
-- Search by name, TIN, email
-- View business details
-- Update business information
-- Suspend/Activate business
-- View business contracts and RFQs
-
-**API Endpoints:**
-- `GET /api/identity/businesses` - List businesses
-- `GET /api/identity/businesses/{id}` - Get business details
-- `PUT /api/identity/businesses/{id}` - Update business
-- `POST /api/identity/users/{id}/suspend` - Suspend business
-- `POST /api/identity/users/{id}/reactivate` - Reactivate business
-
-**Table Columns:**
-- Business Name
-- TIN Number
-- Email
-- Status (PENDING, VERIFIED, SUSPENDED, etc.)
-- Tier (STANDARD, BUSINESS_PRO, ENTERPRISE, GOV_NGO)
-- Registration Date
-- Actions: View, Edit, Suspend, Activate
-
-### Business Detail Page
-
-**Route:** `/admin/businesses/{id}`  
-**Component:** `src/features/admin/businesses/pages/BusinessDetailPage.tsx`
-
-**Tabs:**
-1. **Profile** - Business information, tier, status
-2. **Documents** - All uploaded documents
-3. **RFQs** - Business RFQs
-4. **Contracts** - Business contracts
-5. **Transactions** - Financial transactions
-6. **Activity** - Audit log
+`VehicleLifecycleMonitoringPage.tsx` is entirely undocumented in the original guide and in the epic backlog — it's a platform-wide view of vehicle status transitions (the real lifecycle is richer than "Active/Assigned/Maintenance": vehicles also move through `DELIVERED`, `RETURNED`, `REPLACED`, `MAINTENANCE`, driven by the delivery/return-OTP and vehicle-replace/return flows described in the provider guide).
 
 ---
 
-## 🚗 Provider Management
+## 8. Direct Rental Oversight
 
-### Provider List
+**Entirely absent from the original guide.** Direct Rental is a fixed-price, non-bidding vehicle booking channel parallel to RFQ bidding (browse catalog → cart → per-provider request → accept/reject at vehicle granularity → auto-created contract). Full product detail lives in `backlog/post-mvp/epic-21-direct-rental.md` and `project-docs/17_Direct_Rental_Product_Design_Brief.md`; the admin surface is:
 
-**Route:** `/admin/providers`  
-**Component:** `src/features/admin/providers/pages/ProviderListPage.tsx`
+| Route | Component |
+|---|---|
+| `/admin/operations/direct-rental` → `/browse` | redirect |
+| `/admin/operations/direct-rental/browse` | `AdminDirectRentalBrowsePage.tsx` — full catalog, not scoped to one business |
+| `/admin/operations/direct-rental/vehicles/:id` | `AdminDirectRentalVehicleDetailPage.tsx` |
+| `/admin/operations/direct-rental/cart` | `AdminDirectRentalCartPage.tsx` — manage a cart **on behalf of a business** (add/update/remove items, submit-preview, submit) |
+| `/admin/operations/direct-rental/requests` | `AdminDirectRentalRequestsPage.tsx` — all requests platform-wide, filterable by business/provider/status/date |
+| `/admin/operations/direct-rental/requests/:id` | `AdminDirectRentalRequestManagePage.tsx` — includes the ability to **respond to a request on a provider's behalf** |
 
-**Features:**
-- List all providers
-- Filter by status, tier, type
-- Search by name, TIN, email
-- View provider details
-- Update provider information
-- Suspend/Activate provider
-- View provider vehicles, bids, contracts
-
-**API Endpoints:**
-- `GET /api/identity/providers` - List providers
-- `GET /api/identity/providers/{id}` - Get provider details
-- `PUT /api/identity/providers/{id}` - Update provider
-- `POST /api/identity/users/{id}/suspend` - Suspend provider
-- `POST /api/identity/users/{id}/reactivate` - Reactivate provider
-
-**Table Columns:**
-- Provider Name
-- Type (INDIVIDUAL, AGENT, COMPANY)
-- TIN Number (if applicable)
-- Email
-- Status (PENDING, VERIFIED, SUSPENDED, etc.)
-- Tier (BRONZE, SILVER, GOLD, PLATINUM)
-- Trust Score
-- Registration Date
-- Actions: View, Edit, Suspend, Activate
-
-### Provider Detail Page
-
-**Route:** `/admin/providers/{id}`  
-**Component:** `src/features/admin/providers/pages/ProviderDetailPage.tsx`
-
-**Tabs:**
-1. **Profile** - Provider information, tier, trust score
-2. **Documents** - All uploaded documents
-3. **Vehicles** - Provider's vehicle fleet
-4. **Bids** - Provider's bids
-5. **Contracts** - Provider's contracts
-6. **Transactions** - Financial transactions
-7. **Activity** - Audit log
+All admin Direct Rental actions are tagged `ADMIN` in the request's status-history timeline along with the acting admin's identity, so on-behalf-of actions remain auditable.
 
 ---
 
-## 🚙 Vehicle Management
+## 9. Wallets
 
-### Vehicle List
+Distinct from Direct Rental "cart" wallets and from Finance (§10) — this section is the platform's own ledger/account view.
 
-**Route:** `/admin/vehicles`  
-**Component:** `src/features/admin/vehicles/pages/VehicleListPage.tsx`
+| Route | Component |
+|---|---|
+| `/admin/wallets` → `/platform` | redirect |
+| `/admin/wallets/platform` | `PlatformWalletDashboard.tsx` |
+| `/admin/wallets/platform-account` | `PlatformAccountManagementPage.tsx` |
+| `/admin/wallets/escrow-transactions` | `EscrowTransactionsPage.tsx` |
+| `/admin/wallets/all` | `AllWalletsPage.tsx` — every business/provider wallet, one table |
+| `/admin/wallets/escrow` | `EscrowWalletManagementPage.tsx` |
+| `/admin/wallets/business-escrow` | `AdminBusinessEscrowWalletsPage.tsx` |
+| `/admin/wallets/tax-report` | `WithholdingTaxPage.tsx` |
+| `/admin/wallets/:walletId` | `AdminWalletDetailPage.tsx` |
 
-**Features:**
-- List all vehicles
-- Filter by provider, status, type
-- Search by license plate, VIN
-- View vehicle details
-- Update vehicle information
-- Verify/Reject vehicles
-- View vehicle documents and insurance
-
-**API Endpoints:**
-- `GET /api/admin/verifications/vehicles` - List vehicles for verification
-- `GET /api/identity/vehicles/{id}` - Get vehicle details
-- `PUT /api/identity/vehicles/{id}` - Update vehicle
-- `PUT /api/admin/verifications/vehicles/{id}/status` - Update verification status
-
-**Table Columns:**
-- License Plate
-- Make/Model/Year
-- Type
-- Provider Name
-- Status (PENDING_VERIFICATION, ACTIVE, SUSPENDED, etc.)
-- Insurance Status
-- Registration Date
-- Actions: View, Edit, Verify, Reject
-
-### Vehicle Detail Page
-
-**Route:** `/admin/vehicles/{id}`  
-**Component:** `src/features/admin/vehicles/pages/VehicleDetailPage.tsx`
-
-**Sections:**
-1. **Vehicle Information** - Basic details, photos
-2. **Documents** - Ownership, registration documents
-3. **Insurance** - Insurance policies and status
-4. **Assignments** - Current/past contract assignments
-5. **Verification** - Verification status and history
-
-**Verification Actions:**
-- Approve Vehicle
-- Reject Vehicle (with reason)
-- Request Additional Documents
+There is no single "Transaction Monitoring" page as the original guide assumed — transaction/ledger visibility is spread across these wallet-specific pages, plus the escrow-transactions page specifically for escrow-lock/release events, plus the withholding-tax report.
 
 ---
 
-## ⚙️ System Settings
+## 10. Finance — Settlement/Withdrawal/Deposit/Invoice Queues
 
-### Settings Page
+A separate route group from both Operations-Settlements (§7) and Wallets (§9) — this is the **approval-queue** layer for money movement that requires a human check.
 
-**Route:** `/admin/settings`  
-**Component:** `src/features/admin/settings/SettingsPage.tsx`
+| Route | Component |
+|---|---|
+| `/admin/finance/settlements` | `SettlementPayoutsPage.tsx` — settlement payout approval queue |
+| `/admin/finance/withdrawals` | `WithdrawalRequestsPage.tsx` |
+| `/admin/finance/withdrawals/:id` | `WithdrawalRequestDetailPage.tsx` |
+| `/admin/finance/deposits` | `DepositRequestsPage.tsx` |
+| `/admin/finance/deposits/:id` | `DepositRequestDetailPage.tsx` |
+| `/admin/finance/invoices` | `AdminProviderInvoicesPage.tsx` |
+| `/admin/finance/invoices/:id` | `AdminProviderInvoiceDetailPage.tsx` |
 
-**Sections:**
-1. **Commission Rates** - Per tier (managed via Commission Strategies)
-2. **Penalty Rates** - Early return penalties
-3. **Trust Score Weights** - Calculation parameters
-4. **Tier Requirements** - Trust score & vehicle thresholds
-5. **Market Prices** - Vehicle type price ranges
-6. **OTP Settings** - Expiry time, max attempts
-7. **Settlement Settings** - Approval thresholds, frequencies
-
----
-
-## ✅ User Stories Summary
-
-### Epic 10: Admin Verification (8 stories)
-- MOV-1001: Review Business KYB ⭐ Highest Priority
-- MOV-1002: Review Provider KYC ⭐ Highest Priority
-- MOV-1003: Approve Verification
-- MOV-1004: Reject Verification
-- MOV-1005: Review Vehicle Verification
-- MOV-1006: Request Additional Documents
-- MOV-1007: View Verification History
-- MOV-1008: Bulk Verification Actions
-
-### Epic 11: Admin Monitoring (7 stories)
-- MOV-1101: View Transaction List
-- MOV-1102: View User List
-- MOV-1103: Suspend User
-- MOV-1104: View System Analytics
-- MOV-1105: View Platform Metrics
-- MOV-1106: Export Reports
-- MOV-1107: View Audit Logs
-
-### Epic 12: Admin Management (NEW - 15 stories)
-- MOV-1201: Manage Document Types
-- MOV-1202: Manage KYC Requirements
-- MOV-1203: Manage Business Tiers
-- MOV-1204: Manage Provider Tiers
-- MOV-1205: Manage Commission Strategies
-- MOV-1206: Create RFQ on Behalf of Business
-- MOV-1207: Edit RFQ on Behalf of Business
-- MOV-1208: Submit Bid on Behalf of Provider
-- MOV-1209: Manage Businesses (CRUD)
-- MOV-1210: Manage Providers (CRUD)
-- MOV-1211: Manage Vehicles (CRUD)
-- MOV-1212: View Business Details
-- MOV-1213: View Provider Details
-- MOV-1214: View Vehicle Details
-- MOV-1215: Configure System Settings
+**Note on invoices:** the invoice flow is **provider-submitted**, reviewed/approved by admin here — this inverts the assumption in the MVP daily-ledger epic that the system auto-generates invoices for admin to just view. Deposit/withdrawal requests here are the manual bank-transfer path (parallel to the automated Chapa/Telebirr/CBEBirr webhook path that posts directly without an approval queue).
 
 ---
 
-**END OF ADMIN PORTAL GUIDE**
+## 11. Notifications — Templates & Providers
 
-*For detailed user stories, see [USER_STORIES_COMPLETE.md](./USER_STORIES_COMPLETE.md)*
+Not mentioned at all in the original guide. Notifications is one of the areas that most exceeds its epic doc (see coverage audit §6) — this is the admin configuration surface for a full multi-channel (email/SMS/push) notification system with per-category × per-channel toggles, template management, and live provider credential configuration.
 
+**Templates** (three channels, each with list + form pages):
+
+| Route | Component |
+|---|---|
+| `/admin/notifications/templates/in-app[/new\|/:id/edit]` | `InAppTemplatesPage.tsx` / `InAppTemplateFormPage.tsx` |
+| `/admin/notifications/templates/email[/new\|/:id/edit]` | `EmailTemplatesPage.tsx` / `EmailTemplateFormPage.tsx` |
+| `/admin/notifications/templates/sms[/new\|/:id/edit]` | `SmsTemplatesPage.tsx` / `SmsTemplateFormPage.tsx` |
+
+**Providers** (channel credential/config management):
+
+| Route | Component |
+|---|---|
+| `/admin/notifications/providers/email` | `EmailProvidersPage.tsx` (SMTP config) |
+| `/admin/notifications/providers/sms` | `SmsProvidersPage.tsx` (Afromessage-style SMS gateway config) |
+| `/admin/notifications/providers/fcm` | `FcmProvidersPage.tsx` (Firebase Cloud Messaging push config) |
+| `/admin/notifications/providers/fcm/token` | `FcmTokenHelperPage.tsx` — a utility page for generating/testing FCM tokens |
+
+This whole area backs a real-time SignalR notification hub and admin-configurable per-category × per-channel toggle system on the backend (`NotificationAdminController`, 40+ endpoints) — treat any notification-related admin flow described elsewhere as "send an email on event X" as a drastic understatement of what's actually configurable here.
+
+---
+
+## 12. Cross-Cutting Notes & Divergences
+
+- **No unified "Verification Queue with tabs."** Business, provider, and vehicle verification are three independent list+detail page pairs (§2), not one queue.
+- **Tier editing is a UI stub.** `TiersPage.tsx`'s edit dialog does not persist anything (§4) — don't build workflows assuming it works.
+- **Policies are versioned, not flat rows.** Every "Rules"/"Policy" page in Master Data works in terms of create-version → edit-rules → activate-version, not in-place edit (§4).
+- **Contract state has no `SUSPENDED`, no `renew` endpoint.** "Renewal" in the UI is "extension," business-initiated, long-term-only, same contract (§6).
+- **RFQ/bidding is line-item + split-award**, not single-vehicle-type/date-range with one award per RFQ, on both the business-facing and admin-on-behalf-of surfaces (§6).
+- **Direct Rental is a whole parallel acquisition channel** with full admin oversight (browse/cart/requests/vehicle-detail, act-on-behalf-of) and no epic number of its own until `backlog/post-mvp/epic-21-direct-rental.md` was added — see §8.
+- **Admin-initiated onboarding is a real, distinct feature** (§3), not just "the admin can view businesses/providers."
+- **Notifications admin config is a first-class, large area** (§11), not a footnote under System Settings.
+- Routes are frequently duplicated under both `/admin/...` and `/admin/operations/...` for the same underlying pages (RFQ, bids, contracts) — both resolve, don't assume one is stale.
+
+For the epic-by-epic status of every area in this document (what's done, partial, or diverges from its backlog doc), see `project-docs/18_Implementation_Coverage_Audit.md`, especially §2 (coverage matrix) and §7 (undocumented features inventory).

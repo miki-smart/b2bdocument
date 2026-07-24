@@ -1,392 +1,123 @@
 # Movello MVP - Dispute Resolution Workflow
-## Complete Dispute Categories, Evidence, SLA & Resolution - Version 1.0
 
-**Document Status:** AUTHORITATIVE  
-**Date:** December 22, 2025  
-**Related Documents:** 
-- MVP_AUTHORITATIVE_BUSINESS_RULES.md
-- MVP_EVENT_CATALOG_AND_HANDLERS.md
-- MVP_MODULE_INTEGRATION_SPECIFICATION.md
-- MVP_CONTRACT_STATE_MACHINE.md
-- MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md  
-**Review Status:** ✅ Approved by Business Owner
+## Status: PROPOSED DESIGN — NOT IMPLEMENTED IN CODE
+
+**Version:** 2.0 (rewritten against running code)
+**Last verified against code: 2026-07-23**
+**Document Status:** PROPOSED / FUTURE WORK — no part of this document, past §0, describes running code.
+**Original version:** 1.0, dated December 2025 — presented this workflow as an authoritative, approved specification for a `Disputes` module. It was never built. Preserved only in git history; this rewrite keeps the useful design thinking but removes every claim of current implementation.
+**Related documents:** [`project-docs/18_Implementation_Coverage_Audit.md`](../../../../project-docs/18_Implementation_Coverage_Audit.md) §5, §6, §10.4 (audit findings this rewrite is based on); [`project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md`](../../../../project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md) §3 (companion "Dispute & Arbitration Engine" design, same status, same date); [`backlog/mvp/epic-06-contract-management.md`](../../../../backlog/mvp/epic-06-contract-management.md) (real contract lifecycle — `DISPUTED`/`ON_HOLD` statuses); [`backlog/mvp/epic-10-monthly-renewal-settlement.md`](../../../../backlog/mvp/epic-10-monthly-renewal-settlement.md) Story 10.7 (settlement-dispute confirmation of absence); [`MVP_MODULE_INTEGRATION_SPECIFICATION.md`](./MVP_MODULE_INTEGRATION_SPECIFICATION.md) (rewritten alongside this doc — confirms there is no `Disputes` module in the real 8-module list); [`MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md`](./MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md) (confirms no `Debt` entity exists, which this design's non-payment category originally assumed)
 
 ---
 
-## Document Purpose
+## 0. Read this first
 
-This document defines the complete dispute resolution system for the Movello MVP platform, including:
-- All dispute categories and definitions
-- Evidence requirements per category
-- Resolution workflows and decision trees
-- SLA timelines (48-hour resolution target)
-- Escalation procedures
-- Resolution outcomes and enforcement
+**Nothing in this document exists in the Movello codebase today.** This was the single biggest finding of the 2026-07-23 implementation coverage audit regarding disputes: there is no `Dispute` entity, no `DisputeEvidence`/`DisputeAction`-equivalent entity, no dispute controller, no dispute API endpoint, no dispute background job, no `Disputes` module, and no dispute-specific database table anywhere in the backend, web app, or either mobile app. Confirmed by repo-wide search across all four surfaces.
 
----
+What *does* exist, and is the entire real footprint of "dispute" in the running system:
 
-## TABLE OF CONTENTS
+| What's real | Where |
+|---|---|
+| `DISPUTED` is a reserved value of the `ContractStatus` C# enum | `Modules/Contracts/Domain/Enums/ContractStatus.cs` |
+| `ON_HOLD` is a reserved value of the same enum | same file |
+| Both values are referenced defensively in a couple of guard clauses (e.g. the delivery/return status-aggregation function explicitly refuses to overwrite a `DISPUTED` status if it were ever set) and queried by one admin dashboard stat card | `Modules/Contracts/**` |
+| `EscrowLock` (the real Finance-module entity, not the generic `EscrowContract` in the companion spec) has a `DISPUTED`-adjacent status value used by early-termination/freeze/partial-release commands | `Modules/Finance/Domain/Entities/EscrowLock.cs` |
 
-1. [Dispute System Overview](#1-dispute-system-overview)
-2. [Dispute Categories](#2-dispute-categories)
-3. [Dispute Creation Process](#3-dispute-creation-process)
-4. [Evidence Requirements](#4-evidence-requirements)
-5. [Resolution Workflow](#5-resolution-workflow)
-6. [SLA & Timelines](#6-sla--timelines)
-7. [Resolution Outcomes](#7-resolution-outcomes)
-8. [Escalation Procedures](#8-escalation-procedures)
-9. [Automated Dispute Handling](#9-automated-dispute-handling)
-10. [Post-Resolution Actions](#10-post-resolution-actions)
+That's the entirety of it. **No code path anywhere ever sets `Contract.Status` to `DISPUTED` or `ON_HOLD`** — both are enum members with zero producers, per the contract-cluster rewrite (`backlog/mvp/epic-06-contract-management.md`, `MVP_CONTRACT_STATE_MACHINE.md`). There is no `Disputes` module among the backend's real 8 (`Auth`, `Contracts`, `Delivery`, `Finance`, `Identity`, `Marketplace`, `MasterData`, `Notifications` — see `MVP_MODULE_INTEGRATION_SPECIFICATION.md` §1.1). There is no admin screen to open, evidence, or arbitrate a dispute; no evidence-upload endpoint; no SLA timer; no escalation job; no trust-score penalty wired to a dispute outcome; no financial-adjustment command scoped to "dispute resolution" as a concept. A business or provider who believes a delivery, vehicle condition, payment, or settlement is wrong today has **no in-product dispute path at all**. The only real, partially-overlapping feedback mechanisms that exist are:
 
----
+- **Contract termination** (request → approve, Epic 06 Story 6.8) — either party can exit a running contract, but this ends the relationship, it does not adjudicate who was right or move money based on fault.
+- **Contract completion rejection** (Epic 06 Story 6.9) — the other party can reject a completion request with a reason, which reverts the contract to `PARTIALLY_RETURNED`, but this is a binary block, not an evidence-and-arbitration workflow.
+- **Provider VAT invoice approve/reject** (Epic 09 Story 9.5) — this is a withholding-tax reclaim mechanism, not a mechanism for contesting a settlement calculation.
+- **Settlement payout admin approve/reject** (`MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` §3, Epic 10 Story 10.3) — an internal admin gate before money moves, not a provider- or business-facing dispute channel.
 
-## 1. DISPUTE SYSTEM OVERVIEW
+None of these give either party a structured way to raise "the vehicle wasn't as described," "the business hasn't paid," or "this settlement amount is wrong" and have it adjudicated with evidence, SLA tracking, and a financial/trust-score outcome. **That gap is real and unaddressed.** Everything below this line is retained design thinking for closing that gap — not documentation of anything running.
 
-### 1.1 Dispute Principles
-
-**Core Principles:**
-- ✅ **Fair & Transparent:** Evidence-based decisions with clear reasoning
-- ✅ **Fast Resolution:** 48-hour SLA for all disputes
-- ✅ **Provider-First:** Benefit of doubt goes to provider when evidence unclear
-- ✅ **Zero Tolerance:** Fraud or abuse results in immediate suspension
-- ✅ **Evidence Required:** No he-said-she-said - must provide proof
-
-**Business Rule Reference:** BR-034, BR-035, BR-036, BR-037, BR-038, BR-039
+**How to read the rest of this document:** Section 1 states, in one place, exactly what is absent (so this file can be trusted as a negative-space reference — "is X real?" → check here first). Section 2 states the real, current risk this gap creates. Section 3 onward is the **original workflow design**, preserved close to its original form because the category/evidence/SLA/resolution thinking is still useful groundwork for a future build — but every heading from Section 3 onward is labeled **(PROPOSED)** and no code, API route, table, or job described past that point should be assumed to exist. Where the design assumes platform mechanics that don't match the real system (e.g., a symmetric business+provider trust score, GPS delivery-location data, a `Debt` entity, per-module Postgres schemas), that mismatch is called out inline rather than silently fixed, so a future implementer knows exactly what would need to be re-derived against the real `Modules/Contracts`/`Modules/Finance`/`Modules/Identity` code.
 
 ---
 
-### 1.2 Who Can Create Disputes
+## 1. What's absent — the complete negative-space list
 
-```typescript
-enum DisputeCreator {
-  BUSINESS = 'BUSINESS',        // Business user creates dispute
-  PROVIDER = 'PROVIDER',        // Provider creates dispute
-  SYSTEM = 'SYSTEM',            // Auto-created by system (e.g., debt escalation)
-  ADMIN = 'ADMIN'               // Admin creates on behalf of party
-}
-```
+Confirmed by repo-wide search across backend, web, and both mobile apps as of 2026-07-23:
 
-**Rules:**
-- Both business and provider can create disputes
-- Only ONE active dispute per contract at a time
-- System can auto-create disputes for debt escalation
-- Admin can create disputes on behalf of either party
+- **No `Dispute` entity, table, or migration** in any module (`Modules/Contracts`, `Modules/Finance`, `Modules/Identity`, or elsewhere). There is no `disputes` table anywhere in the single shared Postgres database.
+- **No `DisputeEvidence`, `DisputeAction`, or dispute-timeline entity.**
+- **No dispute API** — no `POST /disputes`, `GET /disputes/{id}`, `/evidence`, `/resolve`, `/escalate`, or any equivalent, on any controller, on any surface (web, business mobile, provider mobile, or admin).
+- **No "Disputes" module at all.** The backend has 8 real module folders (`Modules/Auth`, `Modules/Contracts`, `Modules/Delivery`, `Modules/Finance`, `Modules/Identity`, `Modules/Marketplace`, `Modules/MasterData`, `Modules/Notifications`) — a `Modules/Disputes` referenced by earlier drafts of this document and by the original `MVP_MODULE_INTEGRATION_SPECIFICATION.md` text does not exist and was never built. See the rewritten `MVP_MODULE_INTEGRATION_SPECIFICATION.md` for the real module list.
+- **No dispute-related domain events fire.** `DisputeCreatedEvent`, `DisputeEvidenceSubmittedEvent`, `DisputeResolvedEvent`, `DisputeEscalatedEvent` (as named in the original `MVP_EVENT_CATALOG_AND_HANDLERS.md`) do not exist as C# event classes anywhere in the codebase.
+- **No SLA timer, escalation cron job, or admin "dispute queue" UI** on web or either mobile app.
+- **No `Debt`/debt-tracking entity or auto-escalation-to-dispute job.** The 30-day "debt escalates to a dispute" mechanic this document originally assumed does not exist — there is no debt-tracking concept in `Modules/Finance` at all (confirmed again during the settlement-spec rewrite — see `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` §0); the closest real mechanic is `EscrowTimeoutJob` cancelling a contract stuck in `PENDING_ESCROW`, which is unrelated.
+- **No dispute-driven trust-score adjustment.** Even if a dispute workflow existed, it could not currently feed into the real trust engine cleanly — the real `TrustScoreCalculator` formula (`Base + CompletionRate×20 + OnTimeRate×20 − NoShowRate×30 + RejectionPenaltyPoints`, see `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` §1.2) has no open slot for an arbitrary "dispute won/lost" signal the way this design's `DISPUTE_LOST`/`DISPUTE_WON` point adjustments assume; it would need a fifth term or a translation layer, not a direct plug-in. This is doubly moot today because, per that same document, the trust-score formula itself has **zero production call sites** — no code path recalculates any provider's score from real activity at all yet.
+- **No business-side risk/trust score of any kind** exists to be adjusted by a dispute outcome — the real trust engine is provider-only (§1.1 of the trust/escrow spec).
+- **No GPS/location data on deliveries.** `DeliverySession` has no latitude/longitude fields (confirmed in the audit and in `backlog/post-mvp/epic-15-geofence-gps-integration.md`, which is itself confirmed Not Started on every surface) — this design's "GPS logs" evidence type and "GPS proves provider was at location" auto-resolution branch have no data source to draw from even if built today.
+- **No settlement-dispute path exists either**, confirmed definitively (not just "unconfirmed") by the `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` rewrite and `epic-10-monthly-renewal-settlement.md` Story 10.7: `SettlementController` has no `POST /settlements/{id}/dispute` or equivalent, and there is no dispute-related command, entity, or status in the Finance/Wallet domain at all beyond the same reserved `EscrowLock` `DISPUTED`-adjacent status noted above.
 
----
-
-### 1.3 Dispute Impact on Contract
-
-```typescript
-// Contract state changes based on dispute category
-function getDisputeImpact(category: DisputeCategory): ContractImpact {
-  switch (category) {
-    case 'VEHICLE_CONDITION':
-    case 'SERVICE_QUALITY':
-      return {
-        contractStatus: 'UNDER_DISPUTE',
-        blockActions: ['EARLY_RETURN', 'CONTRACT_ALTERATION'],
-        allowActions: ['CONTINUE_OPERATIONS', 'MONTHLY_SETTLEMENT']
-      };
-      
-    case 'NON_PAYMENT':
-      return {
-        contractStatus: 'UNDER_DISPUTE',
-        blockActions: ['EARLY_RETURN', 'CONTRACT_ALTERATION', 'SETTLEMENT'],
-        allowActions: ['EVIDENCE_SUBMISSION']
-      };
-      
-    case 'DELIVERY_ISSUE':
-      return {
-        contractStatus: 'UNDER_DISPUTE',
-        blockActions: ['ALL'],
-        allowActions: ['EVIDENCE_SUBMISSION', 'ADMIN_RESOLUTION']
-      };
-      
-    case 'CONTRACT_TERMS':
-      return {
-        contractStatus: 'UNDER_DISPUTE',
-        blockActions: ['EARLY_RETURN', 'CONTRACT_ALTERATION'],
-        allowActions: ['CONTINUE_OPERATIONS', 'MONTHLY_SETTLEMENT']
-      };
-  }
-}
-```
+If you are checking "does the platform have a way to dispute X" for any reason — support tooling, sales conversations, a compliance review — **the answer is no, full stop**, and this document is the place that says so explicitly.
 
 ---
 
-## 2. DISPUTE CATEGORIES
+## 2. Why this matters (real, current risk — not proposed)
 
-### 2.1 Category 1: Vehicle Condition Dispute
+This is the one part of this document that describes a **real, current** state of affairs, not a proposal:
 
-**Description:** Dispute about vehicle quality, cleanliness, or functionality at delivery or return.
+- A provider who believes a settlement payout under-counted their earnings has no formal recourse today (confirmed absent in `backlog/mvp/epic-10-monthly-renewal-settlement.md` Story 10.7 and `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` §8).
+- A business that receives a vehicle it believes doesn't match the contract spec can request contract termination or refuse to approve completion, but cannot open a structured, evidence-backed case that results in a binding admin ruling, refund, or provider penalty.
+- A provider facing a business that won't pay has no debt-escalation or dispute-filing path — the only real levers are contract termination and (if unpaid escrow ever caused a timeout) `EscrowTimeoutJob`'s cancellation of a not-yet-escrowed contract, which doesn't apply once a contract is `ACTIVE`.
+- Admins have no dedicated dispute queue/inbox; anything resembling arbitration today happens outside the product (support channel, manual intervention), with no system-of-record trail.
 
-**Who Can Create:**
-- **Business:** Vehicle not as described, dirty, damaged, malfunctioning at delivery
-- **Provider:** Vehicle returned damaged, dirty, or with issues
-
-**Typical Scenarios:**
-```
-At Delivery:
-- "Vehicle delivered dirty/unwashed"
-- "Vehicle has mechanical issues (engine, brakes, AC not working)"
-- "Vehicle exterior damaged (scratches, dents)"
-- "Vehicle interior damaged (torn seats, broken features)"
-- "Vehicle not matching description (different color, missing features)"
-
-At Return:
-- "Vehicle returned with new damage (scratches, dents, broken parts)"
-- "Vehicle returned dirty (interior/exterior)"
-- "Vehicle has mechanical issues caused by business usage"
-- "Vehicle returned with missing items (spare tire, tools)"
-```
-
-**Required Evidence:**
-
-**From Business (at delivery):**
-```typescript
-interface DeliveryDisputeEvidence {
-  photos: Photo[];              // Min 5 photos showing issues
-  photoTimestamps: Date[];      // Must be at delivery time
-  videoWalkthrough?: Video;     // Optional but recommended
-  deliveryOTP: string;          // Proof of delivery
-  issueDescription: string;     // Detailed description
-  witnessContact?: string;      // Optional witness
-}
-```
-
-**From Provider (at return):**
-```typescript
-interface ReturnDisputeEvidence {
-  photosAtDelivery: Photo[];    // Original delivery condition
-  photosAtReturn: Photo[];      // Current return condition
-  photoComparison: Photo[];     // Side-by-side comparison
-  inspectionReport?: Document;  // Optional inspection report
-  repairQuotes?: Document[];    // Quotes for repair costs
-  issueDescription: string;
-}
-```
-
-**Resolution Outcomes:**
-- **Business wins:** Provider must replace vehicle OR business can reject delivery OR repair costs covered by provider
-- **Provider wins:** Business accepts vehicle as-is OR business pays repair costs
-- **Split decision:** Both parties share repair costs (rare)
+This is flagged as an open product-prioritization decision in `project-docs/18_Implementation_Coverage_Audit.md` §9 — building it is a business call, not a documentation fix.
 
 ---
 
-### 2.2 Category 2: Service Quality Dispute
+## 3. Proposed Design — Dispute Categories
 
-**Description:** Dispute about provider's service, responsiveness, or professionalism.
+**(PROPOSED — no code exists for any of this section)**
 
-**Who Can Create:** Business only
+The following category taxonomy is retained from the original design as a reasonable starting point if a dispute system is built. It should be re-validated against the real contract/delivery/settlement mechanics (Epics 06, 07, 09, 10) before implementation, not built as-is.
 
-**Typical Scenarios:**
-```
-- "Provider unresponsive to messages/calls"
-- "Provider delayed delivery without notice"
-- "Provider rude or unprofessional"
-- "Provider failed to provide required documentation (insurance, registration)"
-- "Provider changed vehicles without permission"
-- "Provider requested additional payments outside platform"
-```
+### 3.1 Category 1: Vehicle Condition Dispute (proposed)
 
-**Required Evidence:**
+Dispute about vehicle quality, cleanliness, or functionality at delivery or return.
 
-```typescript
-interface ServiceQualityEvidence {
-  messageScreenshots?: Photo[];     // Communication logs
-  callLogs?: Document;              // Phone call records
-  deliverySchedule?: Document;      // Original delivery agreement
-  actualDeliveryTime?: Date;        // When actually delivered
-  witnesStatements?: string[];      // Written statements
-  platformChatLogs?: string;        // In-app messages (auto-pulled)
-}
-```
+- **Who could raise it:** Business (at delivery — not as described, dirty, damaged, malfunctioning) or Provider (at return — damaged, dirty, missing items).
+- **Evidence a real build would need:** photos (minimum count, timestamped), the real Delivery-module OTP confirmation timestamp for cross-reference (`Modules/Delivery`'s actual `DeliveryConfirmedEvent`/return-OTP data — not a generic "deliveryOTP: string" placeholder), and — since the real vehicle-inspection-checklist system already exists (`VehicleInspectionChecklist`, `DeliveryReturnSession`, per Epic 07) — a real build should attach that checklist's data automatically rather than re-inventing a parallel evidence format.
+- **Proposed outcomes:** provider replaces vehicle / repairs at provider cost / business accepts as-is / cost-split — same shape as originally drafted, but any resulting refund or penalty would need to route through the real `Modules/Finance` escrow/wallet primitives (`EscrowLock`, `WalletLedgerTransaction`), not a generic `EscrowContract`/`LedgerEntry` model.
 
-**Resolution Outcomes:**
-- **Minor issue:** Provider warned, no financial impact
-- **Moderate issue:** Provider receives trust score penalty
-- **Severe issue:** Business receives discount (5-10% of contract value), provider trust score reduced
-- **Critical issue:** Contract terminated, full refund, provider suspended
+### 3.2 Category 2: Service Quality Dispute (proposed)
+
+Business-only complaint about provider responsiveness, professionalism, or off-platform payment requests.
+
+- **Proposed outcomes:** ranged from a warning (no financial impact) to contract termination + refund + provider suspension, with a trust-score penalty in between. As noted in §1, this can't cleanly plug into the real trust-score formula without extending it.
+
+### 3.3 Category 3: Non-Payment Dispute (proposed)
+
+Dispute about unpaid amounts. **This entire category assumed a `Debt`/grace-period mechanic that does not exist in the real codebase** — there is no grace-period, debt-tracking, or debt-escalation concept anywhere in `Modules/Finance` (confirmed again by `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md`'s rewrite — the real system has no "business suspended for unpaid debt" flow at all). A real build would need to either (a) design that debt/grace-period mechanic from scratch first, or (b) redefine this category around what actually exists today (e.g., disputing a settlement payout amount, or a Direct Rental wallet-balance gate — see `backlog/post-mvp/epic-21-direct-rental.md` Story 21.4).
+
+### 3.4 Category 4: Delivery Issue Dispute (proposed)
+
+Dispute about delivery timing, OTP sharing, or vehicle assignment mismatch. A real build should integrate with the actual Delivery module's OTP/checklist/`DeliverySLAViolation`/`DeliveryFailureReason` entities (which exist in the domain model and DbContext today but — per the audit — currently have **nothing writing to them**, so even the raw data this category would want to reference isn't being populated yet).
+
+### 3.5 Category 5: Contract Terms Dispute (proposed)
+
+Disagreement over contract interpretation, pricing, or alteration terms. Would reference the real `Contract`/`ContractLineItem`/`ContractAmendment` entities — noting that `ContractAmendment.Create()` currently has **zero callers anywhere in the codebase** (per Epic 06 Story 6.7), so "disputed amendment" isn't currently a reachable state to dispute in the first place.
 
 ---
 
-### 2.3 Category 3: Non-Payment Dispute
+## 4. Proposed Design — Creation, Evidence, and Validation
 
-**Description:** Dispute about unpaid amounts, grace period charges, or debt.
-
-**Who Can Create:**
-- **Provider:** Business hasn't paid debt, disputes amount owed
-- **System:** Auto-created after 30 days of unpaid debt
-- **Business:** Disputes the amount claimed by provider
-
-**Typical Scenarios:**
-```
-Provider Creates:
-- "Business used grace period but didn't pay"
-- "Business owes for days 31-34, refuses to pay debt"
-- "Business disputes late fee calculation"
-
-Business Creates:
-- "Provider claiming wrong amount"
-- "Grace period calculation incorrect"
-- "I paid but provider claims I didn't"
-
-System Creates:
-- "Debt outstanding for 30+ days, auto-escalated to dispute"
-```
-
-**Required Evidence:**
-
-**From Provider:**
-```typescript
-interface NonPaymentEvidence {
-  contractDetails: Contract;           // Original contract
-  gracePeriodGranted: boolean;         // Did provider grant grace period
-  gracePeriodDays: number;            // How many days
-  calculationBreakdown: {
-    dailyRate: number;
-    daysInGracePeriod: number;
-    gracePeriodAmount: number;
-    lateFee: number;
-    totalOwed: number;
-  };
-  paymentDueDate: Date;               // When payment was due
-  paymentRequests: Photo[];           // Screenshots of payment requests
-  businessWalletBalance?: number;     // If visible
-}
-```
-
-**From Business:**
-```typescript
-interface PaymentDisputeEvidence {
-  paymentReceipts?: Document[];       // Proof of payment
-  walletTransactionHistory: Document; // Wallet history showing payment
-  disputeReason: string;              // Why disputing amount
-  alternativeCalculation?: {          // If disputing calculation
-    dailyRate: number;
-    daysInGracePeriod: number;
-    proposedAmount: number;
-    reasoning: string;
-  };
-}
-```
-
-**Resolution Outcomes:**
-- **Provider wins:** Business must pay full amount + dispute processing fee (5%), account suspended until paid
-- **Business wins:** Debt waived, account reactivated immediately
-- **Split decision:** Adjusted amount calculated, business pays reduced amount
-
----
-
-### 2.4 Category 4: Delivery Issue Dispute
-
-**Description:** Dispute about delivery process, timing, OTP verification, or vehicle assignment.
-
-**Who Can Create:** Both business and provider
-
-**Typical Scenarios:**
-```
-Business Creates:
-- "Provider didn't deliver on scheduled date"
-- "Wrong vehicles delivered (different from assignment)"
-- "Provider asking for OTP without delivering vehicles"
-- "Provider demanding payment outside platform"
-
-Provider Creates:
-- "Business refusing to share OTP after delivery"
-- "Business not available at delivery location"
-- "Business requesting delivery outside agreed location"
-```
-
-**Required Evidence:**
-
-**From Business:**
-```typescript
-interface BusinessDeliveryEvidence {
-  scheduledDeliveryDate: Date;        // Agreed delivery date
-  actualDeliveryDate?: Date;          // When actually delivered
-  deliveryLocation: Location;         // Agreed location
-  photos?: Photo[];                   // Photos if wrong vehicles
-  vehicleAssignmentList: Vehicle[];   // Expected vehicles
-  actualVehicles?: Vehicle[];         // Vehicles actually shown
-  communicationLogs: string[];        // Messages about delivery
-}
-```
-
-**From Provider:**
-```typescript
-interface ProviderDeliveryEvidence {
-  deliveryAttempts: DeliveryAttempt[]; // All delivery attempts
-  locationProof: Location[];           // GPS proof of arrival
-  photos: Photo[];                     // Photos at delivery location
-  communicationLogs: string[];         // Messages to business
-  businessNoShowProof?: Document;      // If business wasn't there
-}
-```
-
-**Resolution Outcomes:**
-- **Business wins:** Contract can be cancelled with full refund OR new delivery scheduled
-- **Provider wins:** Business must accept delivery or contract cancelled (no refund)
-- **Mutual fault:** Both parties work out new delivery time, no penalties
-
----
-
-### 2.5 Category 5: Contract Terms Dispute
-
-**Description:** Dispute about contract interpretation, terms, pricing, or alterations.
-
-**Who Can Create:** Both business and provider
-
-**Typical Scenarios:**
-```
-- "Provider claims contract allows extra charges, I disagree"
-- "Business demanding services not in contract"
-- "Dispute over contract alteration terms"
-- "Disagreement on early return penalty calculation"
-- "Confusion about monthly vs. daily rate"
-```
-
-**Required Evidence:**
-
-```typescript
-interface ContractTermsEvidence {
-  originalContract: Contract;         // Original signed contract
-  disputedClause: string;             // Which term is disputed
-  proposedInterpretation: string;     // How party interprets it
-  supportingDocuments?: Document[];   // RFQ, bid, messages
-  previousCommunication: string[];    // All relevant messages
-  platformTerms: Document;            // Platform T&Cs (auto-attached)
-}
-```
-
-**Resolution Outcomes:**
-- **Clear contract terms:** Party with correct interpretation wins
-- **Ambiguous terms:** Admin interprets based on platform standards
-- **Error in contract:** Contract corrected, financial adjustment made if needed
-
----
-
-## 3. DISPUTE CREATION PROCESS
-
-### 3.1 Dispute Creation Flow
+**(PROPOSED — illustrative pseudocode retained from the original draft; not real code, no framework/language commitment implied)**
 
 ```typescript
 async function createDispute(request: DisputeCreateRequest): Promise<Dispute> {
-  // 1. Validate eligibility
-  await validateDisputeEligibility(request);
-  
-  // 2. Check for existing disputes
+  await validateDisputeEligibility(request);         // contract exists, requester is a party, contract not in a terminal state
   const existingDispute = await checkExistingDispute(request.contractId);
-  if (existingDispute) {
-    throw new Error('Contract already has active dispute');
-  }
-  
-  // 3. Create dispute record
+  if (existingDispute) throw new Error('Contract already has active dispute');
+
   const dispute = await this.disputeRepository.create({
     id: generateUUID(),
     contractId: request.contractId,
     createdBy: request.createdBy,
-    creatorType: request.creatorType,
+    creatorType: request.creatorType,   // BUSINESS | PROVIDER | SYSTEM | ADMIN
     category: request.category,
     description: request.description,
     status: 'OPEN',
@@ -394,1154 +125,100 @@ async function createDispute(request: DisputeCreateRequest): Promise<Dispute> {
     slaDeadline: addHours(new Date(), 48),
     createdAt: new Date()
   });
-  
-  // 4. Upload evidence
+
   await this.uploadEvidence(dispute.id, request.evidence);
-  
-  // 5. Update contract status
-  await this.contractStateMachine.transitionTo(
-    request.contractId,
-    'UNDER_DISPUTE',
-    `Dispute created: ${request.category}`
-  );
-  
-  // 6. Notify counter-party
+  // A real implementation would transition Contract.Status to DISPUTED here via the
+  // real Contracts-module domain method — which does not exist today; ContractStatus.DISPUTED
+  // is a bare enum value with no state-machine transition into or out of it.
   await this.notifyCounterParty(dispute);
-  
-  // 7. Notify admin for review
   await this.notifyAdminForReview(dispute);
-  
-  // 8. Start SLA timer
-  await this.startSLATimer(dispute.id, 48);
-  
   return dispute;
 }
 ```
 
-### 3.2 Validation Rules
-
-```typescript
-async function validateDisputeEligibility(request: DisputeCreateRequest) {
-  const contract = await this.contractRepository.findById(request.contractId);
-  
-  // 1. Contract must exist
-  if (!contract) {
-    throw new Error('Contract not found');
-  }
-  
-  // 2. User must be party to contract
-  if (request.createdBy !== contract.businessId && 
-      request.createdBy !== contract.providerId) {
-    throw new Error('User not party to contract');
-  }
-  
-  // 3. Cannot dispute contracts in certain states
-  const invalidStates = ['FAILED', 'TERMINATED'];
-  if (invalidStates.includes(contract.status)) {
-    throw new Error(`Cannot dispute contract in ${contract.status} state`);
-  }
-  
-  // 4. Delivery disputes must be within 7 days of delivery
-  if (request.category === 'DELIVERY_ISSUE') {
-    const daysSinceDelivery = differenceInDays(new Date(), contract.deliveryConfirmedAt);
-    if (daysSinceDelivery > 7) {
-      throw new Error('Delivery disputes must be filed within 7 days');
-    }
-  }
-  
-  // 5. Vehicle condition disputes must have photos
-  if (request.category === 'VEHICLE_CONDITION') {
-    if (!request.evidence.photos || request.evidence.photos.length < 3) {
-      throw new Error('Vehicle condition disputes require minimum 3 photos');
-    }
-  }
-  
-  // 6. Non-payment disputes must have debt record or calculation
-  if (request.category === 'NON_PAYMENT') {
-    if (!request.evidence.debtId && !request.evidence.calculationBreakdown) {
-      throw new Error('Non-payment disputes require debt ID or calculation breakdown');
-    }
-  }
-}
-```
+Evidence-type and per-category validation rules (minimum photo counts, file-size caps, accepted formats) from the original draft are still reasonable UX guardrails to reuse if this is built, and are omitted here in full to avoid duplicating a spec for something unbuilt — the original per-category evidence table (photos/video/documents/screenshots, size/format limits) is preserved in git history of this file if needed as a reference.
 
 ---
 
-## 4. EVIDENCE REQUIREMENTS
+## 5. Proposed Design — Resolution Workflow
 
-### 4.1 Evidence Types & Validation
-
-```typescript
-interface Evidence {
-  type: EvidenceType;
-  files: File[];
-  description: string;
-  uploadedAt: Date;
-  uploadedBy: string;
-}
-
-enum EvidenceType {
-  PHOTO = 'PHOTO',                   // Images (JPG, PNG)
-  VIDEO = 'VIDEO',                   // Videos (MP4, MOV)
-  DOCUMENT = 'DOCUMENT',             // PDFs, docs
-  SCREENSHOT = 'SCREENSHOT',         // Screen captures
-  INVOICE = 'INVOICE',               // Financial documents
-  INSPECTION_REPORT = 'INSPECTION_REPORT',
-  COMMUNICATION_LOG = 'COMMUNICATION_LOG'
-}
-
-// Validation rules per category
-const EVIDENCE_REQUIREMENTS = {
-  VEHICLE_CONDITION: {
-    required: ['PHOTO'],
-    minPhotos: 3,
-    maxFileSize: 10 * 1024 * 1024, // 10MB
-    acceptedFormats: ['jpg', 'jpeg', 'png', 'mp4']
-  },
-  SERVICE_QUALITY: {
-    required: ['SCREENSHOT', 'COMMUNICATION_LOG'],
-    minFiles: 1,
-    maxFileSize: 5 * 1024 * 1024, // 5MB
-    acceptedFormats: ['jpg', 'jpeg', 'png', 'pdf']
-  },
-  NON_PAYMENT: {
-    required: ['DOCUMENT'],
-    minFiles: 1,
-    maxFileSize: 5 * 1024 * 1024,
-    acceptedFormats: ['pdf', 'jpg', 'png']
-  },
-  DELIVERY_ISSUE: {
-    required: ['PHOTO'],
-    minPhotos: 2,
-    maxFileSize: 10 * 1024 * 1024,
-    acceptedFormats: ['jpg', 'jpeg', 'png']
-  },
-  CONTRACT_TERMS: {
-    required: ['DOCUMENT'],
-    minFiles: 1,
-    maxFileSize: 5 * 1024 * 1024,
-    acceptedFormats: ['pdf']
-  }
-};
-```
-
-### 4.2 Evidence Upload & Storage
-
-```typescript
-async function uploadEvidence(
-  disputeId: string,
-  evidence: EvidenceUpload[]
-): Promise<Evidence[]> {
-  
-  const uploadedEvidence = [];
-  
-  for (const item of evidence) {
-    // 1. Validate file
-    await validateEvidenceFile(item);
-    
-    // 2. Generate secure URL
-    const fileKey = `disputes/${disputeId}/${generateUUID()}-${item.filename}`;
-    
-    // 3. Upload to S3 (or storage service)
-    const uploadUrl = await this.storageService.upload({
-      key: fileKey,
-      file: item.file,
-      contentType: item.mimeType,
-      metadata: {
-        disputeId,
-        uploadedBy: item.uploadedBy,
-        uploadedAt: new Date().toISOString()
-      }
-    });
-    
-    // 4. Create evidence record
-    const evidenceRecord = await this.evidenceRepository.create({
-      id: generateUUID(),
-      disputeId,
-      type: item.type,
-      filename: item.filename,
-      fileUrl: uploadUrl,
-      fileSize: item.fileSize,
-      mimeType: item.mimeType,
-      description: item.description,
-      uploadedBy: item.uploadedBy,
-      uploadedAt: new Date()
-    });
-    
-    uploadedEvidence.push(evidenceRecord);
-  }
-  
-  return uploadedEvidence;
-}
-```
-
-### 4.3 Counter-Evidence Submission
-
-```typescript
-async function submitCounterEvidence(
-  disputeId: string,
-  counterPartyId: string,
-  evidence: EvidenceUpload[]
-) {
-  const dispute = await this.disputeRepository.findById(disputeId);
-  
-  // 1. Validate counter-party is allowed to submit
-  const isCounterParty = await this.isCounterParty(dispute, counterPartyId);
-  if (!isCounterParty) {
-    throw new Error('Not authorized to submit counter-evidence');
-  }
-  
-  // 2. Check if still within response window
-  const responseDeadline = addHours(dispute.createdAt, 24);
-  if (new Date() > responseDeadline) {
-    throw new Error('Counter-evidence submission window closed');
-  }
-  
-  // 3. Upload evidence
-  const uploadedEvidence = await this.uploadEvidence(disputeId, evidence);
-  
-  // 4. Update dispute status
-  await this.disputeRepository.update(disputeId, {
-    counterEvidenceSubmitted: true,
-    counterEvidenceSubmittedAt: new Date(),
-    status: 'PENDING_REVIEW'
-  });
-  
-  // 5. Notify admin that both parties have submitted
-  await this.notifyAdminReadyForReview(dispute);
-}
-```
-
----
-
-## 5. RESOLUTION WORKFLOW
-
-### 5.1 Resolution Process Flow
+**(PROPOSED)**
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│              DISPUTE RESOLUTION FLOW                     │
-└─────────────────────────────────────────────────────────┘
-
 1. DISPUTE CREATED
-   ↓
-2. COUNTER-PARTY NOTIFIED (24 hours to respond)
-   ↓
+2. COUNTER-PARTY NOTIFIED (24h to respond)
 3. COUNTER-PARTY SUBMITS EVIDENCE (optional)
-   ↓
-4. ADMIN REVIEW
-   - Review all evidence
-   - Check platform data (chat logs, transactions, GPS)
-   - Apply resolution criteria
-   ↓
-5. RESOLUTION DECISION
-   - Party A wins
-   - Party B wins
-   - Split decision
-   - Need more information
-   ↓
-6. RESOLUTION EXECUTION
-   - Financial adjustments
-   - Contract status updates
-   - Trust score impacts
-   - Account suspensions (if applicable)
-   ↓
-7. NOTIFICATIONS
-   - Both parties notified
-   - Resolution reasoning provided
-   - Next steps communicated
-   ↓
+4. ADMIN REVIEW (evidence + real platform data: contract history, wallet/ledger transactions,
+   delivery/return OTP timestamps, checklist data — GPS data is NOT available, see §1)
+5. RESOLUTION DECISION (party A wins / party B wins / split / need more info)
+6. RESOLUTION EXECUTION (financial adjustment via real Finance-module wallet primitives,
+   contract status update, trust-score impact where the real formula allows it, account
+   action if warranted)
+7. NOTIFICATIONS to both parties with reasoning
 8. DISPUTE CLOSED
 ```
 
-### 5.2 Admin Review Interface
-
-```typescript
-interface DisputeReviewInterface {
-  dispute: Dispute;
-  contract: Contract;
-  
-  // Party information
-  claimant: {
-    id: string;
-    type: 'BUSINESS' | 'PROVIDER';
-    name: string;
-    trustScore: number;
-    evidenceSubmitted: Evidence[];
-    statement: string;
-  };
-  
-  respondent: {
-    id: string;
-    type: 'BUSINESS' | 'PROVIDER';
-    name: string;
-    trustScore: number;
-    evidenceSubmitted: Evidence[];
-    statement?: string;
-  };
-  
-  // Platform data (auto-gathered)
-  platformData: {
-    chatLogs: ChatMessage[];
-    contractHistory: ContractEvent[];
-    paymentHistory: Transaction[];
-    deliveryGPS?: Location[];
-    vehicleHistory: VehicleEvent[];
-  };
-  
-  // Resolution options
-  resolutionOptions: ResolutionOption[];
-  
-  // SLA timer
-  slaTimeRemaining: string;
-  slaDeadline: Date;
-}
-```
-
-### 5.3 Resolution Decision Tree
-
-```typescript
-async function resolveDispute(
-  disputeId: string,
-  adminId: string,
-  resolution: DisputeResolution
-): Promise<ResolvedDispute> {
-  
-  const dispute = await this.disputeRepository.findById(disputeId);
-  
-  // 1. Validate resolution
-  await validateResolution(dispute, resolution);
-  
-  // 2. Record resolution
-  const resolvedDispute = await this.disputeRepository.update(disputeId, {
-    status: 'RESOLVED',
-    resolvedBy: adminId,
-    resolvedAt: new Date(),
-    resolution: resolution.decision,
-    resolutionReasoning: resolution.reasoning,
-    winner: resolution.winner,
-    financialAdjustment: resolution.financialAdjustment
-  });
-  
-  // 3. Execute resolution actions
-  await this.executeResolutionActions(resolvedDispute);
-  
-  // 4. Update contract status
-  await this.updateContractAfterResolution(resolvedDispute);
-  
-  // 5. Process financial adjustments
-  if (resolution.financialAdjustment) {
-    await this.processFinancialAdjustment(resolvedDispute);
-  }
-  
-  // 6. Update trust scores
-  await this.updateTrustScores(resolvedDispute);
-  
-  // 7. Notify parties
-  await this.notifyResolution(resolvedDispute);
-  
-  return resolvedDispute;
-}
-```
-
-### 5.4 Resolution Criteria by Category
-
-#### Vehicle Condition Disputes
-```typescript
-function resolveVehicleConditionDispute(dispute: Dispute): Resolution {
-  // Decision criteria:
-  // 1. Photo evidence quality and timestamps
-  // 2. Delivery OTP timestamp vs photo timestamps
-  // 3. Previous vehicle history
-  // 4. Insurance records
-  
-  const evidence = analyzeEvidence(dispute);
-  
-  if (evidence.photoTimestamp === evidence.deliveryOTPTime) {
-    // Photos taken at delivery = likely legitimate
-    if (evidence.damageVisible && evidence.damageSignificant) {
-      return {
-        winner: dispute.claimantId,
-        outcome: 'BUSINESS_WINS',
-        action: 'PROVIDER_REPLACE_VEHICLE_OR_REPAIR',
-        reasoning: 'Photos clearly show vehicle condition at delivery'
-      };
-    }
-  } else {
-    // Photos taken after delivery = less credible
-    return {
-      winner: dispute.respondentId,
-      outcome: 'PROVIDER_WINS',
-      action: 'BUSINESS_ACCEPTS_AS_IS',
-      reasoning: 'Photos not taken at delivery time, cannot verify original condition'
-    };
-  }
-}
-```
-
-#### Non-Payment Disputes
-```typescript
-function resolveNonPaymentDispute(dispute: Dispute): Resolution {
-  // Decision criteria:
-  // 1. Grace period was granted by provider (provider accepts risk)
-  // 2. Calculation is correct per BR-012
-  // 3. Payment proof from business
-  
-  const debtRecord = getDebtRecord(dispute.contractId);
-  const calculation = verifyCalculation(debtRecord);
-  
-  if (!calculation.correct) {
-    // Calculation error = business wins (or adjusted amount)
-    return {
-      winner: dispute.claimantType === 'BUSINESS' ? dispute.claimantId : dispute.respondentId,
-      outcome: 'CALCULATION_ERROR',
-      action: 'ADJUST_DEBT_AMOUNT',
-      adjustedAmount: calculation.correctAmount,
-      reasoning: `Original calculation incorrect. Correct amount: ${calculation.correctAmount} ETB`
-    };
-  }
-  
-  // Check for payment proof
-  const paymentProof = getPaymentProof(dispute);
-  if (paymentProof.exists) {
-    return {
-      winner: dispute.claimantId,
-      outcome: 'BUSINESS_WINS',
-      action: 'WAIVE_DEBT',
-      reasoning: 'Payment receipt verified, debt waived'
-    };
-  }
-  
-  // No payment proof, calculation correct = provider wins
-  return {
-    winner: dispute.respondentId,
-    outcome: 'PROVIDER_WINS',
-    action: 'BUSINESS_MUST_PAY',
-    amount: debtRecord.amount,
-    additionalFee: debtRecord.amount * 0.05, // 5% dispute processing fee
-    reasoning: 'No payment proof provided, debt valid per grace period terms'
-  };
-}
-```
+Resolution-criteria decision trees per category (vehicle-condition photo-timestamp cross-check, non-payment calculation verification, etc.) from the original draft remain reasonable starting logic, contingent on the category redesign noted in §3.3 for non-payment specifically.
 
 ---
 
-## 6. SLA & TIMELINES
+## 6. Proposed Design — SLA & Escalation
 
-### 6.1 SLA Targets
+**(PROPOSED)**
 
-```typescript
-const DISPUTE_SLA = {
-  // Counter-party response window
-  RESPONSE_WINDOW: 24, // hours
-  
-  // Admin resolution targets
-  RESOLUTION_TARGET: 48, // hours
-  RESOLUTION_URGENT: 24,  // hours (for high-priority)
-  
-  // Evidence submission deadline
-  EVIDENCE_DEADLINE: 24, // hours after dispute creation
-  
-  // Appeal window (post-MVP feature - included for completeness)
-  APPEAL_WINDOW: 72 // hours after resolution
-};
-```
-
-### 6.2 SLA Timer & Escalation
-
-```typescript
-@Cron('0 * * * *') // Every hour
-async function checkDisputeSLAs() {
-  const now = new Date();
-  
-  // 1. Check for SLA breaches
-  const overdueDisputes = await this.disputeRepository.find({
-    status: In(['OPEN', 'PENDING_REVIEW']),
-    slaDeadline: LessThan(now)
-  });
-  
-  for (const dispute of overdueDisputes) {
-    await this.escalateOverdueDispute(dispute);
-  }
-  
-  // 2. Check approaching SLA deadlines (4 hours before)
-  const approachingDeadline = addHours(now, 4);
-  const urgentDisputes = await this.disputeRepository.find({
-    status: In(['OPEN', 'PENDING_REVIEW']),
-    slaDeadline: Between(now, approachingDeadline)
-  });
-  
-  for (const dispute of urgentDisputes) {
-    await this.sendUrgentReminder(dispute);
-  }
-}
-
-async function escalateOverdueDispute(dispute: Dispute) {
-  // Mark as overdue
-  await this.disputeRepository.update(dispute.id, {
-    slaBreached: true,
-    slaBreachedAt: new Date()
-  });
-  
-  // Notify senior admin
-  await this.notificationService.send({
-    to: 'ROLE:SENIOR_ADMIN',
-    type: 'DISPUTE_SLA_BREACH',
-    priority: 'CRITICAL',
-    data: {
-      disputeId: dispute.id,
-      contractId: dispute.contractId,
-      category: dispute.category,
-      createdAt: dispute.createdAt,
-      deadline: dispute.slaDeadline,
-      hoursOverdue: differenceInHours(new Date(), dispute.slaDeadline)
-    }
-  });
-  
-  // Auto-compensate claimant if >72 hours overdue
-  if (differenceInHours(new Date(), dispute.slaDeadline) > 72) {
-    await this.autoCompensateSLABreach(dispute);
-  }
-}
-```
-
-### 6.3 Timeline Tracking
-
-```typescript
-interface DisputeTimeline {
-  disputeId: string;
-  events: DisputeEvent[];
-  slaMetrics: {
-    createdAt: Date;
-    responseDeadline: Date;
-    responseSubmittedAt?: Date;
-    responseTimeTaken?: string;
-    resolutionDeadline: Date;
-    resolvedAt?: Date;
-    resolutionTimeTaken?: string;
-    slaBreached: boolean;
-  };
-}
-
-interface DisputeEvent {
-  timestamp: Date;
-  type: string;
-  actor: string;
-  description: string;
-  metadata?: object;
-}
-
-// Example timeline
-const exampleTimeline = {
-  disputeId: 'dispute-12345',
-  events: [
-    {
-      timestamp: '2025-12-22T10:00:00Z',
-      type: 'DISPUTE_CREATED',
-      actor: 'business-789',
-      description: 'Business created vehicle condition dispute'
-    },
-    {
-      timestamp: '2025-12-22T10:01:00Z',
-      type: 'EVIDENCE_UPLOADED',
-      actor: 'business-789',
-      description: 'Uploaded 5 photos showing vehicle damage'
-    },
-    {
-      timestamp: '2025-12-22T15:30:00Z',
-      type: 'COUNTER_EVIDENCE_SUBMITTED',
-      actor: 'provider-456',
-      description: 'Provider submitted counter-evidence with 3 photos'
-    },
-    {
-      timestamp: '2025-12-23T09:00:00Z',
-      type: 'ADMIN_REVIEW_STARTED',
-      actor: 'admin-001',
-      description: 'Admin began reviewing dispute'
-    },
-    {
-      timestamp: '2025-12-23T11:30:00Z',
-      type: 'DISPUTE_RESOLVED',
-      actor: 'admin-001',
-      description: 'Dispute resolved in favor of business'
-    }
-  ],
-  slaMetrics: {
-    createdAt: '2025-12-22T10:00:00Z',
-    responseDeadline: '2025-12-23T10:00:00Z',
-    responseSubmittedAt: '2025-12-22T15:30:00Z',
-    responseTimeTaken: '5 hours 30 minutes',
-    resolutionDeadline: '2025-12-24T10:00:00Z',
-    resolvedAt: '2025-12-23T11:30:00Z',
-    resolutionTimeTaken: '25 hours 30 minutes',
-    slaBreached: false
-  }
-};
-```
+- Counter-party response window: 24 hours
+- Admin resolution target: 48 hours (24 hours for high-priority)
+- Escalation triggers: SLA breach, contract value above a threshold, repeat-offender party (3+ prior disputes), suspected fraud, complex/high-evidence-volume case
+- An hourly SLA-check job and an escalation-to-senior-admin flow were originally specified; no such job exists in code (the real background-job roster is `EscrowTimeoutJob`, `ExpireDirectRentalRequestsJob`, `DailyLedgerJob`, `ContractEndLifecycleJob` — none are dispute-related).
 
 ---
 
-## 7. RESOLUTION OUTCOMES
+## 7. Proposed Design — Resolution Outcomes & Financial Adjustment
 
-### 7.1 Outcome Types
+**(PROPOSED)**
 
-```typescript
-enum ResolutionOutcome {
-  CLAIMANT_WINS_FULL = 'CLAIMANT_WINS_FULL',           // 100% in favor of claimant
-  RESPONDENT_WINS_FULL = 'RESPONDENT_WINS_FULL',       // 100% in favor of respondent
-  PARTIAL_FAVOR_CLAIMANT = 'PARTIAL_FAVOR_CLAIMANT',   // 60-40 split
-  PARTIAL_FAVOR_RESPONDENT = 'PARTIAL_FAVOR_RESPONDENT', // 40-60 split
-  SPLIT_50_50 = 'SPLIT_50_50',                         // Equal split
-  DISMISSED = 'DISMISSED',                              // No merit, dismissed
-  NEED_MORE_INFO = 'NEED_MORE_INFO'                    // Cannot decide, need more evidence
-}
-```
+Outcome types (claimant/respondent full win, partial splits, dismissal, "need more info") and category-specific action tables (vehicle-condition penalty math, non-payment 5% dispute-processing fee, service-quality discount/warning) are retained as directional design. Any real implementation must replace generic `refundService`/`walletService.transfer`/`penaltyService`-style calls with the real Finance-module mechanics:
 
-### 7.2 Resolution Actions by Category
-
-#### Vehicle Condition - Business Wins
-```typescript
-const actions = {
-  IMMEDIATE: [
-    'Provider must replace vehicle within 24 hours',
-    'OR Business can reject delivery (full refund)',
-    'OR Provider pays for repairs (business provides 2 quotes)'
-  ],
-  FINANCIAL: {
-    businessRefund: 0, // If rejected
-    providerPenalty: calculatePenalty('VEHICLE_CONDITION'),
-    compensationToBusiness: contractValue * 0.10 // 10% discount
-  },
-  TRUST_SCORE: {
-    providerImpact: -10, // points
-    businessImpact: 0
-  }
-};
-```
-
-#### Non-Payment - Provider Wins
-```typescript
-const actions = {
-  IMMEDIATE: [
-    'Business must pay debt + 5% dispute processing fee',
-    'Business account suspended until payment',
-    'Provider keeps vehicles'
-  ],
-  FINANCIAL: {
-    businessMustPay: debtAmount + (debtAmount * 0.05),
-    providerReceives: debtAmount + (debtAmount * 0.05),
-    platformKeeps: 0
-  },
-  TRUST_SCORE: {
-    businessImpact: -15, // points
-    providerImpact: +5   // points (for being right)
-  },
-  ACCOUNT_STATUS: {
-    businessStatus: 'SUSPENDED',
-    providerStatus: 'ACTIVE'
-  }
-};
-```
-
-#### Service Quality - Severe Issue
-```typescript
-const actions = {
-  IMMEDIATE: [
-    'Business receives 10% discount on contract',
-    'Provider receives formal warning',
-    'Provider must complete professionalism training'
-  ],
-  FINANCIAL: {
-    businessDiscount: contractValue * 0.10,
-    providerPenalty: 0, // Paid from discount
-    settlementAdjustment: -0.10 // 10% reduction in provider settlement
-  },
-  TRUST_SCORE: {
-    providerImpact: -20, // points
-    businessImpact: 0
-  },
-  ADDITIONAL: {
-    providerWarning: true,
-    trainingRequired: 'PROFESSIONALISM_MODULE'
-  }
-};
-```
-
-### 7.3 Financial Adjustment Processing
-
-```typescript
-async function processFinancialAdjustment(resolution: ResolvedDispute) {
-  const { winner, financialAdjustment } = resolution;
-  
-  switch (financialAdjustment.type) {
-    case 'REFUND_TO_BUSINESS':
-      await this.refundService.processRefund({
-        businessId: resolution.businessId,
-        amount: financialAdjustment.amount,
-        reason: `Dispute resolution: ${resolution.disputeId}`,
-        source: 'ESCROW'
-      });
-      break;
-      
-    case 'PAYMENT_TO_PROVIDER':
-      await this.walletService.transfer({
-        from: resolution.businessId,
-        to: resolution.providerId,
-        amount: financialAdjustment.amount,
-        type: 'DISPUTE_RESOLUTION_PAYMENT'
-      });
-      break;
-      
-    case 'DISCOUNT_APPLIED':
-      await this.contractRepository.update(resolution.contractId, {
-        discountApplied: financialAdjustment.amount,
-        discountReason: 'DISPUTE_RESOLUTION',
-        adjustedTotalAmount: contract.totalAmount - financialAdjustment.amount
-      });
-      break;
-      
-    case 'PENALTY_CHARGED':
-      await this.penaltyService.chargePenalty({
-        userId: financialAdjustment.chargedTo,
-        amount: financialAdjustment.amount,
-        reason: `Dispute penalty: ${resolution.category}`,
-        disputeId: resolution.disputeId
-      });
-      break;
-  }
-}
-```
+- Refunds/releases would need to go through `EscrowLock` state transitions and `WalletLedgerTransaction`/`WalletLedgerEntry` double-entry postings — not a generic `LedgerEntry` table.
+- A "penalty" concept already exists in the domain (`ContractPenalty` — `Create`/`MarkPaid`/`Waive`/`Dispute` methods) but per Epic 06 Story 6.7, **`ContractPenalty.Create()` has zero callers anywhere today** — it would need to be wired up as part of building this, not assumed to already work.
 
 ---
 
-## 8. ESCALATION PROCEDURES
+## 8. Proposed Design — Trust-Score Integration
 
-### 8.1 Escalation Triggers
+**(PROPOSED, and currently a bigger lift than it originally appeared)**
 
-```typescript
-enum EscalationTrigger {
-  SLA_BREACH = 'SLA_BREACH',                    // Resolution took >48 hours
-  COMPLEX_CASE = 'COMPLEX_CASE',                // Requires senior review
-  HIGH_VALUE = 'HIGH_VALUE',                    // Contract value >200k ETB
-  REPEAT_OFFENDER = 'REPEAT_OFFENDER',          // Party has 3+ disputes
-  FRAUD_SUSPECTED = 'FRAUD_SUSPECTED',          // Suspicious activity detected
-  APPEAL_REQUESTED = 'APPEAL_REQUESTED'         // Party appeals resolution (post-MVP)
-}
+The original `DISPUTE_LOST` (−15) / `DISPUTE_WON` (+3) point-adjustment idea assumed:
 
-async function checkEscalationNeeded(dispute: Dispute): Promise<boolean> {
-  // 1. Check contract value
-  const contract = await this.contractRepository.findById(dispute.contractId);
-  if (contract.totalAmount > 200000) {
-    return true; // High-value escalation
-  }
-  
-  // 2. Check repeat offender status
-  const disputeHistory = await this.getDisputeHistory(dispute.claimantId);
-  if (disputeHistory.length >= 3) {
-    return true; // Repeat offender
-  }
-  
-  // 3. Check fraud indicators
-  const fraudScore = await this.calculateFraudScore(dispute);
-  if (fraudScore > 0.7) {
-    return true; // Fraud suspected
-  }
-  
-  // 4. Check case complexity
-  if (dispute.evidenceCount > 20 || dispute.category === 'CONTRACT_TERMS') {
-    return true; // Complex case
-  }
-  
-  return false;
-}
-```
+1. A symmetric business + provider trust score — **only the provider side exists today.**
+2. An open-ended "signal" mechanism the dispute engine could push points into — **the real formula (`Base + CompletionRate×20 + OnTimeRate×20 − NoShowRate×30 + RejectionPenaltyPoints`) has no such slot; it would need a new term or a mapping layer.**
+3. That the formula is live and recalculating — **it isn't; `TrustScoreCalculator` has zero production call sites today (per `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` §1.2), so wiring dispute outcomes to it would be building on top of an already-dormant mechanism.**
 
-### 8.2 Escalation Workflow
-
-```typescript
-async function escalateDispute(
-  disputeId: string,
-  trigger: EscalationTrigger
-) {
-  const dispute = await this.disputeRepository.findById(disputeId);
-  
-  // 1. Mark as escalated
-  await this.disputeRepository.update(disputeId, {
-    escalated: true,
-    escalatedAt: new Date(),
-    escalationReason: trigger,
-    priority: 'CRITICAL'
-  });
-  
-  // 2. Assign to senior admin
-  const seniorAdmin = await this.getAvailableSeniorAdmin();
-  await this.assignDispute(disputeId, seniorAdmin.id);
-  
-  // 3. Notify senior admin
-  await this.notificationService.send({
-    to: seniorAdmin.id,
-    type: 'DISPUTE_ESCALATED',
-    priority: 'CRITICAL',
-    data: {
-      disputeId,
-      trigger,
-      contractValue: dispute.contract.totalAmount,
-      category: dispute.category,
-      timeline: await this.getDisputeTimeline(disputeId)
-    }
-  });
-  
-  // 4. If fraud suspected, freeze accounts
-  if (trigger === 'FRAUD_SUSPECTED') {
-    await this.freezeAccounts(dispute);
-  }
-  
-  // 5. Notify parties of escalation
-  await this.notifyPartiesOfEscalation(dispute);
-}
-```
+Building dispute→trust integration therefore has two prerequisites that are themselves unbuilt: (a) wiring the trust formula into production events at all, and (b) deciding how a dispute signal composes with the existing four terms.
 
 ---
 
-## 9. AUTOMATED DISPUTE HANDLING
+## 9. Proposed Design — Database Schema (illustrative only)
 
-### 9.1 Auto-Creation: Debt Escalation
+**(PROPOSED — captures the shape of tables a real build might need; not a schema that exists anywhere)**
 
-```typescript
-// From settlement processing - after 30 days of unpaid debt
-@Cron('0 0 * * *') // Daily check
-async function checkAutoDisputeCreation() {
-  const overdueDebts = await this.debtRepository.find({
-    status: 'OUTSTANDING',
-    createdAt: LessThan(subDays(new Date(), 30))
-  });
-  
-  for (const debt of overdueDebts) {
-    // Auto-create dispute
-    const dispute = await this.createDispute({
-      contractId: debt.contractId,
-      createdBy: 'SYSTEM',
-      creatorType: 'SYSTEM',
-      onBehalfOf: debt.providerId,
-      category: 'NON_PAYMENT',
-      description: `Automated dispute for unpaid debt of ${debt.amount} ETB. Debt overdue by 30 days.`,
-      evidence: {
-        debtRecord: debt,
-        calculation: debt.breakdown,
-        paymentRequests: await this.getPaymentRequests(debt.contractId)
-      }
-    });
-    
-    // Update debt with dispute reference
-    await this.debtRepository.update(debt.id, {
-      status: 'IN_DISPUTE',
-      disputeId: dispute.id
-    });
-  }
-}
-```
+The original draft's `disputes` / `dispute_evidence` / `dispute_timeline` table definitions (party IDs, category, status, resolution, SLA fields, evidence metadata) remain a reasonable starting point for column shape, with one correction if reused:
 
-### 9.2 Auto-Resolution: Clear-Cut Cases
-
-```typescript
-async function checkAutoResolution(dispute: Dispute): Promise<boolean> {
-  // Only auto-resolve if evidence is overwhelming
-  
-  switch (dispute.category) {
-    case 'NON_PAYMENT':
-      // Auto-resolve if payment proof exists
-      const paymentProof = await this.checkPaymentProof(dispute);
-      if (paymentProof.verified) {
-        await this.autoResolve(dispute, {
-          winner: dispute.claimantId,
-          outcome: 'CLAIMANT_WINS_FULL',
-          reasoning: 'Payment receipt verified via blockchain/wallet transaction',
-          action: 'WAIVE_DEBT'
-        });
-        return true;
-      }
-      break;
-      
-    case 'DELIVERY_ISSUE':
-      // Auto-resolve if GPS proves provider was at location
-      const gpsData = await this.getGPSData(dispute.contractId);
-      if (gpsData.providerAtLocation && gpsData.businessNoShow) {
-        await this.autoResolve(dispute, {
-          winner: dispute.respondentId,
-          outcome: 'RESPONDENT_WINS_FULL',
-          reasoning: 'GPS data shows provider at delivery location, business no-show',
-          action: 'BUSINESS_AT_FAULT'
-        });
-        return true;
-      }
-      break;
-  }
-  
-  return false; // Cannot auto-resolve, needs manual review
-}
-```
+- The real database is **one shared Postgres database with no per-module schema isolation** (per `MVP_MODULE_INTEGRATION_SPECIFICATION.md` §1.2 and `project-docs/service-specs/contract-engine-spec.md` §7 — snake_case naming via EFCore.NamingConventions, no `contracts_schema`/`finance_schema`/`disputes_schema` split anywhere). A `disputes_schema.*` prefix, as earlier drafts of this document and the pre-rewrite `MVP_MODULE_INTEGRATION_SPECIFICATION.md` both showed, does not match how any real module is organized in this codebase; a real implementation would add plain tables (e.g. `disputes`, `dispute_evidence`, `dispute_timeline`) alongside the rest, following the existing convention.
+- `contract_id` should reference the real `contracts.id` primary key as it exists today, and any `business_id`/`provider_id` columns should resolve against the real `Modules/Identity` entities, not placeholder UUIDs.
 
 ---
 
-## 10. POST-RESOLUTION ACTIONS
+## 10. What a real build would actually require (summary)
 
-### 10.1 Contract Status Update
+If this is picked up as a project, in rough dependency order:
 
-```typescript
-async function updateContractAfterResolution(resolution: ResolvedDispute) {
-  const contract = await this.contractRepository.findById(resolution.contractId);
-  
-  // Determine new contract status based on resolution
-  let newStatus: ContractStatus;
-  
-  switch (resolution.outcome) {
-    case 'CLAIMANT_WINS_FULL':
-    case 'RESPONDENT_WINS_FULL':
-    case 'PARTIAL_FAVOR_CLAIMANT':
-    case 'PARTIAL_FAVOR_RESPONDENT':
-      // Return to previous status (usually ACTIVE)
-      newStatus = contract.previousStatus || 'ACTIVE';
-      break;
-      
-    case 'DISMISSED':
-      // Return to previous status
-      newStatus = contract.previousStatus || 'ACTIVE';
-      break;
-  }
-  
-  // Update contract
-  await this.contractStateMachine.transitionTo(
-    contract.id,
-    newStatus,
-    `Dispute resolved: ${resolution.outcome}`
-  );
-  
-  // Record dispute in contract history
-  await this.contractRepository.update(contract.id, {
-    disputeHistory: [...contract.disputeHistory, {
-      disputeId: resolution.disputeId,
-      category: resolution.category,
-      outcome: resolution.outcome,
-      resolvedAt: resolution.resolvedAt
-    }]
-  });
-}
-```
+1. **A real `Dispute`/`DisputeEvidence` entity and migration** inside a new module (or inside `Modules/Contracts`, given the tight coupling to contract state) — none exists today.
+2. **A real state-machine wiring for `Contract.Status = DISPUTED`/`ON_HOLD`** — today these are inert enum values with no transition methods on the `Contract` aggregate.
+3. **A decision on how dispute resolution moves money** — against the real `EscrowLock`/`WalletLedgerTransaction` primitives in `Modules/Finance`, not a generic ledger model.
+4. **Trust-score wiring** (§8) — a prerequisite piece of work that doesn't exist yet regardless of disputes.
+5. **A redesign of the Non-Payment category** (§3.3) around what payment/debt mechanics actually exist, since the original assumed a `Debt` entity that was never built.
+6. **A settlement-specific dispute hook**, if desired — today there is no `POST /settlements/{id}/dispute` and none of `SettlementController`'s modeled `SettlementStatusHistory` triggers cover a dispute concept (see `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` §8).
+7. **Admin, business, and provider UI** on web and both mobile apps — none exists today.
 
-### 10.2 Trust Score Impact
-
-```typescript
-async function updateTrustScores(resolution: ResolvedDispute) {
-  const impact = calculateTrustScoreImpact(resolution);
-  
-  // Update business trust score
-  if (impact.business !== 0) {
-    await this.trustScoreService.adjustScore({
-      userId: resolution.businessId,
-      adjustment: impact.business,
-      reason: `Dispute resolution: ${resolution.category}`,
-      disputeId: resolution.disputeId
-    });
-  }
-  
-  // Update provider trust score
-  if (impact.provider !== 0) {
-    await this.trustScoreService.adjustScore({
-      userId: resolution.providerId,
-      adjustment: impact.provider,
-      reason: `Dispute resolution: ${resolution.category}`,
-      disputeId: resolution.disputeId
-    });
-  }
-}
-
-function calculateTrustScoreImpact(resolution: ResolvedDispute): TrustScoreImpact {
-  const impacts = {
-    VEHICLE_CONDITION: {
-      winnerGain: 0,
-      loserLoss: -10
-    },
-    SERVICE_QUALITY: {
-      winnerGain: 0,
-      loserLoss: -20 // More severe
-    },
-    NON_PAYMENT: {
-      winnerGain: +5,
-      loserLoss: -15
-    },
-    DELIVERY_ISSUE: {
-      winnerGain: 0,
-      loserLoss: -10
-    },
-    CONTRACT_TERMS: {
-      winnerGain: 0,
-      loserLoss: -5 // Less severe
-    }
-  };
-  
-  const categoryImpact = impacts[resolution.category];
-  const winner = resolution.winner;
-  
-  return {
-    business: winner === resolution.businessId ? categoryImpact.winnerGain : categoryImpact.loserLoss,
-    provider: winner === resolution.providerId ? categoryImpact.winnerGain : categoryImpact.loserLoss
-  };
-}
-```
-
-### 10.3 Notification Templates
-
-```typescript
-async function notifyResolution(resolution: ResolvedDispute) {
-  // Notify winner
-  await this.notificationService.send({
-    to: resolution.winner,
-    type: 'DISPUTE_RESOLVED_WON',
-    priority: 'HIGH',
-    template: {
-      title: 'Dispute Resolved in Your Favor',
-      body: `Your dispute regarding ${resolution.category} has been resolved in your favor.`,
-      reasoning: resolution.resolutionReasoning,
-      actions: resolution.actions,
-      financialImpact: resolution.financialAdjustment
-    }
-  });
-  
-  // Notify loser
-  const loser = resolution.winner === resolution.businessId 
-    ? resolution.providerId 
-    : resolution.businessId;
-    
-  await this.notificationService.send({
-    to: loser,
-    type: 'DISPUTE_RESOLVED_LOST',
-    priority: 'HIGH',
-    template: {
-      title: 'Dispute Resolution',
-      body: `The dispute regarding ${resolution.category} has been resolved.`,
-      reasoning: resolution.resolutionReasoning,
-      requiredActions: resolution.actions,
-      financialImpact: resolution.financialAdjustment,
-      nextSteps: resolution.nextSteps
-    }
-  });
-}
-```
-
----
-
-## APPENDIX A: Dispute Database Schema
-
-```sql
-CREATE TABLE disputes_schema.disputes (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  contract_id UUID NOT NULL REFERENCES contracts_schema.contracts(id),
-  
-  -- Parties
-  created_by UUID NOT NULL,
-  creator_type VARCHAR(20) NOT NULL, -- BUSINESS, PROVIDER, SYSTEM, ADMIN
-  on_behalf_of UUID, -- If SYSTEM or ADMIN creates
-  claimant_id UUID NOT NULL,
-  respondent_id UUID NOT NULL,
-  
-  -- Dispute details
-  category VARCHAR(50) NOT NULL,
-  description TEXT NOT NULL,
-  status VARCHAR(50) NOT NULL,
-  priority VARCHAR(20) NOT NULL,
-  
-  -- Resolution
-  resolved_by UUID,
-  resolved_at TIMESTAMP,
-  resolution VARCHAR(50),
-  resolution_reasoning TEXT,
-  winner UUID,
-  outcome VARCHAR(50),
-  
-  -- Financial
-  financial_adjustment JSONB,
-  
-  -- SLA
-  sla_deadline TIMESTAMP NOT NULL,
-  sla_breached BOOLEAN DEFAULT false,
-  sla_breached_at TIMESTAMP,
-  
-  -- Evidence
-  evidence_count INTEGER DEFAULT 0,
-  counter_evidence_submitted BOOLEAN DEFAULT false,
-  counter_evidence_submitted_at TIMESTAMP,
-  
-  -- Escalation
-  escalated BOOLEAN DEFAULT false,
-  escalated_at TIMESTAMP,
-  escalation_reason VARCHAR(50),
-  
-  -- Timestamps
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE disputes_schema.evidence (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  dispute_id UUID NOT NULL REFERENCES disputes_schema.disputes(id),
-  
-  -- Evidence details
-  type VARCHAR(50) NOT NULL,
-  filename VARCHAR(255) NOT NULL,
-  file_url TEXT NOT NULL,
-  file_size BIGINT NOT NULL,
-  mime_type VARCHAR(100) NOT NULL,
-  description TEXT,
-  
-  -- Upload details
-  uploaded_by UUID NOT NULL,
-  uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE disputes_schema.dispute_timeline (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  dispute_id UUID NOT NULL REFERENCES disputes_schema.disputes(id),
-  
-  -- Event details
-  event_type VARCHAR(50) NOT NULL,
-  actor_id UUID,
-  actor_type VARCHAR(20),
-  description TEXT NOT NULL,
-  metadata JSONB,
-  
-  -- Timestamp
-  occurred_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- Indexes
-CREATE INDEX idx_disputes_contract ON disputes_schema.disputes(contract_id);
-CREATE INDEX idx_disputes_claimant ON disputes_schema.disputes(claimant_id);
-CREATE INDEX idx_disputes_respondent ON disputes_schema.disputes(respondent_id);
-CREATE INDEX idx_disputes_status ON disputes_schema.disputes(status);
-CREATE INDEX idx_disputes_category ON disputes_schema.disputes(category);
-CREATE INDEX idx_disputes_sla ON disputes_schema.disputes(sla_deadline) WHERE status IN ('OPEN', 'PENDING_REVIEW');
-
-CREATE INDEX idx_evidence_dispute ON disputes_schema.evidence(dispute_id);
-CREATE INDEX idx_timeline_dispute ON disputes_schema.dispute_timeline(dispute_id);
-```
-
----
-
-**END OF DISPUTE RESOLUTION WORKFLOW SPECIFICATION**
-
----
-
-**For Implementation:** Use this document as reference for:
-1. Dispute category definitions and validation
-2. Evidence requirements and upload handling
-3. Resolution decision trees
-4. SLA monitoring and escalation
-5. Financial adjustment processing
-
-**For Testing:** Verify:
-1. All dispute categories can be created with proper evidence
-2. Counter-party response window enforced (24 hours)
-3. SLA deadlines monitored and breaches handled
-4. Resolutions execute all required actions
-5. Trust scores updated correctly
-6. Financial adjustments processed accurately
+None of the above should be inferred as "in progress" from this document's existence — it is a design reference only, dated 2026-07-23, for a feature that has not been started.

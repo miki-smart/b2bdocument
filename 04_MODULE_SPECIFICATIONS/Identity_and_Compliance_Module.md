@@ -1,1013 +1,321 @@
-# Identity & Compliance Module - Specification
+# Identity & Compliance Module — Specification
 
-**Module Name:** Identity & Compliance  
-**Version:** 1.1 MVP  
-**Date:** December 22, 2025 (Updated)  
-**Database Schema:** `identity`  
-**Related Documents:**
-- MVP_AUTHORITATIVE_BUSINESS_RULES.md (Section 8: Trust Score, Section 9: Tier System)
-- BR-025 (Trust Score Calculation)
-- BR-040, BR-041, BR-042 (Provider Tier System)
+**Module Name:** Identity & Compliance
+**Version:** 2.0 (rewritten against running code)
+**Last verified against code:** 2026-07-23
+**Location:** `Modules/Identity/**` inside `Marketplace.API` (.NET 9 modular monolith) — a folder/namespace inside one deployable, not a separate service; Keycloak is genuinely used for auth, but only as an external identity provider, not as a microservice this module orchestrates
+**Related documents:** `backlog/mvp/epic-01-business-onboarding-kyb.md`, `backlog/mvp/epic-02-provider-onboarding-kyc.md`, `backlog/mvp/epic-12-risk-trust-scoring.md`, `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md`, `project-docs/18_Implementation_Coverage_Audit.md` §5 and §10.2
 
 ---
 
-## 📋 Overview
+## What changed in this rewrite
+
+The previous version of this document (v1.1, dated December 2025) got the trust-score formula and tier commission rates right, but got almost everything about *how verification and compliance actually work* wrong, and presented the trust-score/tier machinery as fully live when it is not. This rewrite replaces it entirely:
+
+- **The formal `VerificationRequest` / `ComplianceCheckLog` workflow the previous doc describes is dead code.** `VerificationRequest.Approve()`/`Reject()`, and the `SubmitVerificationRequestCommand`/`ApproveVerificationRequestCommand`/`RejectVerificationRequestCommand` handlers built around it, have **zero controller call sites** anywhere in the backend — confirmed by repo-wide search. The real admin verification flow is much simpler and goes through two different mechanisms instead (see below).
+- **The real verification flow is two-layered and direct:** (1) document-level status on `BusinessDocument`/`ProviderDocument`/`VehicleDocument` (`VerifiedStatus`: `PENDING`/`VERIFIED`/`REJECTED`), updated via a single generic endpoint (`ComplianceController.UpdateDocumentVerification`, `PUT /api/identity/compliance/documents/{documentId}/status`); and (2) entity-level status on `Business`/`Provider`/`Vehicle` themselves, updated via each entity's own admin verification endpoint (`PUT .../admin/{id}/verification/status`). Neither goes through `VerificationRequest`.
+- **The real audit trail is `VerificationEventLog`** (via `VerificationAuditService`), not `ComplianceCheckLog` — `ComplianceCheckLog.Create()` also has zero call sites. `VerificationEventLog` is a flat, generic event log (entity type/ID, event type, actor, JSON event data) written on every business/provider creation, status update, and document action.
+- **Trust score is fully built but never wired into production**, confirmed independently at the code level: `TrustScoreCalculator`/`ITrustScoreCalculator` has zero call sites outside its own unit tests, and `Provider.UpdateTrustScore()` is never invoked by any command/event handler. Every provider's `TrustScore` is frozen at its registration-time default of 50 unless an admin manually calls `AssignProviderTierCommand` (which doesn't even touch `TrustScore`, only the tier assignment).
+- **Two competing, disagreeing tier-threshold schemes coexist in code**, and neither is wired to production either: a hardcoded `TrustScore.CalculateTier()` (Bronze <50/Silver 50–69/Gold 70–84/Platinum ≥85, used only for admin list-filtering) vs. a seeded `ProviderTierRule` + `TierCalculationService` "hybrid" model (Bronze 0–59/Silver 60–74/Gold 75–89/Platinum 90–100, plus minimum completed-contract counts) that is also DI-registered but never called.
+- **`InsuranceMonitorService` is never invoked automatically.** There is no `InsuranceMonitorJob`/`BackgroundService` anywhere in `BackgroundServices/` that calls `ProcessExpiredPoliciesAsync`/`ProcessExpiringPoliciesAsync` on a schedule, unlike the previous doc's daily-cron `InsuranceMonitorService : BackgroundService`. The service exists, is registered in DI, but nothing triggers it — insurance expiry is not actually monitored in production today. On top of that, `ProcessExpiredPoliciesAsync`'s own "block the vehicle" logic is commented out (`// vehicle.Suspend(); // If such method existed`), and the "expiring soon" warning path only logs, it never publishes a notification event, despite the entity-level `InsuranceExpiredEvent` existing and having no registered handler either.
+- **Business risk scoring, a fraud-detection rule engine, and a dispute engine do not exist in any form.** `RiskEvent`/`AccountFlag` are real but are generic free-text security-event/flag records (`NEW_DEVICE`, `GEO_MISMATCH`, `FAILED_LOGIN_SPREE`, `SUSPICIOUS`, `HIGH_RISK`, `DOCUMENT_EXPIRED`), not a scored 0–100 risk model. There is no `RiskScore` field anywhere on `Business`.
+- **Profile completion is real and configuration-driven** (`ProfileCompletionService`, backed by `masterdata.profile_requirements`), which the previous doc's hardcoded 7-requirement list didn't reflect — requirements are admin-editable without a code change.
+- **Trust score is visible to the provider themselves**, contradicting the previous doc's "admin/business-facing only" framing (and `epic-02` Story 2.6) — the provider mobile app's own dashboard renders it directly.
+
+---
+
+## Overview
 
 ### Purpose
-The Identity & Compliance Module is the **source of truth** for all actors in the Movello platform. It manages user accounts, business clients, vehicle providers, vehicle registry, KYC/KYB verification, insurance compliance, and trust scoring.
+
+The Identity & Compliance module is the source of truth for every actor on the platform — user accounts (mapped 1:1 to Keycloak identities), Businesses, Providers, Vehicles — and owns their onboarding, document/KYB/KYC verification, insurance compliance, provider trust scoring/tiering, and account-level risk flagging. It does not run pricing, bidding, contracts, or payments; other modules read from it (trust score, verification status, fleet availability) and it reacts to their events (e.g. contract completion — in principle, though that wiring doesn't exist today, see Known Gaps).
 
 ### Responsibilities
 
-✅ **User Management**
-- Map Keycloak identities to internal user accounts
-- Manage user devices and login sessions
-- Handle MFA challenges
+**User account management**
+- Maps Keycloak identities (`KeycloakUserId`) to internal `UserAccount` records; tracks email/phone verification via self-service OTP (separate OTP fields for email, phone, and password reset, each with its own expiry)
+- Device fingerprinting (`UserDevice`), login sessions (`UserLoginSession`), MFA challenges (`UserMfaChallenge`)
+- Account lifecycle: `ACTIVE`/`DEACTIVATED`/`SUSPENDED`/`BLOCKED`, admin suspend/block/reactivate endpoints
 
-✅ **Business Management**
-- Business registration and KYB verification
-- Document upload and verification workflow
-- Business tier assignment
+**Business onboarding & management**
+- Registration (`RegisterBusinessCommand`), multi-step onboarding tracking (`BusinessProfile.OnboardingStep`), document upload, admin verification, profile/contact-person/preferences/address updates
+- Dual-OTP (email + phone) bank-account-change flow, mirroring the provider side
 
-✅ **Provider Management**
-- Provider registration and KYC verification
-- Provider tier assignment (Bronze → Platinum)
-- Trust score calculation and history
+**Provider onboarding & management**
+- Registration supporting `INDIVIDUAL`/`AGENT`/`COMPANY` provider types, document upload, admin verification, profile/preferences updates
+- Trust score field + history (formula built, not wired — see below) and tier assignment (manual admin action only)
+- Dual-OTP bank-account-change flow
 
-✅ **Vehicle Management**
-- Vehicle registration and compliance
-- Insurance tracking and expiry monitoring
-- Vehicle photo evidence
+**Vehicle & insurance management**
+- Vehicle registration, 5-angle photo requirement, admin approval (gated on documents verified + active verified insurance + all 5 photos present), status lifecycle, Direct Rental listing opt-in
+- Insurance policy tracking with a 30-day minimum-validity business rule enforced at bid-eligibility time — but **not** by any automated background monitor (see Known Gaps)
 
-✅ **Compliance**
-- Document verification workflows
-- Insurance validation
-- Account flagging for violations
+**Compliance**
+- Document-level verification workflow (`BusinessDocument`/`ProviderDocument`/`VehicleDocument`, each with independent `VerifiedStatus`)
+- Generic audit trail (`VerificationEventLog`) for every creation/status-change/document action
+- Account flags (`AccountFlag`) and security risk events (`RiskEvent`) — free-text categorized records, not a scored model
 
----
-
-## 🗄️ Database Schema
-
-### Tables (22 Total)
-
-#### **User Identity (4 tables)**
-1. `user_account` - Core user records
-2. `user_device` - Device fingerprinting
-3. `user_login_session` - Active sessions
-4. `user_mfa_challenge` - OTP challenges
-
-#### **Business (3 tables)**
-5. `business` - Business entities
-6. `business_profile` - Extended metadata
-7. `business_document` - KYB documents
-
-#### **Provider (5 tables)**
-8. `provider` - Provider entities
-9. `provider_profile` - Extended metadata
-10. `provider_tier_assignment` - Current tier
-11. `provider_document` - KYC documents
-12. `provider_trust_score_history` - Score changes
-
-#### **Vehicle (3 tables)**
-13. `vehicle` - Vehicle registry
-14. `vehicle_document` - Generic documents
-15. `vehicle_insurance` - Insurance tracking
-
-#### **Compliance (4 tables)**
-16. `verification_request` - Verification workflows
-17. `compliance_check_log` - Audit trail
-18. `risk_event` - Suspicious activities
-19. `account_flag` - Account warnings
+**Trust & tier (provider-only)**
+- `TrustScoreCalculator` implements the real BR-025 formula, fully unit-tested, but has no production trigger
+- Four tiers (`BRONZE`/`SILVER`/`GOLD`/`PLATINUM`) with admin-configurable commission rates via MasterData; tier changes today are manual admin action only
 
 ---
 
-## 🏗️ Module Structure
+## Database Schema
+
+### User Identity
+
+| Table | Purpose |
+|---|---|
+| `user_accounts` | Core user record mapped to Keycloak (`UserAccount`) |
+| `user_devices` | Device fingerprints (`UserDevice`) |
+| `user_login_sessions` | Active session tracking (`UserLoginSession`) |
+| `user_mfa_challenges` | OTP/MFA challenge records (`UserMfaChallenge`) |
+
+### Business
+
+| Table | Purpose |
+|---|---|
+| `businesses` | Business entity (`Business`) |
+| `business_profiles` | Extended metadata: tier code, onboarding step, contact person, preferences (`BusinessProfile`) |
+| `business_documents` | KYB documents with independent `VerifiedStatus` (`BusinessDocument`) |
+| `business_bank_accounts` | Bank accounts, dual-OTP change flow (`BusinessBankAccount`) |
+
+### Provider
+
+| Table | Purpose |
+|---|---|
+| `providers` | Provider entity, incl. `TrustScore` (`Provider`) |
+| `provider_profiles` | Extended metadata: fleet size, onboarding step, bank details (`ProviderProfile`) |
+| `provider_documents` | KYC documents with independent `VerifiedStatus` (`ProviderDocument`) |
+| `provider_bank_accounts` | Bank accounts, dual-OTP change flow (`ProviderBankAccount`) |
+| `provider_tier_assignments` | Append-only tier-assignment history (`ProviderTierAssignment`) |
+| `provider_trust_score_histories` | Append-only trust-score change history (`ProviderTrustScoreHistory`) — never actually appended to outside admin manual calls, since nothing recomputes the score |
+
+### Vehicle
+
+| Table | Purpose |
+|---|---|
+| `vehicles` | Vehicle registry, incl. Direct Rental fields (`Vehicle`) |
+| `vehicle_documents` | Generic vehicle documents with independent `VerifiedStatus` (`VehicleDocument`) |
+| `vehicle_insurances` | Insurance policies (`VehicleInsurance`) |
+| `vehicle_status_histories` | Vehicle status transition audit (`VehicleStatusHistory`) |
+
+### Compliance & Risk
+
+| Table | Purpose |
+|---|---|
+| `verification_requests` | Generic verification-request entity — **`Approve()`/`Reject()` and the commands built around it have zero controller call sites; dead in production** |
+| `compliance_check_logs` | Per-check audit log tied to `VerificationRequest` — **`ComplianceCheckLog.Create()` has zero call sites anywhere; dead** |
+| `verification_event_logs` | **The real audit trail.** Flat event log (entity type/ID, event type, actor, JSON `eventData`) written by `VerificationAuditService` on every business/provider creation, entity status update, and document verify/reject/upload action (`VerificationEventLog`) |
+| `risk_events` | Free-text security events: `NEW_DEVICE`, `GEO_MISMATCH`, `FAILED_LOGIN_SPREE`, etc., with a `RiskSeverity` enum (`RiskEvent`) |
+| `account_flags` | Free-text flags: `SUSPICIOUS`, `HIGH_RISK`, `DOCUMENT_EXPIRED`, etc., with optional expiry (`AccountFlag`) |
+
+---
+
+## Module Structure (actual folders)
 
 ```
-Identity/
+Modules/Identity/
 ├── Domain/
 │   ├── Entities/
-│   │   ├── UserAccount.cs
-│   │   ├── Business.cs
-│   │   ├── BusinessProfile.cs
-│   │   ├── Provider.cs
-│   │   ├── ProviderProfile.cs
-│   │   ├── ProviderTierAssignment.cs
-│   │   ├── Vehicle.cs
-│   │   ├── VehicleInsurance.cs
-│   │   ├── VerificationRequest.cs
-│   │   └── ProviderTrustScoreHistory.cs
-│   │
-│   ├── Events/
-│   │   ├── BusinessRegisteredEvent.cs
-│   │   ├── BusinessVerifiedEvent.cs
-│   │   ├── ProviderRegisteredEvent.cs
-│   │   ├── ProviderVerifiedEvent.cs
-│   │   ├── VehicleRegisteredEvent.cs
-│   │   ├── InsuranceExpiredEvent.cs
-│   │   ├── TrustScoreUpdatedEvent.cs
-│   │   └── TierChangedEvent.cs
-│   │
+│   │   ├── UserAccount.cs, UserDevice.cs, UserLoginSession.cs, UserMfaChallenge.cs
+│   │   ├── Business.cs, BusinessProfile.cs, BusinessDocument.cs, BusinessBankAccount.cs
+│   │   ├── Provider.cs, ProviderProfile.cs, ProviderDocument.cs, ProviderBankAccount.cs
+│   │   ├── ProviderTierAssignment.cs, ProviderTrustScoreHistory.cs
+│   │   ├── Vehicle.cs, VehicleDocument.cs, VehicleInsurance.cs, VehicleStatusHistory.cs
+│   │   ├── VerificationRequest.cs      (dead — Approve/Reject never called from any controller)
+│   │   ├── ComplianceCheckLog.cs       (dead — Create() never called)
+│   │   ├── VerificationEventLog.cs     (real audit trail, written by VerificationAuditService)
+│   │   ├── RiskEvent.cs, AccountFlag.cs
+│   │   └── UserDocument.cs
 │   ├── Enums/
-│   │   ├── UserType.cs
-│   │   ├── UserStatus.cs
-│   │   ├── BusinessType.cs
-│   │   ├── ProviderType.cs
-│   │   ├── ProviderTier.cs
-│   │   ├── VehicleStatus.cs
-│   │   └── VerificationStatus.cs
-│   │
-│   └── ValueObjects/
-│       ├── Address.cs
-│       ├── ContactInfo.cs
-│       └── TrustScore.cs
+│   │   ├── BusinessStatus.cs / ProviderStatus.cs / VehicleStatus.cs   (identical shape: PENDING, REJECTED, INCOMPLETE, VERIFIED/APPROVED, SUSPENDED/BLOCKED[, ASSIGNED, RETIRED for Vehicle])
+│   │   ├── ProviderTier.cs (BRONZE, SILVER, GOLD, PLATINUM — no fifth tier)
+│   │   ├── InsuranceStatus.cs, InsuranceType.cs, ComplianceStatus.cs, VerificationStatus.cs
+│   │   ├── RiskSeverity.cs, BankAccountVerificationStatus.cs, BusinessType.cs, ProviderType.cs
+│   │   └── UserType.cs, UserStatus.cs, VerificationEventType.cs
+│   ├── Events/ (one file per event) BusinessRegisteredEvent, ProviderRegisteredEvent, ProviderVerifiedEvent,
+│   │            TrustScoreUpdatedEvent (defined, never raised outside UpdateTrustScore, which is itself never called),
+│   │            VehicleRegisteredEvent, InsuranceExpiredEvent (raised, but has no registered handler),
+│   │            AccountOTPGeneratedEvent, AccountEmailOTPGeneratedEvent, PasswordResetOTPGeneratedEvent, UserAccountCreatedEvent
+│   └── ValueObjects/ Address.cs, ContactInfo.cs, TrustScore.cs (score→tier mapping, scheme #1 — see Known Gaps)
 │
 ├── Application/
-│   ├── Commands/
-│   │   ├── Business/
-│   │   │   ├── RegisterBusinessCommand.cs
-│   │   │   ├── UploadBusinessDocumentCommand.cs
-│   │   │   └── VerifyBusinessCommand.cs
-│   │   ├── Provider/
-│   │   │   ├── RegisterProviderCommand.cs
-│   │   │   ├── UploadProviderDocumentCommand.cs
-│   │   │   └── VerifyProviderCommand.cs
-│   │   ├── Vehicle/
-│   │   │   ├── RegisterVehicleCommand.cs
-│   │   │   ├── UploadVehiclePhotosCommand.cs
-│   │   │   └── UpdateInsuranceCommand.cs
-│   │   └── TrustScore/
-│   │       └── RecalculateTrustScoreCommand.cs
-│   │
-│   ├── Queries/
-│   │   ├── GetBusinessByIdQuery.cs
-│   │   ├── GetProviderByIdQuery.cs
-│   │   ├── GetProviderTrustScoreQuery.cs
-│   │   ├── GetVehicleByIdQuery.cs
-│   │   └── GetPendingVerificationsQuery.cs
-│   │
-│   ├── DTOs/
-│   │   ├── BusinessDto.cs
-│   │   ├── ProviderDto.cs
-│   │   ├── VehicleDto.cs
-│   │   └── TrustScoreDto.cs
-│   │
-│   ├── Validators/
-│   │   ├── RegisterBusinessValidator.cs
-│   │   ├── RegisterProviderValidator.cs
-│   │   └── RegisterVehicleValidator.cs
-│   │
+│   ├── Business/Commands/  RegisterBusinessCommand, CreateBusinessByAdminCommand, UpdateBusinessCommand,
+│   │                       UpdateBusinessVerificationCommand, UploadBusinessDocumentCommand,
+│   │                       CompleteBusinessOnboardingCommand, UpdateBusinessOnboardingStepCommand,
+│   │                       UpdateBusinessPreferencesCommand, UpdateBusinessContactPersonCommand,
+│   │                       UpdateBusinessAddressCommand, BusinessBankAccountCommands (dual-OTP change flow)
+│   ├── Provider/Commands/  RegisterProviderCommand, CreateProviderByAdminCommand, UpdateProviderCommand,
+│   │                       UpdateProviderVerificationCommand, UploadProviderDocumentCommand,
+│   │                       CompleteProviderOnboardingCommand, UpdateProviderOnboardingStepCommand,
+│   │                       UpdateProviderPreferencesCommand, AssignProviderTierCommand (manual, admin-only),
+│   │                       ProviderBankAccountCommands (dual-OTP change flow)
+│   ├── Vehicle/Commands/   RegisterVehicleCommand, UpdateVehicleCommand, UpdateVehicleVerificationCommand,
+│   │                       UploadVehicleDocumentCommand, UploadVehiclePhotosCommand,
+│   │                       AddVehicleInsuranceCommand, UpdateVehicleInsuranceCommand, VerifyVehicleInsuranceCommand,
+│   │                       UpdateVehicleMaintenanceStatusCommand, UpdateVehicleRentalRateCommand,
+│   │                       SetVehicleDirectRentalAvailabilityCommand
+│   ├── Compliance/Commands/ UpdateDocumentVerificationCommand (the real, wired document-status endpoint)
+│   │                        SubmitVerificationRequestCommand, ApproveVerificationRequestCommand,
+│   │                        RejectVerificationRequestCommand    (all three: dead, zero controller call sites)
+│   ├── Compliance/Queries/  VerificationRequestQueries + Handlers (query side of the same dead workflow)
+│   ├── UserAccount/Commands, Queries/ (create, devices, sessions, suspend/block/reactivate)
+│   ├── Queries/GetBusinessDashboardStats, GetProviderDashboardStats, GetDashboardStats
 │   └── Services/
-│       ├── ITrustScoreCalculator.cs
-│       ├── TrustScoreCalculator.cs       ├── IProviderValidationService.cs
-       ├── ProviderValidationService.cs│       ├── IInsuranceMonitor.cs
-│       └── InsuranceMonitor.cs
+│       ├── TrustScoreCalculator.cs / ITrustScoreCalculator.cs   (real formula, zero production call sites)
+│       ├── ProviderValidationService.cs / IProviderValidationService.cs (real, BR-004 eligibility gate — used by Marketplace bid/award flows)
+│       ├── ProfileCompletionService.cs                          (real, configuration-driven via masterdata.profile_requirements)
+│       ├── InsuranceMonitorService.cs / IInsuranceMonitorService.cs (real logic, never invoked by any scheduled job)
+│       └── VerificationAuditService.cs                          (the real audit-log writer, backs VerificationEventLog)
 │
-├── Infrastructure/
-│   ├── Data/
-│   │   ├── Configurations/
-│   │   │   ├── UserAccountConfiguration.cs
-│   │   │   ├── BusinessConfiguration.cs
-│   │   │   ├── ProviderConfiguration.cs
-│   │   │   └── VehicleConfiguration.cs
-│   │   └── IdentityDbContext.cs (part of MarketplaceDbContext)
-│   │
-│   ├── Repositories/
-│   │   ├── IBusinessRepository.cs
-│   │   ├── BusinessRepository.cs
-│   │   ├── IProviderRepository.cs
-│   │   ├── ProviderRepository.cs
-│   │   ├── IVehicleRepository.cs
-│   │   └── VehicleRepository.cs
-│   │
-│   └── Services/
-│       └── KeycloakUserService.cs
-│
-└── API/
-    └── Controllers/
-        ├── BusinessController.cs
-        ├── ProviderController.cs
-        ├── VehicleController.cs
-        └── ComplianceController.cs
+└── Infrastructure/
+    ├── Configurations/ (EF Core mappings)
+    ├── Repositories/ (Business, Provider, Vehicle, UserAccount, VerificationEventLog, etc.)
+    └── Services/ (Keycloak integration)
 ```
+
+Controllers live under `Marketplace.API/Controllers/Identity/`: `BusinessController`, `ProviderController`, `VehicleController`, `ComplianceController`, `UserAccountController`, `DashboardController`.
 
 ---
 
-## 🔄 Key Workflows
+## Core Entities (field-level)
 
-### 1. Business Registration & KYB
+### Business
+- `UserAccountId`, `BusinessName`, `BusinessType` (enum), `TinNumber` (exactly 10 digits, validated in `Create`/`Update`), `RegistrationNumber`, `Status` (`BusinessStatus`), `IsActive`
+- `Status` values: `PENDING, REJECTED, INCOMPLETE, VERIFIED, SUSPENDED, BLOCKED`
+- Methods: `Verify()` (from `PENDING`/`REJECTED`/`INCOMPLETE` only), `Reject()`, `MarkIncomplete()`, `ResubmitForVerification()` (→ `PENDING`), `Suspend()`, `Block()` (also flips `IsActive=false`), `Unblock()` (→ `VERIFIED`, `IsActive=true`), `Update()`
+- `Create()` raises `BusinessRegisteredEvent`, consumed by the Finance module to open a `MAIN` wallet
 
-```csharp
-// Command
-public class RegisterBusinessCommand : IRequest<Guid>
-{
-    public string BusinessName { get; set; }
-    public string BusinessType { get; set; }
-    public string TinNumber { get; set; }
-    public string RegistrationNumber { get; set; }
-    public ContactInfo ContactInfo { get; set; }
-    public Address Address { get; set; }
-}
+### Provider
+- `UserAccountId`, `Name`, `TinNumber` (optional at registration, validated 10-digit if supplied), `LicenseNumber` (optional), `ProviderType` (`INDIVIDUAL`/`AGENT`/`COMPANY`), `Status` (`ProviderStatus`, same 6 values as `BusinessStatus`), `TrustScore` (int, **default 50** at creation regardless of verification state), `IsActive`, `IsVatRegistered`
+- Vehicle-count fields for admin tracking: `ApprovedVehicleCount`, `PendingVehicleCount` (incremented/decremented explicitly, not derived live)
+- Individual-specific: `NationalId`. Business-specific (`AGENT`/`COMPANY`): `BusinessRegistrationNumber`, `ContactPersonName`/`Email`/`NationalId`, `City`, `Country` (default `"Ethiopia"`)
+- `Create()` always assigns an initial `SILVER` `ProviderTierAssignment` with `computedScore: 50` — **not** derived from any threshold rule, a hardcoded default
+- `UpdateTrustScore(newScore, reason)` — clamps 0–100, appends `ProviderTrustScoreHistory`, and auto-appends a new `ProviderTierAssignment` **only if** the tier implied by `TrustScore.CalculateTier()` (scheme #1, hardcoded) changes. **This method itself is never called anywhere outside unit tests** — see Known Gaps.
+- Same status methods as `Business`: `Verify()`, `Reject()`, `MarkIncomplete()`, `ResubmitForVerification()`, `Suspend()`, `Block()`, `Unblock()`. `Verify()` raises `ProviderVerifiedEvent`.
 
-// Handler
-public class RegisterBusinessCommandHandler : IRequestHandler<RegisterBusinessCommand, Guid>
-{
-    private readonly IBusinessRepository _businessRepository;
-    private readonly IMediator _mediator;
-    
-    public async Task<Guid> Handle(RegisterBusinessCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Validate TIN uniqueness
-        var existingBusiness = await _businessRepository.GetByTinAsync(request.TinNumber);
-        if (existingBusiness != null)
-            throw new BusinessException("TIN already registered");
-        
-        // 2. Create business entity
-        var business = new Business
-        {
-            Id = Guid.NewGuid(),
-            BusinessName = request.BusinessName,
-            BusinessType = request.BusinessType,
-            TinNumber = request.TinNumber,
-            Status = BusinessStatus.PendingKYB,
-            CreatedAt = DateTime.UtcNow
-        };
-        
-        // 3. Create business profile
-        var profile = new BusinessProfile
-        {
-            BusinessId = business.Id,
-            BusinessTierCode = "STANDARD", // Default tier
-            OnboardingCompleted = false
-        };
-        
-        // 4. Create verification request
-        var verificationRequest = new VerificationRequest
-        {
-            ActorType = "BUSINESS",
-            ActorId = business.Id,
-            Status = VerificationStatus.Pending
-        };
-        
-        // 5. Save to database
-        await _businessRepository.AddAsync(business);
-        await _businessRepository.AddProfileAsync(profile);
-        await _businessRepository.AddVerificationRequestAsync(verificationRequest);
-        
-        // 6. Publish event
-        await _mediator.Publish(new BusinessRegisteredEvent
-        {
-            BusinessId = business.Id,
-            BusinessName = business.BusinessName,
-            Email = request.ContactInfo.Email
-        });
-        
-        return business.Id;
-    }
-}
+### Vehicle
+- `ProviderId`, `LicensePlate`, `VIN` (optional), `Make`, `Model`, `Year`, `Type` (string: `SEDAN`/`SUV`/`VAN`/`TRUCK`/`BUS`/`PICKUP`/`MOTORCYCLE`), `Color`, `SeatingCapacity`, `FuelType` (string, optional), `Status` (`VehicleStatus`), `IsActive`, `Tags` (Postgres `text[]`)
+- `Status` values: `PENDING, REJECTED, INCOMPLETE, APPROVED, ASSIGNED, BLOCKED, RETIRED`
+- 5 photo URL fields (`PhotoFrontUrl`/`BackUrl`/`RightUrl`/`LeftUrl`/`InteriorUrl`); maintenance fields (`IsInMaintenance`, `MaintenanceStartedAt`, `MaintenanceReason`)
+- Direct Rental fields: `DailyRentalRate` (decimal, ≤999,999.99), `IsAvailableForDirectRental` (bool)
+- `Approve()` runs `ValidateApprovalRequirements()` first, which **hard-blocks** approval unless: every non-deleted document is `VERIFIED`, at least one active insurance policy exists with `Status == VERIFIED`, and all 5 angle photos are present — returns a combined error list, not just a boolean
+- `AssignToContract()`/`ReleaseFromContract()` toggle `APPROVED ⇄ ASSIGNED`; `SetStatus()` is a raw escape hatch used by the Contracts module for assignment/release bookkeeping
+- `EnableDirectRental()` requires `Status == APPROVED` and a positive `DailyRentalRate`; `DisableDirectRental()` has no preconditions
+- `ExpireInsurance(policyNumber)` calls the matching `VehicleInsurance.Expire()` and raises `InsuranceExpiredEvent` — but see Known Gaps for why this rarely fires in practice
 
-// Event Handler (Finance Module listens)
-public class BusinessRegisteredEventHandler : INotificationHandler<BusinessRegisteredEvent>
-{
-    private readonly IWalletService _walletService;
-    
-    public async Task Handle(BusinessRegisteredEvent notification, CancellationToken cancellationToken)
-    {
-        // Create wallet for business
-        await _walletService.CreateWalletAsync(
-            ownerType: "BUSINESS",
-            ownerId: notification.BusinessId,
-            accountType: "MAIN"
-        );
-    }
-}
-```
+### VehicleInsurance
+- `VehicleId`, `ProviderName` (insurer name, not vehicle provider), `PolicyNumber`, `CoverageType` (`InsuranceType`), `Status` (`InsuranceStatus`: `PENDING`/`VERIFIED`/`EXPIRED`), `CoverageAmount` (optional), `ValidFrom`/`ValidTo`, `DocumentUrl`, `IsActive`
+- `IsValidOn(date)` — true only if `IsActive && Status == VERIFIED && date` is within `[ValidFrom, ValidTo]`
+- No entity-level enforcement of the 30-day minimum window at policy-creation time — that rule lives in `ProviderValidationService`/`ProfileCompletionService` at read time, not in `VehicleInsurance.Create()`
+
+### BusinessDocument / ProviderDocument / VehicleDocument
+- Each: entity-scoped ID, `DocumentTypeId` (references MasterData `document_type`), `FileUrl`, `IssuedAt`/`ExpiresAt` (optional), `VerifiedStatus` (string: `PENDING`/`VERIFIED`/`REJECTED`), `VerifierId`/`VerifiedAt`
+- Methods: `Verify()`, `Reject(reason?)`, `ResetToPending()`, `UpdateFile()` (replacing a document resets it back to `PENDING`)
+- These three entities — not `VerificationRequest`/`ComplianceCheckLog` — are what the real compliance workflow operates on
+
+### VerificationRequest (dead in production)
+- `ActorType` (`BUSINESS`/`PROVIDER`/`VEHICLE`), `ActorId`, `Status` (`VerificationStatus`), `AssignedToUserId`, `ProcessedAt`, `AdminNotes`
+- `Approve()`/`Reject()` exist and are unit-testable, but `SubmitVerificationRequestCommand`/`ApproveVerificationRequestCommand`/`RejectVerificationRequestCommand` are never dispatched from `ComplianceController` or any other controller — confirmed by repo-wide search for their command types outside their own definition/handler files
+
+### ComplianceCheckLog (dead in production)
+- `VerificationRequestId`, `CheckName`, `Status` (`ComplianceStatus`), `Details`, `ExternalReferenceId` (for a 3rd-party KYC provider) — `Create()` has zero call sites anywhere
+
+### VerificationEventLog (the real audit trail)
+- `EntityType` (`BUSINESS`/`PROVIDER`/`VEHICLE`), `EntityId`, `DocumentId` (optional), `EventType` (`BUSINESS_CREATED`, `BUSINESS_STATUS_UPDATED`, `PROVIDER_CREATED`, `PROVIDER_STATUS_UPDATED`, `VEHICLE_STATUS_UPDATED`, `DOCUMENT_UPLOADED`/`_VERIFIED`/`_REJECTED`, `VEHICLE_DOCUMENT_UPLOADED`/`_VERIFIED`/`_REJECTED`, `BUSINESS_UPDATED`/`PROVIDER_UPDATED`/`VEHICLE_UPDATED`, etc.), `Description`, `ActorId` (admin user), `EventData` (JSONB — previous/new status, notes, rejection reason)
+- Written exclusively via `VerificationAuditService`, which every admin-facing verification/update handler calls
+
+### RiskEvent / AccountFlag
+- `RiskEvent`: `UserId` (optional), `EventType` (free-text, e.g. `NEW_DEVICE`/`GEO_MISMATCH`/`FAILED_LOGIN_SPREE`), `Data` (JSON), `Severity` (`RiskSeverity` enum)
+- `AccountFlag`: `ActorType` (`PROVIDER`/`BUSINESS`), `ActorId`, `FlagType` (free-text, e.g. `SUSPICIOUS`/`HIGH_RISK`/`DOCUMENT_EXPIRED`), `ExpiresAt` (optional)
+- Neither is a scored risk model; there is no `RiskScore` field anywhere on `Business`
+
+### ProviderTierAssignment (append-only)
+- `ProviderId`, `TierCode` (`ProviderTier`), `AssignedAt`, `ComputedScore`, `Reason` — latest row = current tier
+
+### ProviderTrustScoreHistory (append-only)
+- `ProviderId`, `OldScore`, `NewScore`, `ChangeReason` (`CONTRACT_COMPLETION`/`CANCELLATION`/`REVIEW`/`PENALTY` — these are documented values, but since nothing calls `UpdateTrustScore()` in production, no row is ever created with any of them today), `Description` (optional), `ReferenceId` (optional)
 
 ---
 
-### 2. Provider Registration & KYC
+## Key Workflows
 
-```csharp
-// Command
-public class RegisterProviderCommand : IRequest<Guid>
-{
-    public string ProviderType { get; set; } // INDIVIDUAL, AGENT, COMPANY
-    public string Name { get; set; }
-    public string TinNumber { get; set; }
-    public ContactInfo ContactInfo { get; set; }
-}
+### 1. Business/Provider registration
+`RegisterBusinessCommand`/`RegisterProviderCommand` create the entity in `PENDING` status, raise `BusinessRegisteredEvent`/`ProviderRegisteredEvent` (the former triggers wallet creation in the Finance module). Provider registration always seeds `TrustScore = 50` and an initial `SILVER` `ProviderTierAssignment` — this is a fixed default, not a computed one (contrary to the previous doc's "verified + 100% profile completion = SILVER, otherwise BRONZE" claim, which does not exist as live logic anywhere in `RegisterProviderCommandHandler`).
 
-// Handler
-public class RegisterProviderCommandHandler : IRequestHandler<RegisterProviderCommand, Guid>
-{
-    private readonly IProviderRepository _providerRepository;
-    private readonly IMediator _mediator;
-    
-    public async Task<Guid> Handle(RegisterProviderCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Create provider entity
-        var provider = new Provider
-        {
-            Id = Guid.NewGuid(),
-            ProviderType = request.ProviderType,
-            Name = request.Name,
-            TinNumber = request.TinNumber,
-            Status = ProviderStatus.PendingVerification
-        };
-        
-        // 2. Create provider profile
-        var profile = new ProviderProfile
-        {
-            ProviderId = provider.Id,
-            FleetSize = 0,
-            OnboardingCompleted = false
-        };
-        
-        // 3. Determine initial tier (BR-041)
-        // Verified providers with 100% profile completion: SILVER (trust score = 50)
-        // Otherwise: BRONZE (trust score = 0)
-        var initialTrustScore = provider.Status == ProviderStatus.Verified ? 50 : 0;
-        var initialTier = DetermineInitialTier(provider, request);
-        
-        provider.TrustScore = initialTrustScore;
-        
-        var tierAssignment = new ProviderTierAssignment
-        {
-            ProviderId = provider.Id,
-            TierCode = initialTier,
-            ComputedScore = initialTrustScore,
-            AssignedAt = DateTime.UtcNow
-        };
-        
-        // 4. Initialize trust score history
-        var trustScoreHistory = new ProviderTrustScoreHistory
-        {
-            ProviderId = provider.Id,
-            OldScore = null,
-            NewScore = 0,
-            Reason = "INITIAL_REGISTRATION",
-            CalculationSnapshot = new { message = "New provider" }
-        };
-        
-        // 5. Save to database
-        await _providerRepository.AddAsync(provider);
-        await _providerRepository.AddProfileAsync(profile);
-        await _providerRepository.AddTierAssignmentAsync(tierAssignment);
-        await _providerRepository.AddTrustScoreHistoryAsync(trustScoreHistory);
-        
-        // 6. Publish event
-        await _mediator.Publish(new ProviderRegisteredEvent
-        {
-            ProviderId = provider.Id,
-            ProviderName = provider.Name,
-            Email = request.ContactInfo.Email
-        });
-        
-        return provider.Id;
-    }
-}
-```
+### 2. Document upload and verification
+`UploadBusinessDocumentCommand`/`UploadProviderDocumentCommand`/`UploadVehicleDocumentCommand` create a `PENDING` document row referencing a MasterData `DocumentType`. Admin verification goes through **one single generic endpoint**: `PUT /api/identity/compliance/documents/{documentId}/status` (`ComplianceController` → `UpdateDocumentVerificationCommand`), which dispatches on `EntityType` (`BUSINESS`/`PROVIDER`/`VEHICLE`) to call `Verify()`/`Reject()`/`ResetToPending()` on the matching document entity, logs a `VerificationEventLog` row via `VerificationAuditService`, and — when a document is verified for a Business or Provider — auto-advances their onboarding step if it's behind (Step 3 for Business, Step 2 for Provider).
+
+### 3. Entity-level (business/provider/vehicle) admin verification
+Separate from document verification: `PUT /api/identity/businesses/admin/{id}/verification/status` / the equivalent Provider/Vehicle endpoints (`UpdateBusinessVerificationCommand`/`UpdateProviderVerificationCommand`/`UpdateVehicleVerificationCommand`) directly call `Verify()`/`Reject()`/`MarkIncomplete()`/`Suspend()`/`Block()`/`ResubmitForVerification()` on the entity based on the requested target status, then log a `VerificationEventLog` row. **Neither this nor document verification ever touches `VerificationRequest`/`ComplianceCheckLog`** — those entities and their Submit/Approve/Reject commands are unreachable dead code.
+
+### 4. Vehicle approval gate
+`Vehicle.Approve()` calls `ValidateApprovalRequirements()`, which hard-blocks approval unless every non-deleted document is `VERIFIED`, at least one insurance policy is active and `VERIFIED`, and all 5 angle photos are present — returning a combined list of every unmet requirement, not a single failure.
+
+### 5. Profile completion scoring (real, configuration-driven)
+`ProfileCompletionService.CalculateProviderCompletionAsync`/`CalculateBusinessCompletionAsync` read active `masterdata.profile_requirements` rows (type `DOCUMENT`/`ATTRIBUTE`/`VERIFICATION`, per entity type), check each one against real data (verified documents by type code, bank-account presence, approved-vehicle count, insurance-validity-window, email/phone verification), and return a percentage plus a list of missing-field display names. This is admin-configurable without a code change — the previous doc's hardcoded 7-requirement list is one snapshot of what's currently seeded, not a fixed schema.
+
+### 6. Provider bid/award eligibility gate (BR-004)
+`ProviderValidationService.ValidateProviderEligibilityAsync` — called from the Marketplace module at bid submission/update/award time — checks: `Status == VERIFIED`, `TrustScore ≥ 0` (effectively always true; there's no real minimum today), at least one `APPROVED` vehicle not already assigned to an active contract, and valid insurance (≥30 days remaining) on every approved vehicle. This is the one place the 30-day insurance rule is actually enforced — at read/gate time, not via any monitoring job.
+
+### 7. Trust score calculation — built, never triggered
+`TrustScoreCalculator.CalculateScore(provider, factors)` implements BR-025 exactly: `Base(50 verified / 0 unverified) + CompletionRate×20 + OnTimeRate×20 − NoShowRate×30 + RejectionPenaltyPoints`, clamped 0–100. It is unit-tested and DI-registered, but **a repo-wide search finds no command, query, or event handler anywhere that calls it, or calls `Provider.UpdateTrustScore()`, in production.** No handler exists for contract completion, on-time delivery, no-show, or bid-award rejection that would recompute a score. Every provider's `TrustScore` therefore stays at 50 forever unless an admin manually edits it directly (there is no admin endpoint for that either — only `AssignProviderTierCommand`, which sets a tier without touching the score).
+
+### 8. Tier assignment — manual only
+`AssignProviderTierCommand` lets an admin pick a tier code directly (validated against `ProviderTier` master data) and appends a `ProviderTierAssignment` row — it does **not** check the provider's actual `TrustScore` against either threshold scheme before accepting the admin's choice. The admin `TiersPage.tsx` edit dialog on the web is a stub (`toast.info('Update functionality coming soon')`) — admins cannot edit tier thresholds/commission rates through the UI, only via direct database/seed changes.
+
+### 9. Insurance expiry — no automated monitoring
+`InsuranceMonitorService.ProcessExpiredPoliciesAsync()`/`ProcessExpiringPoliciesAsync()` are real, fully-coded, and registered in DI (`IInsuranceMonitorService`) — but **no `BackgroundService` in `BackgroundServices/` ever calls them**, and no controller endpoint does either. Insurance expiry monitoring is dead in production: expired policies are never automatically flagged, `Vehicle.ExpireInsurance()` is never invoked by any scheduled process, and even inside `ProcessExpiredPoliciesAsync` the vehicle-blocking step is commented out (`// vehicle.Suspend(); // If such method existed`). The "expiring in 30 days" path only logs a line — it never raises a notification event.
+
+### 10. Dual-OTP bank-account change (Business and Provider, symmetric)
+Both `BusinessController` and `ProviderController` expose the identical shape: `me/bank-accounts/change/initiate` → `verify-email` → `verify-phone` → (implicit commit) with `resend-otp` and `cancel` at any point before both factors are confirmed. This is a real, undocumented-by-the-old-epics flow that gates changing payout/deposit bank details behind two independently-verified OTP channels.
 
 ---
 
-### 3. Vehicle Registration with Insurance
+## Events
 
-```csharp
-// Command
-public class RegisterVehicleCommand : IRequest<Guid>
-{
-    public Guid ProviderId { get; set; }
-    public string PlateNumber { get; set; }
-    public string VehicleTypeCode { get; set; }
-    public string EngineTypeCode { get; set; }
-    public int SeatCount { get; set; }
-    public string Brand { get; set; }
-    public string Model { get; set; }
-    public List<string> Tags { get; set; }
-    public VehicleInsuranceDto Insurance { get; set; }
-}
-
-// Handler
-public class RegisterVehicleCommandHandler : IRequestHandler<RegisterVehicleCommand, Guid>
-{
-    private readonly IVehicleRepository _vehicleRepository;
-    private readonly IMediator _mediator;
-    
-    public async Task<Guid> Handle(RegisterVehicleCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Validate plate number uniqueness
-        var existing = await _vehicleRepository.GetByPlateNumberAsync(request.PlateNumber);
-        if (existing != null)
-            throw new BusinessException("Plate number already registered");
-        
-        // 2. Create vehicle entity
-        var vehicle = new Vehicle
-        {
-            Id = Guid.NewGuid(),
-            ProviderId = request.ProviderId,
-            PlateNumber = request.PlateNumber,
-            VehicleTypeCode = request.VehicleTypeCode,
-            EngineTypeCode = request.EngineTypeCode,
-            SeatCount = request.SeatCount,
-            Brand = request.Brand,
-            Model = request.Model,
-            Tags = request.Tags.ToArray(),
-            Status = VehicleStatus.UnderReview
-        };
-        
-        // 3. Create insurance record
-        var insurance = new VehicleInsurance
-        {
-            Id = Guid.NewGuid(),
-            VehicleId = vehicle.Id,
-            InsuranceType = request.Insurance.InsuranceType,
-            InsuranceCompanyName = request.Insurance.CompanyName,
-            PolicyNumber = request.Insurance.PolicyNumber,
-            InsuredAmount = request.Insurance.InsuredAmount,
-            CoverageStartDate = request.Insurance.CoverageStartDate,
-            CoverageEndDate = request.Insurance.CoverageEndDate,
-            CertificateFileUrl = request.Insurance.CertificateFileUrl,
-            Status = InsuranceStatus.PendingVerification
-        };
-        
-        // 4. Validate insurance expiry
-        if (insurance.CoverageEndDate < DateTime.UtcNow.AddDays(30))
-        {
-            throw new BusinessException("Insurance must be valid for at least 30 days");
-        }
-        
-        // 5. Save to database
-        await _vehicleRepository.AddAsync(vehicle);
-        await _vehicleRepository.AddInsuranceAsync(insurance);
-        
-        // 6. Publish event
-        await _mediator.Publish(new VehicleRegisteredEvent
-        {
-            VehicleId = vehicle.Id,
-            ProviderId = vehicle.ProviderId,
-            PlateNumber = vehicle.PlateNumber
-        });
-        
-        return vehicle.Id;
-    }
-}
-```
+- **Published, real, and wired downstream:** `BusinessRegisteredEvent` (→ Finance module wallet creation), `ProviderRegisteredEvent`, `ProviderVerifiedEvent`, `VehicleRegisteredEvent`, `UserAccountCreatedEvent`, `AccountOTPGeneratedEvent`/`AccountEmailOTPGeneratedEvent`/`PasswordResetOTPGeneratedEvent` (→ Notifications module for OTP delivery)
+- **Published but effectively orphaned:** `InsuranceExpiredEvent` — raised by `Vehicle.ExpireInsurance()`, but that method is never called by any scheduled process (see Workflow 9), so the event essentially never fires in production
+- **Defined but never raised at all:** `TrustScoreUpdatedEvent` — only ever constructed inside `Provider.UpdateTrustScore()`, which itself has zero production callers
 
 ---
 
-### 4. Trust Score Calculation
+## APIs (controllers, actual routes)
 
-```csharp
-// Service Interface
-public interface ITrustScoreCalculator
-{
-    Task<int> CalculateTrustScoreAsync(Guid providerId);
-}
-
-// Implementation
-public class TrustScoreCalculator : ITrustScoreCalculator
-{
-    private readonly IProviderRepository _providerRepository;
-    private readonly IContractRepository _contractRepository;
-    
-    public async Task<int> CalculateTrustScoreAsync(Guid providerId)
-    {
-        // BR-025: Simple Trust Score Calculation
-        // Formula: Base (50) + (Completion Rate × 20) + (On-Time Rate × 20) - (No-Show Rate × 30) + Rejection Penalty
-        
-        // 1. Gather metrics
-        var metrics = await GatherMetricsAsync(providerId);
-        
-        // 2. Base score (50 for verified providers, 0 for unverified)
-        var provider = await _providerRepository.GetByIdAsync(providerId);
-        double baseScore = provider.Status == ProviderStatus.Verified ? 50.0 : 0.0;
-        
-        // 3. Calculate component rates (0-1 range)
-        double completionRate = metrics.TotalContractsAwarded > 0 
-            ? (double)metrics.ContractsCompleted / metrics.TotalContractsAwarded 
-            : 0.0;
-        
-        double onTimeRate = metrics.TotalDeliveries > 0 
-            ? (double)metrics.OnTimeDeliveries / metrics.TotalDeliveries 
-            : 0.0;
-        
-        double noShowRate = metrics.TotalScheduled > 0 
-            ? (double)metrics.NoShowCount / metrics.TotalScheduled 
-            : 0.0;
-        
-        // 4. Apply BR-025 formula
-        double trustScore = baseScore
-            + (completionRate * 20)
-            + (onTimeRate * 20)
-            - (noShowRate * 30);
-        
-        // 5. Apply rejection penalty (BR-024) if applicable
-        // Penalty = -5 points per rejected bid
-        if (metrics.RejectionCount > 0)
-        {
-            trustScore -= (metrics.RejectionCount * 5);
-        }
-        
-        // 6. Clamp to 0-100
-        trustScore = Math.Max(0, Math.Min(100, trustScore));
-        
-        return (int)Math.Round(trustScore);
-    }
-    
-    private async Task<ProviderMetrics> GatherMetricsAsync(Guid providerId)
-    {
-        // Gather metrics from various sources
-        // This would query Contracts, Delivery, and Marketplace modules
-        return new ProviderMetrics
-        {
-            TotalContractsAwarded = await GetTotalContractsAwardedAsync(providerId),
-            ContractsCompleted = await GetCompletedContractsAsync(providerId),
-            TotalDeliveries = await GetTotalDeliveriesAsync(providerId),
-            OnTimeDeliveries = await GetOnTimeDeliveriesAsync(providerId),
-            TotalScheduled = await GetTotalScheduledDeliveriesAsync(providerId),
-            NoShowCount = await GetNoShowCountAsync(providerId),
-            RejectionCount = await GetRejectionCountAsync(providerId)
-        };
-    }
-}
-
-// Command
-public class RecalculateTrustScoreCommand : IRequest<int>
-{
-    public Guid ProviderId { get; set; }
-    public string Reason { get; set; }
-}
-
-// Handler
-public class RecalculateTrustScoreCommandHandler : IRequestHandler<RecalculateTrustScoreCommand, int>
-{
-    private readonly ITrustScoreCalculator _calculator;
-    private readonly IProviderRepository _providerRepository;
-    private readonly IMediator _mediator;
-    
-    public async Task<int> Handle(RecalculateTrustScoreCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Get current score
-        var provider = await _providerRepository.GetByIdAsync(request.ProviderId);
-        var oldScore = provider.TrustScore;
-        
-        // 2. Calculate new score
-        var newScore = await _calculator.CalculateTrustScoreAsync(request.ProviderId);
-        
-        // 3. Store history
-        var history = new ProviderTrustScoreHistory
-        {
-            ProviderId = request.ProviderId,
-            OldScore = oldScore,
-            NewScore = newScore,
-            Reason = request.Reason,
-            CalculationSnapshot = await GetCalculationSnapshotAsync(request.ProviderId),
-            CreatedAt = DateTime.UtcNow
-        };
-        
-        await _providerRepository.AddTrustScoreHistoryAsync(history);
-        
-        // 4. Update provider
-        provider.TrustScore = newScore;
-        await _providerRepository.UpdateAsync(provider);
-        
-        // 5. Check for tier change
-        var newTier = DetermineTier(newScore);
-        var currentTier = await _providerRepository.GetCurrentTierAsync(request.ProviderId);
-        
-        if (newTier != currentTier.TierCode)
-        {
-            // Update tier assignment
-            var tierAssignment = new ProviderTierAssignment
-            {
-                ProviderId = request.ProviderId,
-                TierCode = newTier,
-                ComputedScore = newScore,
-                AssignedAt = DateTime.UtcNow
-            };
-            
-            await _providerRepository.AddTierAssignmentAsync(tierAssignment);
-            
-            // Publish tier changed event
-            await _mediator.Publish(new TierChangedEvent
-            {
-                ProviderId = request.ProviderId,
-                OldTier = currentTier.TierCode,
-                NewTier = newTier,
-                TrustScore = newScore
-            });
-        }
-        
-        // 6. Publish trust score updated event
-        await _mediator.Publish(new TrustScoreUpdatedEvent
-        {
-            ProviderId = request.ProviderId,
-            OldScore = oldScore,
-            NewScore = newScore
-        });
-        
-        return newScore;
-    }
-    
-    private async Task<string> DetermineTierAsync(Guid providerId, int trustScore)
-    {
-        // BR-042: Hybrid Tier Determination
-        // Provider tier requires BOTH trust score AND active fleet size
-        
-        // Get active vehicle count for this provider
-        var activeVehicles = await GetActiveVehicleCountAsync(providerId);
-        
-        // Tier requirements (BOTH must be met)
-        // PLATINUM: Trust Score ≥ 85 AND Active Vehicles ≥ 30
-        // GOLD: Trust Score ≥ 70 AND Active Vehicles ≥ 15
-        // SILVER: Trust Score ≥ 50 AND Active Vehicles ≥ 5
-        // BRONZE: Default (any score, any vehicles)
-        
-        if (trustScore >= 85 && activeVehicles >= 30)
-            return "PLATINUM";
-        
-        if (trustScore >= 70 && activeVehicles >= 15)
-            return "GOLD";
-        
-        if (trustScore >= 50 && activeVehicles >= 5)
-            return "SILVER";
-        
-        return "BRONZE";
-    }
-    
-    private async Task<int> GetActiveVehicleCountAsync(Guid providerId)
-    {
-        // Count vehicles in ACTIVE contracts only
-        var query = @"
-            SELECT COUNT(DISTINCT va.vehicle_id)
-            FROM contracts_schema.vehicle_assignments va
-            JOIN contracts_schema.contracts c ON va.contract_id = c.id
-            WHERE c.provider_id = @ProviderId 
-              AND c.status = 'ACTIVE'
-              AND va.status = 'ACTIVE'";
-        
-        return await _dbConnection.ExecuteScalarAsync<int>(query, new { ProviderId = providerId });
-    }
-}
-```
+| Controller | Base route | Key endpoints |
+|---|---|---|
+| `BusinessController` | `api/identity/businesses` | `GET /me`, `PUT/{id}`, `POST /{id}/documents`, `GET /{id}/documents`, `POST /{id}/complete-onboarding`, `PATCH /{id}/onboarding-step`, `PATCH /{id}/preferences`, `PATCH /{id}/contact-person`, `GET /admin/list`, `GET /admin/{id}`, `PUT /admin/{id}/verification/status`, `POST /admin` (create-on-behalf), full `me/bank-accounts/*` dual-OTP change flow |
+| `ProviderController` | `api/identity/providers` | Same shape as `BusinessController` plus `GET /me/dashboard-stats`, `GET /me/dashboard-analytics`, `GET /me/recommended-rfqs`; admin list/detail/verification-status/create; dual-OTP bank-account flow |
+| `VehicleController` | `api/identity/vehicles` | `POST`, `GET /{id}`, `GET /{id}/status-history`, `GET /{id}/assignments`, `GET /provider/{providerId}`, `PUT /{id}`, `POST /{id}/documents`, `POST /{id}/insurance`, `POST /insurance/{insuranceId}/verify`, `PUT /insurance/{insuranceId}`, `POST /{id}/photos`, `PUT /{id}/rental-rate`, `POST /{id}/enable-direct-rental`, `POST /{id}/disable-direct-rental`, admin list/detail/verification-status/create/direct-rental-settings |
+| `ComplianceController` | `api/identity/compliance` | **One endpoint:** `PUT /documents/{documentId}/status` (admin-only, `UpdateDocumentVerificationCommand`) |
+| `UserAccountController` | `api/identity/users` | `POST`, `GET /{id}`, `POST /{id}/devices`, `POST /{id}/sessions`, `POST /{id}/suspend`, `POST /{id}/block`, `POST /{id}/reactivate` |
+| `DashboardController` | `api/identity/dashboard` | `GET /admin-stats`, `GET /successful-contract-trend`, `GET /business-stats`, `GET /provider-stats`, `GET /stats` |
 
 ---
 
-### 5. Provider Validation Service (BR-004)
+## Known Gaps (verified by code search, zero call sites unless noted)
 
-```csharp
-// Service Interface
-public interface IProviderValidationService
-{
-    Task<ProviderEligibilityResult> ValidateProviderEligibilityAsync(Guid providerId, Guid serviceTypeId);
-    Task<bool> HasAvailableVehiclesAsync(Guid providerId, Guid serviceTypeId, int requiredCount);
-    Task<bool> HasValidInsuranceAsync(Guid providerId);
-}
-
-// Implementation
-public class ProviderValidationService : IProviderValidationService
-{
-    private readonly IProviderRepository _providerRepository;
-    private readonly IVehicleRepository _vehicleRepository;
-    
-    public async Task<ProviderEligibilityResult> ValidateProviderEligibilityAsync(
-        Guid providerId, 
-        Guid serviceTypeId)
-    {
-        var provider = await _providerRepository.GetByIdAsync(providerId);
-        var result = new ProviderEligibilityResult { IsEligible = true };
-        
-        // 1. Check provider status
-        if (provider.Status != ProviderStatus.Verified)
-        {
-            result.IsEligible = false;
-            result.Reasons.Add("Provider not verified");
-        }
-        
-        // 2. Check vehicle availability
-        var hasVehicles = await HasAvailableVehiclesAsync(providerId, serviceTypeId, 1);
-        if (!hasVehicles)
-        {
-            result.IsEligible = false;
-            result.Reasons.Add("No available vehicles matching service type");
-        }
-        
-        // 3. Check insurance compliance
-        var hasInsurance = await HasValidInsuranceAsync(providerId);
-        if (!hasInsurance)
-        {
-            result.IsEligible = false;
-            result.Reasons.Add("No vehicles with valid insurance");
-        }
-        
-        // 4. Check trust score minimum
-        if (provider.TrustScore < 0) // MVP: No minimum trust score, but check for negative
-        {
-            result.IsEligible = false;
-            result.Reasons.Add("Trust score below platform minimum");
-        }
-        
-        return result;
-    }
-    
-    public async Task<bool> HasAvailableVehiclesAsync(
-        Guid providerId, 
-        Guid serviceTypeId, 
-        int requiredCount)
-    {
-        var query = @"
-            SELECT COUNT(DISTINCT v.id)
-            FROM identity.vehicles v
-            WHERE v.provider_id = @ProviderId
-              AND v.status = 'AVAILABLE'
-              AND v.service_type_id = @ServiceTypeId
-              AND EXISTS (
-                  SELECT 1 FROM identity.vehicle_insurance vi
-                  WHERE vi.vehicle_id = v.id
-                    AND vi.expiry_date > NOW()
-                    AND vi.status = 'ACTIVE'
-              )";
-        
-        var count = await _dbConnection.ExecuteScalarAsync<int>(query, new 
-        { 
-            ProviderId = providerId, 
-            ServiceTypeId = serviceTypeId 
-        });
-        
-        return count >= requiredCount;
-    }
-    
-    public async Task<bool> HasValidInsuranceAsync(Guid providerId)
-    {
-        var query = @"
-            SELECT EXISTS (
-                SELECT 1 FROM identity.vehicles v
-                JOIN identity.vehicle_insurance vi ON vi.vehicle_id = v.id
-                WHERE v.provider_id = @ProviderId
-                  AND vi.expiry_date > NOW()
-                  AND vi.status = 'ACTIVE'
-            )";
-        
-        return await _dbConnection.ExecuteScalarAsync<bool>(query, new { ProviderId = providerId });
-    }
-}
-
-// Result DTO
-public class ProviderEligibilityResult
-{
-    public bool IsEligible { get; set; }
-    public List<string> Reasons { get; set; } = new();
-}
-```
+1. **Trust score is fully built but frozen in production.** `TrustScoreCalculator`/`Provider.UpdateTrustScore()` have zero call sites outside unit tests — every provider's score stays at its registration default (50) until an admin edits it directly, and there's no admin endpoint to do even that (only tier assignment, which doesn't touch the score).
+2. **Two competing tier-threshold schemes coexist, neither wired to production.** Hardcoded `TrustScore.CalculateTier()` (used only by admin list-filtering) vs. seeded `ProviderTierRule`/`TierCalculationService` (a "hybrid" model with completed-contract minimums) disagree on where the Bronze/Silver/Gold/Platinum cutoffs are, and neither is invoked when trust score actually changes (because nothing changes it).
+3. **`VerificationRequest`/`ComplianceCheckLog` and their Submit/Approve/Reject commands are entirely dead code** — zero controller call sites. The real workflow is document-level (`ComplianceController`) plus entity-level (`Business`/`Provider`/`Vehicle` admin verification endpoints), logged to `VerificationEventLog` instead.
+4. **`InsuranceMonitorService` is never invoked by any scheduled job.** No `BackgroundService` calls `ProcessExpiredPoliciesAsync`/`ProcessExpiringPoliciesAsync`; insurance expiry is enforced only reactively, at bid/award-eligibility check time (`ProviderValidationService`), never proactively.
+5. **`InsuranceExpiredEvent` has no registered handler**, and the vehicle-blocking logic inside `ProcessExpiredPoliciesAsync` is commented out even if the service were ever called.
+6. **No business risk score exists anywhere.** `RiskEvent`/`AccountFlag` are free-text categorized records, not a scored 0–100 model; there is no admin UI for a business risk score because there's no data to show.
+7. **No fraud-detection rule engine and no dispute engine exist anywhere** in this module or any other — `Disputed`/`OnHold` exist only as bare `ContractStatus` string values in the Contracts module with no workflow behind them.
+8. **Admin `TiersPage.tsx` tier/commission-rate edit dialog is a stub** — reads real master-data tiers, but the update mutation is `toast.info('Update functionality coming soon')`; changing thresholds or commission rates requires a direct database/seed change today.
+9. **Trust score is visible to the provider themselves**, contradicting the "admin/business-facing only" assumption in the original epic-02 Story 2.6 and epic-12 Story 12.2 — the provider mobile app's dashboard and profile screens render the provider's own `TrustScore`/tier directly.
+10. **Business mobile app deserializes but never renders `RfqBid.trustScore`/`providerTier`** — the plumbing exists, the UI doesn't use it yet (half-migrated feature).
+11. **Web admin `admin-users-service.ts`'s `getUserDetail()` hardcodes `trustScore: 0` / `tier: 'SILVER'`** for both business and provider detail views — the display component supports a real score, but this specific screen doesn't fetch one.
 
 ---
 
-### 6. Initial Tier Assignment Helper (BR-041)
+## Integration Points
 
-```csharp
-// Helper method for determining initial provider tier
-private string DetermineInitialTier(Provider provider, RegisterProviderCommand request)
-{
-    // BR-041: Initial tier assignment logic
-    
-    // Unverified providers always start at BRONZE
-    if (provider.Status != ProviderStatus.Verified)
-    {
-        return "BRONZE";
-    }
-    
-    // Calculate profile completion
-    var profileCompletion = CalculateProfileCompletion(request);
-    
-    // Verified + 100% profile completion = SILVER (trust score = 50)
-    if (profileCompletion >= 100)
-    {
-        return "SILVER";
-    }
-    
-    // Verified but incomplete profile = BRONZE
-    return "BRONZE";
-}
-
-private int CalculateProfileCompletion(RegisterProviderCommand request)
-{
-    var requiredFields = new List<bool>
-    {
-        !string.IsNullOrEmpty(request.BusinessLicense),
-        !string.IsNullOrEmpty(request.TinCertificate),
-        !string.IsNullOrEmpty(request.BankAccount),
-        request.PhoneVerified,
-        request.EmailVerified,
-        request.HasActiveVehicles,
-        request.InsuranceDocuments?.Any() == true
-    };
-    
-    var completedCount = requiredFields.Count(f => f);
-    return (completedCount * 100) / requiredFields.Count;
-}
-```
-
----
-
-### 7. Insurance Expiry Monitoring
-
-```csharp
-// Background Service
-public class InsuranceMonitorService : BackgroundService
-{
-    private readonly IServiceProvider _serviceProvider;
-    private readonly ILogger<InsuranceMonitorService> _logger;
-    
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            try
-            {
-                using var scope = _serviceProvider.CreateScope();
-                var monitor = scope.ServiceProvider.GetRequiredService<IInsuranceMonitor>();
-                
-                await monitor.CheckExpiringInsuranceAsync();
-                
-                // Run daily at 9 AM
-                await Task.Delay(TimeSpan.FromHours(24), stoppingToken);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Error in insurance monitoring");
-            }
-        }
-    }
-}
-
-// Monitor Implementation
-public class InsuranceMonitor : IInsuranceMonitor
-{
-    private readonly IVehicleRepository _vehicleRepository;
-    private readonly IMediator _mediator;
-    
-    public async Task CheckExpiringInsuranceAsync()
-    {
-        var today = DateTime.UtcNow.Date;
-        
-        // 1. Check for expired insurance
-        var expired = await _vehicleRepository.GetVehiclesWithExpiredInsuranceAsync(today);
-        foreach (var vehicle in expired)
-        {
-            // Block vehicle
-            vehicle.Status = VehicleStatus.Blocked;
-            await _vehicleRepository.UpdateAsync(vehicle);
-            
-            // Publish event
-            await _mediator.Publish(new InsuranceExpiredEvent
-            {
-                VehicleId = vehicle.Id,
-                ProviderId = vehicle.ProviderId,
-                PlateNumber = vehicle.PlateNumber
-            });
-        }
-        
-        // 2. Check for insurance expiring in 30 days
-        var expiringSoon = await _vehicleRepository.GetVehiclesWithExpiringInsuranceAsync(
-            today.AddDays(30)
-        );
-        
-        foreach (var vehicle in expiringSoon)
-        {
-            // Send warning notification
-            await _mediator.Publish(new InsuranceExpiringWarningEvent
-            {
-                VehicleId = vehicle.Id,
-                ProviderId = vehicle.ProviderId,
-                ExpiryDate = vehicle.Insurance.CoverageEndDate,
-                DaysRemaining = (vehicle.Insurance.CoverageEndDate - today).Days
-            });
-        }
-    }
-}
-```
-
----
-
-## 📡 Events Published
-
-### BusinessRegisteredEvent
-```csharp
-public class BusinessRegisteredEvent : INotification
-{
-    public Guid BusinessId { get; set; }
-    public string BusinessName { get; set; }
-    public string Email { get; set; }
-}
-```
-
-### ProviderVerifiedEvent
-```csharp
-public class ProviderVerifiedEvent : INotification
-{
-    public Guid ProviderId { get; set; }
-    public string ProviderName { get; set; }
-    public string TierCode { get; set; }
-}
-```
-
-### TrustScoreUpdatedEvent
-```csharp
-public class TrustScoreUpdatedEvent : INotification
-{
-    public Guid ProviderId { get; set; }
-    public int OldScore { get; set; }
-    public int NewScore { get; set; }
-}
-```
-
-### InsuranceExpiredEvent
-```csharp
-public class InsuranceExpiredEvent : INotification
-{
-    public Guid VehicleId { get; set; }
-    public Guid ProviderId { get; set; }
-    public string PlateNumber { get; set; }
-}
-```
-
----
-
-## 📡 Events Consumed
-
-### ContractCompletedEvent
-```csharp
-// From Contracts Module
-public class ContractCompletedEventHandler : INotificationHandler<ContractCompletedEvent>
-{
-    private readonly IMediator _mediator;
-    
-    public async Task Handle(ContractCompletedEvent notification, CancellationToken cancellationToken)
-    {
-        // Recalculate trust score
-        await _mediator.Send(new RecalculateTrustScoreCommand
-        {
-            ProviderId = notification.ProviderId,
-            Reason = "CONTRACT_COMPLETED"
-        });
-    }
-}
-```
-
----
-
-## ✅ Business Rules
-
-### Trust Score & Tier System (BR-025, BR-040, BR-041, BR-042)
-
-1. **Trust Score Formula (BR-025):**
-   - Base Score: 50 (verified providers), 0 (unverified)
-   - Formula: `Base (50) + (Completion Rate × 20) + (On-Time Rate × 20) - (No-Show Rate × 30) + Rejection Penalty`
-   - Range: 0-100 (capped)
-   - Recalculation triggers: Contract completion, delivery confirmation, no-show incident, bid rejection
-
-2. **Initial Provider Tier (BR-041):**
-   - Verified + 100% profile completion: **SILVER** (trust score = 50)
-   - Unverified or incomplete profile: **BRONZE** (trust score = 0)
-   - **Profile Completion System (Configuration-Driven):**
-     - Requirements stored in `masterdata.profile_requirements` table
-     - Three requirement types: DOCUMENT, ATTRIBUTE, VERIFICATION
-     - Default Provider Requirements (7 total):
-       * DOCUMENT: Business License, TIN Certificate
-       * ATTRIBUTE: Bank Account Details, ≥1 Approved Vehicle, Valid Insurance (30+ days)
-       * VERIFICATION: Phone Verified, Email Verified
-     - Default Business Requirements (8 total):
-       * DOCUMENT: Business Registration, TIN Certificate
-       * ATTRIBUTE: Contact Person (Name, Email, Phone), Billing Address
-       * VERIFICATION: Email Verified, Phone Verified
-     - Completion percentage = (completed mandatory requirements / total mandatory requirements) × 100
-     - Service: `IProfileCompletionService.CalculateProviderCompletionAsync(providerId)`
-     - Returns: `ProfileCompletionResult` with percentage, missing fields list
-     - **Configurable:** Admins can add/remove requirements without code changes
-
-3. **Hybrid Tier Determination (BR-042):**
-   - PLATINUM: Trust Score ≥ 85 **AND** Active Vehicles ≥ 30
-   - GOLD: Trust Score ≥ 70 **AND** Active Vehicles ≥ 15
-   - SILVER: Trust Score ≥ 50 **AND** Active Vehicles ≥ 5
-   - BRONZE: Default (any score, any vehicles)
-   - Active vehicles = vehicles assigned to ACTIVE contracts
-
-4. **Tier Commission Rates (BR-040):**
-   - BRONZE: 10%
-   - SILVER: 8%
-   - GOLD: 6%
-   - PLATINUM: 5%
-
-### Compliance & Validation
-
-5. **TIN Validation:** Must be unique, 10 digits
-6. **Insurance Mandatory:** Zero tolerance policy - vehicles without valid insurance cannot be assigned
-7. **Insurance Expiry:** 30-day minimum validity required
-8. **Provider Eligibility (BR-004):** Must be verified, have available vehicles, valid insurance, trust score ≥ 0
-9. **Photo Requirements:** 5 angles for all vehicles
-10. **Document Verification:** Manual review by compliance officer
-11. **Account Flags:** Auto-applied for violations
-12. **Vehicle Exclusivity:** A vehicle cannot be assigned to multiple active contracts simultaneously
-
----
-
-**Next Module:** [Marketplace_Module.md](./Marketplace_Module.md)
+- **Finance module:** consumes `BusinessRegisteredEvent` to create a `MAIN` wallet; reads `Provider.TrustScore`/tier (frozen values, in practice) and MasterData commission rates at contract-creation time.
+- **Marketplace module:** reads `Provider.TrustScore`/tier live at bid submission (snapshotted into `RFQBidSnapshot`); `IProviderValidationService`/`ProviderFleetCapacityService` gate bid/award/Direct-Rental-accept eligibility on verification status, insurance validity, and fleet-segment capacity; `Vehicle.IsAvailableForDirectRental`/`EnableDirectRental()`/`DisableDirectRental()` drive the Direct Rental catalog.
+- **Contracts module:** resolves commission rate from the provider's current `ProviderTierAssignment` via MasterData at contract creation (both RFQ and Direct Rental paths); reads `Vehicle`/`Provider` status for assignment/eligibility checks; calls `Vehicle.AssignToContract()`/`ReleaseFromContract()`/`SetStatus()` for vehicle lifecycle bookkeeping.
+- **MasterData module:** `ProviderTier`/`ProviderTierRule`/`BusinessTier` master data (commission rates, threshold schemes), `masterdata.profile_requirements` (drives `ProfileCompletionService`), `DocumentType` lookups referenced by every document entity.
+- **Notifications module:** consumes OTP-generation events (`AccountOTPGeneratedEvent`, etc.) for email/SMS delivery; would consume `InsuranceExpiredEvent`/`TrustScoreUpdatedEvent` if either were ever actually raised in a live path.
+- **Auth (Keycloak):** `UserAccount.KeycloakUserId` is the join key; `Modules/Auth/` inside the same monolith handles the OAuth flow itself, out of this module's scope.

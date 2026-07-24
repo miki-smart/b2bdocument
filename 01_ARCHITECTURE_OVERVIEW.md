@@ -1,1160 +1,191 @@
-# Movello MVP - Architecture Overview
+# Movello — Architecture Overview
 
-**Version:** 1.0 MVP  
-**Date:** November 26, 2025  
-**Architecture Pattern:** Modular Monolith with BFF  
-**Status:** Production-Ready Specification
-
----
-
-## 📋 Table of Contents
-
-1. [Architecture Pattern](#architecture-pattern)
-2. [System Components](#system-components)
-3. [Module Structure](#module-structure)
-4. [Communication Patterns](#communication-patterns)
-5. [Data Architecture](#data-architecture)
-6. [Security Architecture](#security-architecture)
-7. [Deployment Architecture](#deployment-architecture)
-8. [Scalability Strategy](#scalability-strategy)
+**Version:** 2.0 (rewritten against running code)
+**Last verified against code:** 2026-07-23
+**Original version:** 1.0, November 26, 2025 — described a YARP-based BFF/API-gateway layer and an Angular 19 frontend as if they were current. Neither was ever built; the real stack is documented below.
+**Status:** Section 1 describes what is actually running today (verified against code). Section 2 preserves legitimate forward-looking extraction ideas, clearly separated and labeled as **not built**.
+**Authoritative companion documents (do not duplicate — cross-reference):**
+- `architecture/modular-monolith-architecture.md` — module-boundary rules, event patterns, the real "Migration Path to Microservices" methodology
+- `architecture/module-layout-convention.md` — the standard `Domain/Application/Infrastructure` folder shape every module should follow
+- `architecture/auth-service-microservice-spec.md` — full detail on the Auth module, Keycloak integration, and the in-process BFF middleware (only summarized here)
+- `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` — the full Contracts-module state machine (only summarized here)
+- `project-docs/18_Implementation_Coverage_Audit.md` — the audit this rewrite is grounded in
 
 ---
 
-## 🏗️ Architecture Pattern
+## Table of Contents
 
-### Modular Monolith
-
-**Definition:** A single deployable application organized into independent, loosely-coupled modules with clear boundaries and responsibilities.
-
-**Why Modular Monolith for MVP?**
-
-| Aspect | Microservices | Modular Monolith | Decision |
-|--------|---------------|------------------|----------|
-| **Development Speed** | Slower (network, contracts) | 30-50% faster | ✅ Monolith |
-| **Operational Complexity** | High (orchestration, monitoring) | Low (single deployment) | ✅ Monolith |
-| **Debugging** | Complex (distributed tracing) | Simple (single process) | ✅ Monolith |
-| **ACID Transactions** | Difficult (distributed) | Native (single DB) | ✅ Monolith |
-| **Team Size** | Requires 10+ developers | Works with 3-5 developers | ✅ Monolith |
-| **Migration Path** | N/A | Clear extraction strategy | ✅ Monolith |
-
-**Migration Strategy:** Each module is designed with clear boundaries, making future extraction to microservices straightforward when scale demands it.
+1. [Section 1: Current Architecture](#section-1-current-architecture)
+   1.1 [Deployment Shape](#11-deployment-shape)
+   1.2 [System Components](#12-system-components)
+   1.3 [Module Structure](#13-module-structure)
+   1.4 [Communication Patterns](#14-communication-patterns)
+   1.5 [Data Architecture](#15-data-architecture)
+   1.6 [Security Architecture](#16-security-architecture)
+   1.7 [Deployment Architecture](#17-deployment-architecture)
+   1.8 [Scalability](#18-scalability)
+2. [Section 2: Proposed Future Architecture — Not Built](#section-2-proposed-future-architecture--not-built)
 
 ---
 
-## 🎯 System Components
+## Section 1: Current Architecture
 
-### High-Level Architecture
+### 1.1 Deployment Shape
+
+There is **one** backend deployable: `Marketplace.API`. Confirmed via the backend source tree — the only two `.csproj` files under `backend/` are `src/Marketplace.API/Marketplace.API.csproj` and `tests/Marketplace.Tests/Marketplace.Tests.csproj`. One `Program.cs`, one `docker-compose` service (`marketplace-api`), one container image.
+
+There is **no separate BFF service, no API gateway, no YARP**. The client surfaces (React web, two Flutter apps) call `Marketplace.API` directly over HTTPS. The only thing resembling a "BFF" is `Infrastructure/Middleware/BffTokenRefreshMiddleware.cs`, which runs **in-process**, inside the same monolith — see §1.6.
+
+**Why modular monolith, not microservices:** faster iteration, native ACID transactions across what would otherwise be separate services, one process to debug/deploy/monitor, and a clean extraction path if/when a specific module needs to scale independently. Full rationale and the "when to extract" decision criteria live in `architecture/modular-monolith-architecture.md` — not repeated here.
+
+### 1.2 System Components
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         PRESENTATION LAYER                      │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────────────────┐       ┌──────────────────────┐      │
-│  │  Business Portal     │       │  Provider Portal     │      │
-│  │  (Angular 19)        │       │  (Angular 19)        │      │
-│  │  - RFQ Management    │       │  - Marketplace       │      │
-│  │  - Bid Review        │       │  - Bid Submission    │      │
-│  │  - Contract Tracking │       │  - Contract Tracking │      │
-│  │  - Wallet            │       │  - Wallet            │      │
-│  └──────────┬───────────┘       └──────────┬───────────┘      │
-│             │                                │                  │
-│             └────────────────┬───────────────┘                  │
-│                              │                                  │
-└──────────────────────────────┼──────────────────────────────────┘
-                               │
-                               │ HTTPS/WSS
-                               │
-┌──────────────────────────────▼──────────────────────────────────┐
-│                         BFF LAYER (YARP)                        │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │ API Gateway  │  │ Auth Proxy   │  │ WebSocket    │         │
-│  │ (Routing)    │  │ (Keycloak)   │  │ (SignalR)    │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                               │ Internal HTTP
-                               │
-┌──────────────────────────────▼──────────────────────────────────┐
-│                    APPLICATION LAYER (.NET 9)                   │
-├─────────────────────────────────────────────────────────────────┤
-│                    Marketplace.API (Modular Monolith)           │
-│                                                                 │
-│  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐   │
-│  │   Identity &   │  │  Marketplace   │  │   Contracts    │   │
-│  │   Compliance   │  │    Module      │  │    Module      │   │
-│  │    Module      │  │                │  │                │   │
-│  │                │  │  - RFQ         │  │  - Lifecycle   │   │
-│  │  - Users       │  │  - Bidding     │  │  - Amendments  │   │
-│  │  - KYC/KYB     │  │  - Awards      │  │  - Penalties   │   │
-│  │  - Vehicles    │  │                │  │                │   │
-│  │  - Trust Score │  │                │  │                │   │
-│  └────────────────┘  └────────────────┘  └────────────────┘   │
-│                                                                 │
-│  ┌────────────────┐  ┌────────────────┐                        │
-│  │    Finance     │  │    Delivery    │                        │
-│  │    Module      │  │    Module      │                        │
-│  │                │  │                │                        │
-│  │  - Wallets     │  │  - OTP         │                        │
-│  │  - Escrow      │  │  - Handover    │                        │
-│  │  - Settlement  │  │  - Returns     │                        │
-│  │  - Commission  │  │                │                        │
-│  └────────────────┘  └────────────────┘                        │
-│                                                                 │
-├─────────────────────────────────────────────────────────────────┤
-│              Shared Kernel (Common, Events, Security)           │
-├─────────────────────────────────────────────────────────────────┤
-│                    MediatR (Event Bus)                          │
-└──────────────────────────────┬──────────────────────────────────┘
-                               │
-                               │
-┌──────────────────────────────▼──────────────────────────────────┐
-│                         DATA LAYER                              │
-├─────────────────────────────────────────────────────────────────┤
-│                   PostgreSQL 16 (Single Database)               │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │ masterdata   │  │  identity    │  │ marketplace  │         │
-│  │   schema     │  │   schema     │  │   schema     │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
-│                                                                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │  contracts   │  │   wallet     │  │  delivery    │         │
-│  │   schema     │  │   schema     │  │   schema     │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
-└─────────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────────┐
-│                    INFRASTRUCTURE SERVICES                      │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │  Keycloak    │  │    Redis     │  │    MinIO     │         │
-│  │  (Auth)      │  │   (Cache)    │  │  (Storage)   │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
-└─────────────────────────────────────────────────────────────────┘
+│                      PRESENTATION LAYER                          │
+│                                                                    │
+│  React 18.3 + Vite 6 SPA              Flutter apps               │
+│  (business/provider/admin portals,    business_app (6 nav tabs,  │
+│   role-based routing, one build)       incl. Direct Rental)      │
+│  TanStack Query · Zustand · shadcn/ui  provider_app (7 nav tabs,  │
+│                                         incl. Direct Rental)      │
+│                                        flutter_riverpod · go_router│
+└───────────────────────────┬───────────────────────────────────────┘
+                            │ HTTPS — direct calls, no gateway hop
+┌───────────────────────────▼───────────────────────────────────────┐
+│                 Marketplace.API (.NET 9) — single process         │
+│                                                                    │
+│  Controllers/            — web-facing (AuthController, etc.)      │
+│  Controllers/Mobile/      — 19 controllers, 100+ endpoints,        │
+│                             dedicated Mobile API surface           │
+│  Modules/                                                          │
+│   ├─ Auth          (Keycloak integration, no local session store) │
+│   ├─ Identity       (Business/Provider/Vehicle, KYC/KYB, trust)    │
+│   ├─ Marketplace    (RFQ, bidding, split awards, Direct Rental)    │
+│   ├─ Contracts      (18-state lifecycle, OTP signing, extension)  │
+│   ├─ Finance        (wallets, escrow, settlement, Chapa gateway)   │
+│   ├─ Delivery       (handover OTP, return OTP, inspection)         │
+│   ├─ MasterData     (versioned policy/rules engine, lookups)       │
+│   └─ Notifications  (multi-channel admin-configurable, SignalR)    │
+│                                                                    │
+│  MediatR (in-process pub/sub, dominant) · SignalR NotificationHub  │
+│  BffTokenRefreshMiddleware (in-process, web-cookie flow only)      │
+└───────────────────────────┬───────────────────────────────────────┘
+                            │
+       ┌────────────────────┼─────────────────┬────────────────┐
+       ▼                    ▼                  ▼                ▼
+  PostgreSQL 16         Keycloak            Redis            MinIO
+ (EF Core 9 + Npgsql,  (direct-grant       (cache)      (S3-compatible
+  schema-per-module     auth, admin API                  object storage)
+  convention)           session mgmt)
+                            │
+                       RabbitMQ (provisioned: package + docker-compose
+                       service + health check exist; per the coverage
+                       audit, not the operative event bus in practice —
+                       see §1.4)
 ```
+
+### 1.3 Module Structure
+
+There are **8 modules**, confirmed directly against `backend/src/Marketplace.API/Modules/`: **Auth, Contracts, Delivery, Finance, Identity, Marketplace, MasterData, Notifications.** Any doc describing 5 modules (Identity, Marketplace, Contracts, Finance, Delivery only) or 7 modules (with a `RiskAndTrust` module that doesn't exist as its own module — trust scoring lives inside Identity) is describing an earlier, unbuilt plan.
+
+Each module follows (or is migrating toward) the standard shape defined in `architecture/module-layout-convention.md` — `Domain/{Entities,Events,Enums,Repositories,Services}`, `Application/{Contracts,<Feature>/{Commands,Queries},EventHandlers}`, `Infrastructure/{Repositories,Configurations,Services}`. That document is the single source of truth for the folder convention; it is not re-described here. One real deviation worth calling out: `Modules/Auth/` has no `API/Controllers` folder of its own — the HTTP-facing auth endpoints (`AuthController`, `MobileAuthController`) live in the app's top-level `Controllers/` tree instead, both wired to the same `IAuthService`/`KeycloakAuthService` registration (see `architecture/auth-service-microservice-spec.md` §1.2).
+
+**Per-module summary** (responsibilities only — see `04_MODULE_SPECIFICATIONS/` for anything module-specific that's already been reverified, and treat unreverified files there as historical per `DOCUMENTATION_PROGRESS.md`):
+
+| Module | Responsibility | Notable real-world divergence from earlier docs |
+|---|---|---|
+| **Auth** | Keycloak integration (login/refresh/logout, admin-API session list/revoke) | No local session/MFA tables; MFA unimplemented (throws `NotSupportedException`) |
+| **Identity** | Business/Provider/Vehicle registration, KYC/KYB, trust scoring, tiering | Trust-score formula built but **not wired** into any production event; no business-side risk score exists |
+| **Marketplace** | RFQ (header + line items), blind bidding, split awards, Direct Rental | Line-item + split-award model, not epic-04/05's single-vehicle-type model; ranking algorithm & anti-collusion detection don't exist |
+| **Contracts** | Contract lifecycle, vehicle assignment, OTP signing, completion/termination | 18 real string status values (not a 4-state enum-driven model) — see `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` |
+| **Finance** | Wallets, double-entry ledger, escrow, settlement, commission, payment gateways | Live Chapa/Telebirr/CBEBirr webhooks (not "future"); two disagreeing escrow-computation code paths and two disagreeing tier-threshold schemes coexist today |
+| **Delivery** | OTP handover, photo/odometer/fuel evidence, return + inspection | Return-trip OTP + inspection checklist is a parallel system, undocumented in the original delivery epic |
+| **MasterData** | Versioned commission/contract/escrow/settlement policy rules, tiers, lookups, geography, banks | Admin-facing configuration UI exists on web with no explicit epic-level deliverable anywhere |
+| **Notifications** | Multi-channel (email/SMS/push) admin-configurable delivery, SignalR real-time hub | 40+ admin endpoints, credential rotation, live test-send — far beyond "email/SMS, WebSocket optional" |
+
+### 1.4 Communication Patterns
+
+**In-process events (MediatR) — the real, dominant mechanism.** Modules publish `INotification` events and other modules' `INotificationHandler<T>` implementations react, all within the same process and (for anything writing to the DB) frequently the same transaction. Example, verified against the real contract-creation flow (see `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` §10 for the full event-flow diagram):
+
+```
+BidAwardedEvent (Marketplace module)
+  └─▶ BidAwardedEventHandler ─▶ CreateContractCommand ─▶ ContractCreatedEvent
+        └─▶ ContractCreatedEventHandler (Finance module) locks escrow,
+            retrying up to 5 times with exponential backoff
+```
+
+**RabbitMQ is provisioned, not the operative bus.** `RabbitMQ.Client` is a real package dependency (`Marketplace.API.csproj`), and `rabbitmq` is a real service in `backend/docker-compose*.yml` with its own health check. This reflects genuine infrastructure investment — but per `project-docs/18_Implementation_Coverage_Audit.md`, actual cross-module communication today runs through MediatR, not through RabbitMQ. Do not assume a feature is asynchronous/durable-queued just because RabbitMQ is provisioned; verify the actual handler.
+
+**Cross-module reads:** modules do not reach into each other's repositories directly. Per `architecture/module-layout-convention.md` rule 3, the only importable cross-module surface is `Application/Contracts/` (reader interfaces, cross-module DTOs) — this is enforced socially today, not by a build-time boundary, but it is the real convention new code should follow.
+
+### 1.5 Data Architecture
+
+Single PostgreSQL 16 database via EF Core 9 + Npgsql, with `EFCore.NamingConventions` mapping C# PascalCase to snake_case columns. Modules use schema separation by convention (e.g. the `contracts` schema for most Contracts-module entities), though this is not applied with total rigidity — per `backlog/mvp/epic-06-contract-management.md`, `Contract`/`ContractLineItem`/`ContractVehicleAssignment` specifically live in the default schema rather than `contracts`.
+
+**A real, notable pattern in this codebase:** several modules define a rich C# enum for a status field, then **never reference that enum anywhere outside its own file** — the actual column is a plain string, and the running system produces more or fewer distinct values than the enum has. This is confirmed in the Contracts module (`ContractStatus` — 17 enum members, 18 real runtime values, only one of which, `CANCELLED`, is missing from the enum; several enum members are never produced by any code path). Treat any doc that presents a status enum as ground truth with suspicion until you've grepped for actual usage — see `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` for the full worked example.
+
+`02_DATABASE_SCHEMA_DESIGN.md` in this suite predates the current codebase (schema/table counts there were written before implementation) and has **not** been re-verified as part of this rewrite — read it as historical/aspirational, not as a current schema reference, until it gets its own audit pass.
+
+### 1.6 Security Architecture
+
+Full detail lives in `architecture/auth-service-microservice-spec.md` — summarized here only to keep this document self-contained:
+
+- **No separate Auth microservice, no separate BFF/gateway.** `Modules/Auth` + a couple of top-level `Controllers`/`Infrastructure` files, all inside the one `Marketplace.API` process.
+- **Login flow (web):** `LoginPage.tsx` submits an in-app email/password form directly to `POST /web/login` (`AuthController`) — **not** a redirect to a Keycloak-hosted login page. `AuthController` calls `KeycloakAuthService`, which performs a Resource Owner Password Credentials grant directly against Keycloak, then sets `mov_access_token`/`mov_refresh_token` as HttpOnly cookies on the response.
+- **Login flow (mobile):** `MobileAuthController` (`mobile/auth/*`) is functionally parallel but returns tokens **in the JSON response body** — mobile clients cannot use HttpOnly cookies — and Flutter apps store them in secure device storage.
+- **The one real "BFF":** `BffTokenRefreshMiddleware`, registered as `app.UseBffTokenRefresh()`, runs on every `/api/*` request (skipping login/logout/register/refresh and infra paths). It silently refreshes an expiring access-token cookie against Keycloak and copies the (possibly refreshed) token into the request's `Authorization: Bearer` header before the standard JwtBearer middleware runs. This is genuinely a "translate a cookie into a bearer token" BFF pattern — it just happens as one middleware step inside the monolith, not as a network hop to a separate service.
+- **Sessions:** Keycloak's own admin session list is the session store — there is no local `login_sessions` table. "Session management" screens on web/mobile are live reads through Keycloak's Admin REST API.
+- **MFA:** not implemented. `KeycloakAuthService.VerifyMfaAsync` explicitly throws `NotSupportedException` — standard Keycloak Direct Grant has no OTP-challenge step, and no custom extension has been built.
+- **RBAC:** Keycloak realm roles — `business-admin`, `business-user`, `provider-admin`, `provider-driver`, `platform-admin`, `compliance-officer`, `finance-officer` — enforced via ASP.NET Core authorization policies keyed off JWT claims.
+- **No risk-scoring engine** anywhere in the login path — no new-device detection, no IP/geo-anomaly check, no failed-attempt scoring. Rate limiting is generic ASP.NET Core rate limiting on the mobile auth routes only.
+
+### 1.7 Deployment Architecture
+
+Confirmed via `backend/docker-compose*.yml` (separate files per concern: `development`, `prod`, `infrastructure.{dev,prod}`, `keycloak`, `monitoring`, plus a deprecated base `docker-compose.yml` kept for reference).
+
+```
+marketplace-api   — single container, the whole .NET 9 monolith
+                    (env vars wire Postgres, Redis, Keycloak, MinIO,
+                    RabbitMQ, and Chapa payment config directly —
+                    no gateway/BFF container in between)
+postgres          — single instance
+keycloak          — its own compose file
+redis             — cache
+minio             — object storage
+rabbitmq          — provisioned message broker (see §1.4 on actual usage)
+```
+
+The web app (`movello-marketplace-core`) is a **separate** Vite/React build with its own `docker-compose*.yml` files (development/production/VPS variants), typically deployed as a static build behind Nginx — independently of the backend's deployment. Mobile apps (`business_app`, `provider_app`) are native Flutter builds distributed via app stores/APK — not containerized, not part of this compose topology at all.
+
+### 1.8 Scalability
+
+Current strategy is conventional horizontal scaling of the single monolith (multiple `marketplace-api` replicas behind a load balancer, Postgres read replicas for reporting, Redis for shared cache/session data) — no code changes are required for this tier of scaling since the monolith is stateless per-request. The methodology for **extracting** a specific module into its own service once it needs independent scaling is defined once, authoritatively, in `architecture/modular-monolith-architecture.md`'s "Migration Path to Microservices" section — not repeated here. See Section 2 below for how that would apply to Auth specifically, and for what a previous (superseded) draft of this document proposed for the platform as a whole.
 
 ---
 
-## 📦 Module Structure
+## Section 2: Proposed Future Architecture — Not Built
 
-### 1. Identity & Compliance Module
+Everything in this section is a **possible future direction**, preserved because it is legitimate forward-looking design thinking — not because any of it exists in code today. Nothing below should be read as a current fact.
 
-**Responsibility:** User management, KYC/KYB verification, vehicle compliance, trust scoring
+### 2.1 Why this section exists
 
-**Bounded Context:**
-```
-Identity/
-├── Domain/
-│   ├── Entities/
-│   │   ├── UserAccount.cs
-│   │   ├── Business.cs
-│   │   ├── Provider.cs
-│   │   ├── Vehicle.cs
-│   │   └── VehicleInsurance.cs
-│   ├── Events/
-│   │   ├── BusinessVerifiedEvent.cs
-│   │   ├── ProviderVerifiedEvent.cs
-│   │   └── TrustScoreUpdatedEvent.cs
-│   └── Enums/
-│       ├── VerificationStatus.cs
-│       └── ProviderTier.cs
-│
-├── Application/
-│   ├── Commands/
-│   │   ├── RegisterBusinessCommand.cs
-│   │   ├── VerifyDocumentCommand.cs
-│   │   └── UpdateTrustScoreCommand.cs
-│   ├── Queries/
-│   │   ├── GetBusinessByIdQuery.cs
-│   │   └── GetProviderTrustScoreQuery.cs
-│   ├── DTOs/
-│   └── Validators/
-│
-├── Infrastructure/
-│   ├── Data/
-│   │   └── IdentityDbContext.cs
-│   ├── Repositories/
-│   └── Services/
-│       └── TrustScoreCalculator.cs
-│
-└── API/
-    └── Controllers/
-        ├── BusinessController.cs
-        ├── ProviderController.cs
-        └── VehicleController.cs
-```
+Version 1.0 of this document proposed a YARP-based BFF/API-gateway service sitting in front of the monolith, plus an eventual full microservices split (Identity/Marketplace/Contracts/Finance/Delivery each as independent deployables, RabbitMQ/Kafka as the inter-service bus, a dedicated API gateway like Kong/Traefik). That gateway/BFF service was never built — see Section 1 for what actually exists instead (an in-process middleware, not a service). The underlying **extraction methodology**, however, is still a reasonable plan to revisit if/when a specific module genuinely needs independent scaling, and is documented once, authoritatively, in `architecture/modular-monolith-architecture.md`'s "Migration Path to Microservices" section (extraction triggers, step-by-step process, in-process-event → message-queue migration). This section does not repeat that content — it only notes where a future BFF/gateway would fit relative to it.
 
-**Database Schema:** `identity`
+### 2.2 A dedicated Auth microservice, specifically
 
-**Key Events Published:**
-- `BusinessRegisteredEvent`
-- `ProviderVerifiedEvent`
-- `VehicleRegisteredEvent`
-- `TrustScoreUpdatedEvent`
-- `InsuranceExpiredEvent`
+`architecture/auth-service-microservice-spec.md` §2 already works through a detailed, concrete proposal for extracting Auth specifically — a security-gateway service with a device/IP/geo risk engine, MFA challenge/response, and its own `auth` schema (`login_sessions`, `mfa_challenges`, `login_attempts`). That proposal is the most fully worked-out extraction candidate in the documentation set today, precisely because Auth is already a clean module boundary with a single external dependency (Keycloak). It is not repeated here — read it directly if this path is ever picked up.
 
-**Key Events Consumed:**
-- `ContractCompletedEvent` → Update trust score
-- `DeliveryConfirmedEvent` → Update trust score
-- `PenaltyAppliedEvent` → Update trust score
+### 2.3 If a BFF/gateway were reintroduced
+
+Should the platform reach a scale where a real network-hop BFF or API gateway becomes worthwhile (e.g. to aggregate calls across multiple extracted services, or to centralize rate limiting/routing once there is more than one backend deployable), the natural trigger is the same one `modular-monolith-architecture.md` defines for module extraction generally: independent scaling needs, team size, or concurrency thresholds — not a fixed timeline. Until at least one module is actually extracted, a separate BFF/gateway process has nothing to aggregate or route between, and the in-process `BffTokenRefreshMiddleware` described in §1.6 continues to be sufficient.
+
+### 2.4 Event bus migration (if/when extraction happens)
+
+The one piece of this proposal already partially in place is the message broker itself: RabbitMQ is provisioned today (package + docker-compose service, see §1.4) even though MediatR remains the operative in-process bus. If/when a module is extracted, the migration is mechanically small — replace `await _mediator.Publish(new SomeEvent())` with `await _messageBus.Publish("module.event.name", new SomeEvent())` — the harder part is redesigning event handlers that currently assume same-transaction consistency (e.g. contract creation + escrow lock in one DB transaction today) to tolerate eventual consistency instead. This is a genuine design cost worth planning for before extracting any module that currently participates in a same-transaction event flow.
 
 ---
 
-### 2. Marketplace Module
+**Related documents:** `architecture/modular-monolith-architecture.md`, `architecture/module-layout-convention.md`, `architecture/auth-service-microservice-spec.md`, `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md`, `project-docs/18_Implementation_Coverage_Audit.md`.
 
-**Responsibility:** RFQ management, blind bidding, award processing
-
-**Bounded Context:**
-```
-Marketplace/
-├── Domain/
-│   ├── Entities/
-│   │   ├── RFQ.cs
-│   │   ├── RFQLineItem.cs
-│   │   ├── RFQBid.cs
-│   │   ├── RFQBidSnapshot.cs
-│   │   └── RFQBidAward.cs
-│   ├── Events/
-│   │   ├── RFQCreatedEvent.cs
-│   │   ├── BidSubmittedEvent.cs
-│   │   └── BidAwardedEvent.cs
-│   └── ValueObjects/
-│       └── BidAmount.cs
-│
-├── Application/
-│   ├── Commands/
-│   │   ├── CreateRFQCommand.cs
-│   │   ├── SubmitBidCommand.cs
-│   │   └── AwardBidCommand.cs
-│   ├── Queries/
-│   │   ├── GetOpenRFQsQuery.cs
-│   │   └── GetBidsForRFQQuery.cs
-│   └── Services/
-│       └── BlindBiddingService.cs
-│
-├── Infrastructure/
-│   └── Repositories/
-│
-└── API/
-    └── Controllers/
-        ├── RFQController.cs
-        └── BiddingController.cs
-```
-
-**Database Schema:** `marketplace`
-
-**Key Events Published:**
-- `RFQCreatedEvent`
-- `BidSubmittedEvent`
-- `BidAwardedEvent`
-- `RFQClosedEvent`
-
-**Key Events Consumed:**
-- `BusinessVerifiedEvent` → Allow RFQ creation
-- `ProviderVerifiedEvent` → Allow bidding
-- `WalletBalanceUpdatedEvent` → Validate escrow capacity
-
----
-
-### 3. Contracts Module
-
-**Responsibility:** Contract lifecycle, vehicle assignments, amendments, penalties
-
-**Bounded Context:**
-```
-Contracts/
-├── Domain/
-│   ├── Entities/
-│   │   ├── Contract.cs
-│   │   ├── ContractLineItem.cs
-│   │   ├── ContractVehicleAssignment.cs
-│   │   ├── ContractAmendment.cs
-│   │   └── ContractPenalty.cs
-│   ├── Events/
-│   │   ├── ContractCreatedEvent.cs
-│   │   ├── ContractActivatedEvent.cs
-│   │   ├── VehicleAssignmentActivatedEvent.cs
-│   │   └── ContractCompletedEvent.cs
-│   └── StateMachines/
-│       ├── ContractStateMachine.cs
-│       └── VehicleAssignmentStateMachine.cs
-│
-├── Application/
-│   ├── Commands/
-│   │   ├── CreateContractCommand.cs
-│   │   ├── ActivateContractCommand.cs
-│   │   └── TerminateContractCommand.cs
-│   ├── Queries/
-│   │   └── GetContractByIdQuery.cs
-│   └── Services/
-│       └── PartialFulfillmentService.cs
-│
-├── Infrastructure/
-│   └── Repositories/
-│
-└── API/
-    └── Controllers/
-        └── ContractController.cs
-```
-
-**Database Schema:** `contracts`
-
-**Key Events Published:**
-- `ContractCreatedEvent`
-- `ContractActivatedEvent`
-- `VehicleAssignmentActivatedEvent`
-- `VehicleReturnedEarlyEvent`
-- `ContractCompletedEvent`
-
-**Key Events Consumed:**
-- `BidAwardedEvent` → Create contract
-- `DeliveryConfirmedEvent` → Activate vehicle assignment
-- `ReturnCompletedEvent` → Process early return
-
----
-
-### 4. Finance Module
-
-**Responsibility:** Wallets, escrow, settlement, commission, payments
-
-**Bounded Context:**
-```
-Finance/
-├── Domain/
-│   ├── Entities/
-│   │   ├── WalletAccount.cs
-│   │   ├── WalletLedgerTransaction.cs
-│   │   ├── WalletLedgerEntry.cs
-│   │   ├── EscrowLock.cs
-│   │   ├── SettlementCycle.cs
-│   │   └── CommissionEntry.cs
-│   ├── Events/
-│   │   ├── WalletCreatedEvent.cs
-│   │   ├── EscrowLockedEvent.cs
-│   │   ├── EscrowReleasedEvent.cs
-│   │   └── SettlementCompletedEvent.cs
-│   └── Services/
-│       ├── DoubleEntryLedger.cs
-│       └── CommissionCalculator.cs
-│
-├── Application/
-│   ├── Commands/
-│   │   ├── DepositFundsCommand.cs
-│   │   ├── LockEscrowCommand.cs
-│   │   └── ProcessSettlementCommand.cs
-│   ├── Queries/
-│   │   └── GetWalletBalanceQuery.cs
-│   └── Services/
-│       └── PaymentGatewayService.cs
-│
-├── Infrastructure/
-│   └── ExternalServices/
-│       ├── ChapaPaymentService.cs
-│       └── TelebirrPaymentService.cs
-│
-└── API/
-    └── Controllers/
-        ├── WalletController.cs
-        └── SettlementController.cs
-```
-
-**Database Schema:** `wallet`
-
-**Key Events Published:**
-- `WalletCreatedEvent`
-- `FundsDepositedEvent`
-- `EscrowLockedEvent`
-- `EscrowReleasedEvent`
-- `SettlementCompletedEvent`
-
-**Key Events Consumed:**
-- `BusinessRegisteredEvent` → Create wallet
-- `ProviderVerifiedEvent` → Create wallet
-- `ContractCreatedEvent` → Lock escrow
-- `ContractCompletedEvent` → Release escrow
-- `VehicleReturnedEarlyEvent` → Calculate proration
-
----
-
-### 5. Delivery Module
-
-**Responsibility:** Vehicle handover, OTP verification, returns, evidence capture
-
-**Bounded Context:**
-```
-Delivery/
-├── Domain/
-│   ├── Entities/
-│   │   ├── DeliverySession.cs
-│   │   ├── DeliveryOTP.cs
-│   │   ├── DeliveryVehicleHandover.cs
-│   │   └── DeliveryReturnSession.cs
-│   ├── Events/
-│   │   ├── OTPGeneratedEvent.cs
-│   │   ├── OTPVerifiedEvent.cs
-│   │   ├── DeliveryConfirmedEvent.cs
-│   │   └── ReturnCompletedEvent.cs
-│   └── Services/
-│       └── OTPGenerator.cs
-│
-├── Application/
-│   ├── Commands/
-│   │   ├── GenerateOTPCommand.cs
-│   │   ├── VerifyOTPCommand.cs
-│   │   └── CompleteReturnCommand.cs
-│   ├── Queries/
-│   │   └── GetDeliverySessionQuery.cs
-│   └── Validators/
-│       └── OTPValidator.cs
-│
-├── Infrastructure/
-│   └── Services/
-│       └── SMSService.cs
-│
-└── API/
-    └── Controllers/
-        └── DeliveryController.cs
-```
-
-**Database Schema:** `delivery`
-
-**Key Events Published:**
-- `OTPGeneratedEvent`
-- `OTPVerifiedEvent`
-- `DeliveryConfirmedEvent`
-- `ReturnCompletedEvent`
-
-**Key Events Consumed:**
-- `ContractCreatedEvent` → Create delivery session
-- `VehicleAssignedEvent` → Prepare for delivery
-
----
-
-## 🔄 Communication Patterns
-
-### In-Process Events (MediatR)
-
-**Pattern:** Publish-Subscribe within the same application process
-
-**Example Flow: Contract Creation**
-
-```csharp
-// 1. Marketplace Module publishes event
-public class AwardBidCommandHandler : IRequestHandler<AwardBidCommand>
-{
-    private readonly IMediator _mediator;
-    
-    public async Task<Unit> Handle(AwardBidCommand request)
-    {
-        // Award bid logic...
-        
-        await _mediator.Publish(new BidAwardedEvent
-        {
-            RFQId = request.RFQId,
-            LineItemId = request.LineItemId,
-            ProviderId = request.ProviderId,
-            Quantity = request.Quantity,
-            UnitPrice = request.UnitPrice
-        });
-        
-        return Unit.Value;
-    }
-}
-
-// 2. Contracts Module subscribes
-public class BidAwardedEventHandler : INotificationHandler<BidAwardedEvent>
-{
-    private readonly IContractService _contractService;
-    
-    public async Task Handle(BidAwardedEvent notification)
-    {
-        // Create contract from awarded bid
-        await _contractService.CreateContractFromAward(notification);
-    }
-}
-
-// 3. Finance Module also subscribes
-public class BidAwardedFinanceHandler : INotificationHandler<BidAwardedEvent>
-{
-    private readonly IEscrowService _escrowService;
-    
-    public async Task Handle(BidAwardedEvent notification)
-    {
-        // Prepare escrow lock
-        await _escrowService.PrepareEscrowLock(notification);
-    }
-}
-```
-
-**Benefits:**
-- ✅ Simple: No network overhead
-- ✅ Fast: In-memory communication
-- ✅ Transactional: Can participate in same DB transaction
-- ✅ Debuggable: Single process, easy to trace
-
-**Limitations:**
-- ❌ Single point of failure (entire app)
-- ❌ Vertical scaling only (within single server)
-- ❌ No independent deployment
-
-**Migration Path to RabbitMQ:**
-```csharp
-// Current (MediatR)
-await _mediator.Publish(new BidAwardedEvent { ... });
-
-// Future (RabbitMQ)
-await _messageBus.Publish("marketplace.bid.awarded", new BidAwardedEvent { ... });
-```
-
----
-
-### Cross-Module Database Access
-
-**Pattern:** Single DbContext with schema separation
-
-```csharp
-public class MarketplaceDbContext : DbContext
-{
-    // Identity Module
-    public DbSet<Business> Businesses { get; set; }
-    public DbSet<Provider> Providers { get; set; }
-    public DbSet<Vehicle> Vehicles { get; set; }
-    
-    // Marketplace Module
-    public DbSet<RFQ> RFQs { get; set; }
-    public DbSet<RFQBid> RFQBids { get; set; }
-    
-    // Contracts Module
-    public DbSet<Contract> Contracts { get; set; }
-    public DbSet<ContractLineItem> ContractLineItems { get; set; }
-    
-    // Finance Module
-    public DbSet<WalletAccount> WalletAccounts { get; set; }
-    public DbSet<EscrowLock> EscrowLocks { get; set; }
-    
-    // Delivery Module
-    public DbSet<DeliverySession> DeliverySessions { get; set; }
-    
-    protected override void OnModelCreating(ModelBuilder modelBuilder)
-    {
-        // Schema separation
-        modelBuilder.Entity<Business>().ToTable("Businesses", "identity");
-        modelBuilder.Entity<Provider>().ToTable("Providers", "identity");
-        modelBuilder.Entity<Vehicle>().ToTable("Vehicles", "identity");
-        
-        modelBuilder.Entity<RFQ>().ToTable("RFQs", "marketplace");
-        modelBuilder.Entity<RFQBid>().ToTable("RFQBids", "marketplace");
-        
-        modelBuilder.Entity<Contract>().ToTable("Contracts", "contracts");
-        modelBuilder.Entity<ContractLineItem>().ToTable("ContractLineItems", "contracts");
-        
-        modelBuilder.Entity<WalletAccount>().ToTable("WalletAccounts", "wallet");
-        modelBuilder.Entity<EscrowLock>().ToTable("EscrowLocks", "wallet");
-        
-        modelBuilder.Entity<DeliverySession>().ToTable("DeliverySessions", "delivery");
-    }
-}
-```
-
-**ACID Transactions Across Modules:**
-
-```csharp
-public class ContractCreationService
-{
-    private readonly MarketplaceDbContext _dbContext;
-    private readonly IMediator _mediator;
-    
-    public async Task CreateContractWithEscrow(CreateContractCommand command)
-    {
-        using var transaction = await _dbContext.Database.BeginTransactionAsync();
-        
-        try
-        {
-            // 1. Contracts Module: Create contract
-            var contract = new Contract
-            {
-                BusinessId = command.BusinessId,
-                ProviderId = command.ProviderId,
-                // ...
-            };
-            _dbContext.Contracts.Add(contract);
-            
-            // 2. Finance Module: Lock escrow (same transaction!)
-            var escrowLock = new EscrowLock
-            {
-                ContractId = contract.Id,
-                Amount = command.EscrowAmount,
-                Status = EscrowStatus.Locked
-            };
-            _dbContext.EscrowLocks.Add(escrowLock);
-            
-            // 3. Save all changes atomically
-            await _dbContext.SaveChangesAsync();
-            
-            // 4. Commit transaction
-            await transaction.CommitAsync();
-            
-            // 5. Publish events (after commit)
-            await _mediator.Publish(new ContractCreatedEvent { ContractId = contract.Id });
-            await _mediator.Publish(new EscrowLockedEvent { EscrowLockId = escrowLock.Id });
-        }
-        catch
-        {
-            await transaction.RollbackAsync();
-            throw;
-        }
-    }
-}
-```
-
----
-
-## 🗄️ Data Architecture
-
-### Database: PostgreSQL 16
-
-**Schema Organization:**
-
-```sql
--- 1. Master Data Schema (22 tables)
-masterdata
-├── lookup_type
-├── lookup
-├── lookup_translation
-├── settings
-├── commission_strategy_version
-├── commission_strategy_rule
-├── escrow_policy_version
-├── escrow_policy_rule
-├── settlement_policy_version
-├── settlement_policy_rule
-├── provider_tier
-├── provider_tier_rule
-├── business_tier
-├── contract_policy_version
-├── contract_policy_rule
-├── document_type
-├── kyc_requirement
-├── country
-├── region
-└── city
-
--- 2. Identity Schema (22 tables)
-identity
-├── user_account
-├── user_device
-├── user_login_session
-├── user_mfa_challenge
-├── business
-├── business_profile
-├── business_document
-├── provider
-├── provider_profile
-├── provider_tier_assignment
-├── provider_document
-├── provider_trust_score_history
-├── vehicle
-├── vehicle_document
-├── vehicle_insurance
-├── verification_request
-├── compliance_check_log
-├── risk_event
-└── account_flag
-
--- 3. Marketplace Schema (8 tables)
-marketplace
-├── rfq
-├── rfq_line_item
-├── rfq_bid
-├── rfq_bid_snapshot
-├── rfq_bid_award
-├── rfq_line_item_fulfillment
-├── rfq_award_vehicle_assignment
-└── marketplace_event_log
-
--- 4. Contracts Schema (9 tables)
-contracts
-├── contract
-├── contract_party_business
-├── contract_party_provider
-├── contract_line_item
-├── contract_vehicle_assignment
-├── contract_policy_snapshot
-├── contract_amendment
-├── contract_penalty
-└── contract_event_log
-
--- 5. Wallet Schema (12 tables)
-wallet
-├── wallet_account
-├── wallet_ledger_transaction
-├── wallet_ledger_entry
-├── wallet_balance_snapshot
-├── escrow_lock
-├── settlement_cycle
-├── settlement_payout
-├── commission_entry
-├── payment_intent
-├── refund_request
-└── wallet_event_log
-
--- 6. Delivery Schema (7 tables)
-delivery
-├── delivery_session
-├── delivery_otp
-├── delivery_vehicle_handover
-├── delivery_return_session
-├── delivery_sla_violation
-├── delivery_event_log
-└── delivery_geofence_event (future)
-```
-
-**Total:** 80 tables across 6 schemas
-
----
-
-### Entity Relationship Principles
-
-**1. Foreign Keys Across Schemas:**
-
-```sql
--- Allowed: Reference by ID
-CREATE TABLE contracts.contract (
-    id uuid PRIMARY KEY,
-    business_id uuid NOT NULL,  -- References identity.business(id)
-    provider_id uuid NOT NULL,  -- References identity.provider(id)
-    rfq_id uuid NOT NULL        -- References marketplace.rfq(id)
-);
-
--- Note: No FK constraints across schemas for flexibility
--- Referential integrity enforced at application level
-```
-
-**2. Immutable Snapshots:**
-
-```sql
--- Contract stores party details at creation time
-CREATE TABLE contracts.contract_party_business (
-    id uuid PRIMARY KEY,
-    contract_id uuid NOT NULL,
-    business_id uuid NOT NULL,
-    business_name varchar(256) NOT NULL,  -- Snapshot
-    tin_number varchar(64),                -- Snapshot
-    tier_code varchar(64),                 -- Snapshot at contract time
-    snapshot_at timestamptz NOT NULL
-);
-```
-
-**3. Event Sourcing for Audit:**
-
-```sql
--- Every module has event_log table
-CREATE TABLE contracts.contract_event_log (
-    id uuid PRIMARY KEY,
-    contract_id uuid NOT NULL,
-    event_type varchar(64) NOT NULL,
-    event_payload jsonb,
-    actor_id uuid,
-    created_at timestamptz NOT NULL DEFAULT now()
-);
-
--- Example events
-INSERT INTO contract_event_log (contract_id, event_type, event_payload)
-VALUES (
-    'contract-uuid',
-    'CONTRACT_ACTIVATED',
-    '{"activated_by": "user-uuid", "activation_date": "2025-11-26"}'::jsonb
-);
-```
-
----
-
-## 🔐 Security Architecture
-
-### Authentication Flow (BFF Pattern)
-
-```
-┌─────────────┐
-│   Angular   │
-│   Frontend  │
-└──────┬──────┘
-       │ 1. Login Request
-       ▼
-┌─────────────────────────────────────┐
-│    BFF (YARP)                       │
-│                                     │
-│  2. Redirect to Keycloak            │
-└──────┬──────────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────┐
-│    Keycloak                         │
-│                                     │
-│  3. User authenticates              │
-│  4. Returns authorization code      │
-└──────┬──────────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────┐
-│    BFF (YARP)                       │
-│                                     │
-│  5. Exchange code for tokens        │
-│  6. Store refresh token (httpOnly)  │
-│  7. Return access token to frontend │
-└──────┬──────────────────────────────┘
-       │
-       ▼
-┌─────────────┐
-│   Angular   │
-│  (stores    │
-│ access token│
-│  in memory) │
-└──────┬──────┘
-       │ 8. API Request + Bearer Token
-       ▼
-┌─────────────────────────────────────┐
-│    BFF (YARP)                       │
-│                                     │
-│  9. Validate token                  │
-│  10. Forward to backend             │
-└──────┬──────────────────────────────┘
-       │
-       ▼
-┌─────────────────────────────────────┐
-│    Marketplace.API                  │
-│                                     │
-│  11. Validate JWT signature         │
-│  12. Extract claims (sub, roles)    │
-│  13. Authorize based on roles       │
-│  14. Process request                │
-└─────────────────────────────────────┘
-```
-
-**Benefits of BFF:**
-- ✅ Refresh tokens never exposed to frontend
-- ✅ Centralized token management
-- ✅ API aggregation (future: combine multiple backend calls)
-- ✅ Rate limiting at gateway level
-- ✅ CORS handling
-
----
-
-### Authorization (RBAC)
-
-**Roles:**
-
-```csharp
-public static class Roles
-{
-    // Business Roles
-    public const string BusinessAdmin = "business-admin";
-    public const string BusinessUser = "business-user";
-    
-    // Provider Roles
-    public const string ProviderAdmin = "provider-admin";
-    public const string ProviderDriver = "provider-driver";
-    
-    // Platform Roles
-    public const string PlatformAdmin = "platform-admin";
-    public const string ComplianceOfficer = "compliance-officer";
-    public const string FinanceOfficer = "finance-officer";
-}
-```
-
-**Authorization Policies:**
-
-```csharp
-services.AddAuthorization(options =>
-{
-    // Business can only access their own RFQs
-    options.AddPolicy("BusinessOwner", policy =>
-        policy.RequireRole(Roles.BusinessAdmin, Roles.BusinessUser)
-              .RequireClaim("business_id"));
-    
-    // Provider can only access their own bids
-    options.AddPolicy("ProviderOwner", policy =>
-        policy.RequireRole(Roles.ProviderAdmin, Roles.ProviderDriver)
-              .RequireClaim("provider_id"));
-    
-    // Admin can access everything
-    options.AddPolicy("PlatformAdmin", policy =>
-        policy.RequireRole(Roles.PlatformAdmin));
-});
-```
-
-**Controller Usage:**
-
-```csharp
-[ApiController]
-[Route("api/v1/rfqs")]
-[Authorize]
-public class RFQController : ControllerBase
-{
-    [HttpPost]
-    [Authorize(Policy = "BusinessOwner")]
-    public async Task<IActionResult> CreateRFQ([FromBody] CreateRFQCommand command)
-    {
-        // Only businesses can create RFQs
-        var businessId = User.FindFirst("business_id")?.Value;
-        command.BusinessId = Guid.Parse(businessId);
-        
-        var result = await _mediator.Send(command);
-        return Ok(result);
-    }
-    
-    [HttpGet("{id}")]
-    public async Task<IActionResult> GetRFQ(Guid id)
-    {
-        // Anyone authenticated can view RFQs
-        var query = new GetRFQByIdQuery { RFQId = id };
-        var result = await _mediator.Send(query);
-        return Ok(result);
-    }
-}
-```
-
----
-
-## 🚀 Deployment Architecture
-
-### Development Environment (Docker Compose)
-
-```yaml
-version: '3.8'
-
-services:
-  # Frontend (Angular 19)
-  frontend:
-    build: ./frontend
-    ports:
-      - "4200:80"
-    environment:
-      - API_URL=http://bff:5001
-    depends_on:
-      - bff
-  
-  # BFF (YARP)
-  bff:
-    build: ./bff
-    ports:
-      - "5001:80"
-    environment:
-      - KEYCLOAK_URL=http://keycloak:8080
-      - BACKEND_URL=http://api:5000
-    depends_on:
-      - keycloak
-      - api
-  
-  # Backend API (.NET 9)
-  api:
-    build: ./backend
-    ports:
-      - "5000:80"
-    environment:
-      - ConnectionStrings__DefaultConnection=Host=postgres;Database=marketplace;Username=postgres;Password=postgres
-      - Redis__ConnectionString=redis:6379
-      - MinIO__Endpoint=minio:9000
-    depends_on:
-      - postgres
-      - redis
-      - minio
-  
-  # PostgreSQL 16
-  postgres:
-    image: postgres:16-alpine
-    ports:
-      - "5432:5432"
-    environment:
-      - POSTGRES_DB=marketplace
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=postgres
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./database/migrations:/docker-entrypoint-initdb.d
-  
-  # Keycloak
-  keycloak:
-    image: quay.io/keycloak/keycloak:25.0
-    ports:
-      - "8080:8080"
-    environment:
-      - KEYCLOAK_ADMIN=admin
-      - KEYCLOAK_ADMIN_PASSWORD=admin
-      - KC_DB=postgres
-      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-      - KC_DB_USERNAME=postgres
-      - KC_DB_PASSWORD=postgres
-    command: start-dev
-    depends_on:
-      - postgres
-  
-  # Redis
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-  
-  # MinIO
-  minio:
-    image: minio/minio:latest
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      - MINIO_ROOT_USER=minioadmin
-      - MINIO_ROOT_PASSWORD=minioadmin
-    command: server /data --console-address ":9001"
-    volumes:
-      - minio_data:/data
-
-volumes:
-  postgres_data:
-  redis_data:
-  minio_data:
-```
-
----
-
-### Production Environment (Docker Compose on Single Server)
-
-```yaml
-version: '3.8'
-
-services:
-  # Nginx Reverse Proxy
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
-      - ./ssl:/etc/nginx/ssl
-      - ./frontend/dist:/usr/share/nginx/html
-    depends_on:
-      - bff
-  
-  # BFF (YARP)
-  bff:
-    image: movello/bff:latest
-    environment:
-      - ASPNETCORE_ENVIRONMENT=Production
-      - KEYCLOAK_URL=https://auth.movello.et
-      - BACKEND_URL=http://api:5000
-    restart: unless-stopped
-  
-  # Backend API
-  api:
-    image: movello/api:latest
-    environment:
-      - ASPNETCORE_ENVIRONMENT=Production
-      - ConnectionStrings__DefaultConnection=${DB_CONNECTION_STRING}
-      - Redis__ConnectionString=redis:6379
-      - MinIO__Endpoint=minio:9000
-    restart: unless-stopped
-    deploy:
-      replicas: 2  # Load balanced
-  
-  # PostgreSQL (Managed Service Recommended)
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      - POSTGRES_DB=marketplace
-      - POSTGRES_USER=${DB_USER}
-      - POSTGRES_PASSWORD=${DB_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    restart: unless-stopped
-  
-  # Keycloak
-  keycloak:
-    image: quay.io/keycloak/keycloak:25.0
-    environment:
-      - KC_DB=postgres
-      - KC_DB_URL=jdbc:postgresql://postgres:5432/keycloak
-      - KC_HOSTNAME=auth.movello.et
-      - KC_PROXY=edge
-    command: start
-    restart: unless-stopped
-  
-  # Redis
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    volumes:
-      - redis_data:/data
-    restart: unless-stopped
-  
-  # MinIO
-  minio:
-    image: minio/minio:latest
-    environment:
-      - MINIO_ROOT_USER=${MINIO_USER}
-      - MINIO_ROOT_PASSWORD=${MINIO_PASSWORD}
-    command: server /data --console-address ":9001"
-    volumes:
-      - minio_data:/data
-    restart: unless-stopped
-
-volumes:
-  postgres_data:
-  redis_data:
-  minio_data:
-```
-
----
-
-## 📈 Scalability Strategy
-
-### Horizontal Scaling (Future)
-
-**Phase 1: Load Balancing (Current MVP)**
-```
-Nginx → API (2 replicas) → Single PostgreSQL
-```
-
-**Phase 2: Database Read Replicas**
-```
-Nginx → API (3+ replicas) → PostgreSQL Primary
-                          → PostgreSQL Read Replica 1
-                          → PostgreSQL Read Replica 2
-```
-
-**Phase 3: Module Extraction**
-```
-Nginx → BFF → Identity Service (Microservice)
-           → Marketplace Service (Microservice)
-           → Contracts Service (Microservice)
-           → Finance Service (Microservice)
-           → Delivery Service (Microservice)
-```
-
-**Phase 4: Event-Driven Microservices**
-```
-Services communicate via RabbitMQ/Kafka
-Each service has its own database
-API Gateway (Kong/Traefik) for routing
-```
-
----
-
-## ✅ Architecture Validation Checklist
-
-- [x] **Modularity:** Clear module boundaries with single responsibility
-- [x] **Scalability:** Horizontal scaling path defined
-- [x] **Security:** OAuth2/OIDC with BFF pattern
-- [x] **Data Integrity:** ACID transactions, double-entry ledger
-- [x] **Auditability:** Event logs in every module
-- [x] **Testability:** Dependency injection, interface-based design
-- [x] **Observability:** Structured logging (Serilog), health checks
-- [x] **Resilience:** Retry policies, circuit breakers (Polly)
-- [x] **Performance:** Caching (Redis), async/await patterns
-- [x] **Migration Path:** Clear microservices extraction strategy
-
----
-
-**Next Document:** [02_DATABASE_SCHEMA_DESIGN.md](./02_DATABASE_SCHEMA_DESIGN.md)
+**Next Document:** [02_DATABASE_SCHEMA_DESIGN.md](./02_DATABASE_SCHEMA_DESIGN.md) *(not reverified in this rewrite pass — see `DOCUMENTATION_PROGRESS.md`)*

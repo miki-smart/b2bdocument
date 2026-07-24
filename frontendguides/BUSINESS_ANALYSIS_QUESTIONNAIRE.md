@@ -1,2035 +1,298 @@
-# Business Analysis Questionnaire
+# Business Analysis Questionnaire — Decision Record & Code-Reality Status
 ## Movello B2B Mobility Marketplace Platform
 
-**Purpose:** This questionnaire captures your decisions and responses for each issue identified in the comprehensive business analysis report.
+**Last verified against code: 2026-07-23**
+**Original purpose:** a fill-in-the-blank questionnaire, one entry per open issue found in an earlier business-analysis pass, used to capture the product owner's actual decisions on ~35 requirement conflicts, module-boundary questions, flow gaps, and process risks identified across the pre-MVP documentation set.
+**What changed in this rewrite:** this is a discovery/decision artifact, not a technical spec — every question below was already answered by the product owner (the original "Your Decision" responses are preserved verbatim in blockquotes throughout). Rewriting it as a spec would destroy the historical record of *why* the platform was built the way it was. Instead, each decision now carries a **Code Reality** verdict: whether what shipped matches what was decided, diverges from it, or was never built at all — checked against the current backend/web code and the 2026-07-23 implementation audit (`project-docs/18_Implementation_Coverage_Audit.md`). The blank Summary section at the end of the original (never filled in) has been completed using this same cross-check.
 
-**Instructions:**
-- Fill in your response for each question
-- Provide justification/notes where applicable
-- Mark priority: 🔴 HIGH | 🟡 MEDIUM | 🟢 LOW
-- Add any additional context or constraints
+**Verdict legend:**
+- ✅ **Implemented as decided** — code matches the recorded decision
+- 🟡 **Implemented differently** — something shipped, but not quite what was decided
+- ⚪ **Not implemented** — the decision was never built; treat as an open gap, not a shipped feature
+- 📋 **Policy-only** — an operational/organizational decision (SLA hours, reviewer roles, review checklists) that isn't the kind of thing that shows up in code either way; noted as "not independently verifiable against code" rather than given a pass/fail
+- ❔ **Not independently re-verified** — plausible given adjacent findings, but this pass didn't hit the specific code path to confirm it either way
 
----
-
-## 1. REQUIREMENT CONSISTENCY ISSUES
-
-### Issue 1.1.1: Trust Score Calculation - Contradictory Specifications
-
-**Context:**
-- Multiple documents specify different trust score approaches
-- Business_Rules.md: "Initial Score: 0 (new providers)"
-- Trust Engine Spec: Complex signal-based system with decay algorithms
-- CTO Analysis: "DELETE risk algorithm, replace with simple 'Verified' badge"
-
-**Question 1.1.1:** What trust score calculation should be implemented for MVP?
-
-- [ ] Simple calculation (completion rate, on-time rate, no-show rate) - NO decay algorithms
-- [ ] Simple "Verified" badge only (no numeric score)
-- [ ] Complex signal-based system with decay algorithms
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Use Simple calculation  (completion rate, on-time rate, no-show rate) - NO decay algorithms and add being verified as one criteria and to get the intial or default trust score. make it 50 point for being verified
-```
-
-**Justification/Notes:**
-```
-New users should have an intital trust score when they complete the verification process and get verified so the point 50 is because they might improve it by their completeion rate, ontime rate and soon to 100 or make it to zero by no show rate. Users with unverified or pending profile will have a default score of zero
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🔴] Create single authoritative document defining trust score MVP scope
-- [ 🟡] Remove conflicting specifications
-- [ 🔴] Update implementation plan
+Original priority markers (🔴/🟡/🟢) were left almost entirely unmarked in the source document (all three symbols printed, none selected, on all but one issue) — rather than guess a retroactive priority ranking from incomplete data, the Summary section at the end ranks issues by **Code Reality status** instead, which is more useful for anyone deciding what to build or fix next.
 
 ---
 
-### Issue 1.1.2: RFQ Creation Wallet Requirement - Documented Contradiction
+## 1. Requirement Consistency Issues
 
-**Context:**
-- CRITICAL_BUSINESS_RULE_UPDATE.md (Nov 26, 2025): "NO wallet balance required to create/publish RFQs"
-- 13_Movello_Business_Rules_Specification.md (older): "Must maintain sufficient balance to fund the next billing cycle"
+### Issue 1.1.1 — Trust Score Calculation
 
-**Question 1.1.2:** Which rule is correct for RFQ creation?
+**Conflict:** `Business_Rules.md` said "Initial Score: 0"; the Trust Engine spec described a complex signal/decay system; a CTO analysis said to delete scoring entirely in favor of a "Verified" badge.
 
-- [ ] NO wallet balance required (as per CRITICAL_BUSINESS_RULE_UPDATE.md)
-- [ ] Wallet balance required before RFQ creation
-- [ ] Wallet balance required only for publishing (not creation)
-- [ ] Other: _________________________________________________
+> **Decision:** Simple calculation (completion rate, on-time rate, no-show rate) — **no decay algorithms**. Being verified is itself one criterion and sets the default/initial score: **50 points for verified**, **0 for unverified/pending**. Users improve from there via completion rate, on-time rate, and no-show rate.
 
-**Your Decision:** 
-```
-Only being verified is required for business to create RFQ, and having a balance in wallet is not required to create RFQ but a balance in wallet is required to award a bid.
-```
+**Code Reality:** ✅ **Implemented as decided, with one addition.** `TrustScoreCalculator.cs` computes exactly `Base(50 if verified, 0 if not) + CompletionRate×20 + OnTimeRate×20 − NoShowRate×30 + RejectionPenalty` — the verified-base-50 idea and the three named signals are all there, plus a rejection-penalty term the decision didn't explicitly ask for but doesn't contradict. 🟡 **Caveat that matters more than the formula itself:** per the 2026-07-23 audit, this calculator has **zero production call sites** — no event handler ever invokes it, so in practice every provider's score is frozen at its registration-time default (50 or 0) and never actually moves as completion/on-time/no-show data accumulates. The decision was correctly translated into code; the code was never wired into the platform's event flow.
 
-**Justification/Notes:**
-```
-requiring a balance from business will make them less interested to creat RFQ for the amount they don't know. But, if we ask them to deposit for the bid they award that would be a reasonable and they will comply with it. 
-```
+### Issue 1.1.2 — RFQ Creation Wallet Requirement
 
-**Priority:** 🔴 🟡 🟢
+**Conflict:** one doc said no wallet balance is required to create/publish RFQs; an older doc said a business must maintain sufficient balance for the next billing cycle.
 
-**Action Required:**
-- [ 🔴] Update 13_Movello_Business_Rules_Specification.md to reflect decision
-- [ 🟢] Add version control to business rules documents
-- [🟡 ] Update API validation logic
+> **Decision:** Only being **verified** is required to create an RFQ. A wallet balance is **not** required to create an RFQ, but **is** required to award a bid. Rationale: requiring a balance up front discourages RFQ creation for an amount businesses don't yet know; requiring it at award time (when the cost is known) is the more reasonable ask.
+
+**Code Reality:** ✅ **Implemented as decided.** RFQ creation has no wallet-balance gate anywhere in the web flow; wallet balance is checked exactly at award time, inline in `SplitAwardDialog.tsx` (`totalEscrow > availableBalance` blocks the Confirm button) — see `BUSINESS_LOGIC_IMPLEMENTATION.md` for the mechanics.
+
+### Issue 1.1.3 — Escrow Lock Timing
+
+**Conflict:** four different documents put escrow lock at four different points in the flow (before contract creation, after creation but before assignment, after assignment, immediately after award).
+
+> **Decision:** After contract creation but before vehicle assignment. Proposed sequence: **deposit/award check → contract created per provider → escrow locked per contract → vehicles assigned → both parties accept terms via OTP (signing gate) → activation only once contract created + escrow locked + vehicles assigned + both signed are all true → delivery confirms via OTP/QR → active.** Escrow is per-contract (not per-RFQ) because one RFQ/line item can produce multiple provider contracts via split award.
+
+**Code Reality:** ✅ **Implemented essentially as decided.** The real (string-valued, not enum-enforced) contract lifecycle includes `PendingEscrow`, `PendingVehicleAssignment`, and `PendingSigning → Signed` as distinct states in that order, and `Active` genuinely does gate on escrow + assignment + dual-party OTP signing all being satisfied — this is one of the more faithfully-executed decisions in the whole document. See `backlog/mvp/epic-06-contract-management.md` and `MVP_CONTRACT_STATE_MACHINE.md` for the full (18-state-in-practice) picture.
 
 ---
 
-### Issue 1.1.3: Escrow Lock Timing - Multiple Conflicting Definitions
+## 2. Module Responsibility Boundaries
 
-**Context:**
-- Business_Rules.md: "Escrow lock = Monthly cost (or full cost for short rentals)"
-- Business_Logic_Flows.md: "Escrow Lock: Required before vehicle assignment"
-- Finance_Module.md: Shows escrow lock happening after award
-- CRITICAL_BUSINESS_RULE_UPDATE.md: "Escrow locked immediately after award"
+### Issue 1.2.1 — Contract Creation Responsibility
 
-**Question 1.1.3:** When exactly should escrow be locked in the workflow?
+> **Decision:** Contract creation should be triggered by `BidAwardedEvent`, **not** `EscrowLockedEvent` — escrow lock should instead be triggered by the contract-creation event. If Finance fails to lock escrow, the contract is put on hold and retried by a background service rather than failing outright; if contract creation itself fails after award, the award is reverted for retry.
 
-- [ ] Before contract creation (immediately after award)
-- [ ] After contract creation but before vehicle assignment
-- [ ] After vehicle assignment but before activation
-- [ ] Other: _________________________________________________
+**Code Reality:** ✅ **Implemented as decided.** Per the audit, `ContractCreatedEventHandler` is what actually triggers escrow locking today (via a hardcoded-constant computation path, a separate finding — see `BUSINESS_LOGIC_IMPLEMENTATION.md`'s trust-score section and the audit §10.5 for the "two escrow computation paths" note). The award→contract→escrow ordering matches this decision exactly.
 
-**Your Decision:** 
-```
-After contract creation but before vehicle assignment 
-```
+### Issue 1.2.2 — Trust Score Module Ownership
 
-**Proposed Sequence:**
-```
-1. The business should deposit for the bid they award to award a bid or they should have enough amount in their wallet
-2. Contract will be created for awarded bid for each providers and 
-3. upon successful contract creation escrow will be locked per contract so that the business will have a insured contract prepared with providers
-4. awarded providers must assign vehicles for the contract or for the award they get
-5. Contract activation will be ready by three conditions 1, Contract is Created 2, Enough amount is locked in escrow for the contract 3, Vehcile is assigned by the provider other wise the contract will not be continue or activated for vehicle handover and processing
-6, upon contract activation the provider should deliver the vehicles on the requested date and should confirm delivery by OTP/QR then the contract will be started
-```
+> **Decision:** Identity module should access data from Contracts/Delivery/Finance via **events** (subscribing to things like `ContractCompletedEvent`, `DeliveryConfirmedEvent`, `NoShowEvent`, `DisputeResolvedEvent`), to avoid duplicating trust-score logic in every module that has relevant data.
 
-**Justification/Notes:**
-```
-Escrow lock should be per contract as one RFQ may have multiple line item and each lineitem may have mulptiple bid award for multiple providers because of split award, we need to create a contract for each provider and each provider contract should have a guaranteed locked fund to be activated
-```
+**Code Reality:** ⚪ **Not implemented — this is the single biggest gap this document surfaces.** The event-subscription architecture for trust score was never built: no event handler anywhere calls `TrustScoreCalculator` or `Provider.UpdateTrustScore()`. The decision correctly diagnosed the right architecture (events, not duplication); it just never got wired up. This is the same gap flagged under Issue 1.1.1 above and in the audit's §10.2 — recorded twice here because it's referenced from two different original issues.
 
-**Priority:** 🔴 🟡 🟢
+### Issue 1.2.3 — Settlement Processing Dependency Chain
 
-**Action Required:**
-- [🔴] Define clear sequence: Award → Contract Creation → Escrow Lock  → Vehicle Assignment → Activation
-- [🔴] Update all documents to reflect decision
-- [🔴] Update Finance module implementation
+> **Decision:** Settlement triggered by three events — `ContractCompletedEvent` (normal), `ContractAlteredEvent` (adjustment/pro-rata), `EarlyReturnEvent` (early termination with penalties). Finance subscribes to all three, reads contract data from the event payload, queries MasterData directly (DB or Redis) for commission rates, calculates, and pays out.
+
+**Code Reality:** 🟡 **Implemented differently in one specific way.** Settlement generation (`GenerateSettlementCommand`) is real and event-driven in spirit, but there's an unresolved internal contradiction (audit §10.4) between whether settlement cadence is tier-based (as the wallet-epic rewrite found) or a flat rolling 30-day cycle regardless of tier (as the settlement-epic rewrite found) — this specific decision's "how settlement gets triggered" premise is sound, but the exact cadence mechanics it assumed haven't been confirmed as built one way or the other.
 
 ---
 
-## 2. MODULE RESPONSIBILITY BOUNDARIES
+## 3. Business Flow Gaps
 
-### Issue 1.2.1: Contract Creation Responsibility - Unclear Ownership
+### Issue 2.1.1 — Award Retry & Partial Award Handling
 
-**Context:**
-- Contracts_Module.md: "Contract Creation (Auto-triggered)" - triggered by `BidAwardedEvent`
-- Business_Logic_Flows.md: Shows contract creation happening after escrow lock
-- Finance module also needs to validate wallet balance before locking escrow
+> **Decision:** No auto-retry/auto-award — always show the error and let the business manually retry after depositing funds, to avoid unintentional awards leading to disputes. If a business can only afford part of a line item: award the affordable portion (unselected bids go `LOST`), optionally create a new RFQ for the remainder, or deposit more and award the rest. Provider rejection after award: notify the business, exclude the rejecting provider, reactivate previously-`LOST` bids for manual re-selection — no penalty for legitimate first-time rejections (vehicle broken/maintenance/insurance expired).
 
-**Question 1.2.1:** What is the correct sequence and responsibility for contract creation?
+**Code Reality:** ✅ **Partial/split award matches the decision closely.** `SplitAwardDialog.tsx` has no auto-retry or auto-award path — insufficient balance simply disables Confirm; awarding fewer vehicles than required is a normal, unblocked outcome (see `BUSINESS_LOGIC_IMPLEMENTATION.md`). ❔ **Not independently re-verified:** the specific "provider rejects after award → excluded provider → previously-LOST bids reactivate for re-selection" flow wasn't confirmed against a specific endpoint in this pass — plausible given the bid-status model, but don't cite it as confirmed-built without checking the award/bid-status transition code directly.
 
-**Proposed Sequence:**
-```
-1. Marketplace: Award bid → Publish `BidAwardedEvent` (includes escrow amount)
-2. Finance: Receive event → Validate wallet → Lock escrow → Publish `EscrowLockedEvent`
-3. Contracts: Receive `EscrowLockedEvent` → Create contract → Publish `ContractCreatedEvent`
-```
+### Issue 2.1.2 — Delivery OTP Failure Scenarios
 
-**Your Decision:** 
-```
-Contract creation should be triggered by bidawardevent not escrowlockedevent but escrow lock should be triggered by Contract creation eevnt
-```
+> **Decision:** Provider can request a new OTP if it expires (network delays can cause this). OTP verification is **final acceptance** — no delivery rejection after OTP. If vehicle condition doesn't match expectations, the business simply doesn't confirm via OTP; can ask for a replacement vehicle, and failing that, raise a dispute (contract altered afterward if a different provider is awarded).
 
-**Error Handling:**
-- What happens if Finance fails to lock escrow?
-  ```
-  Contract will be put in hold so that it will not be activated for vehicle assignment but contract on this status will be checked by a background service for retry
-  ```
+**Code Reality:** ✅ **Broadly consistent.** `deliveryService.generateOTP`/`verifyOTP` (`/delivery/sessions/{id}/otp/generate|verify`) support regeneration by calling generate again; the contract lifecycle has no "reject after OTP confirm" transition, consistent with "final acceptance." ⚪ **However:** the decision's fallback path — raise a dispute if a replacement vehicle doesn't work out — routes into a dispute-resolution workflow that, per Issue 5.1.4 below, **does not exist anywhere in the backend**. The "ask for replacement, then dispute" decision is only half-buildable today.
 
-- What happens if Contracts fails to create contract after bid award?
-  ```
-  then the bid  award will be reverted so that the user will do a retry
-  ```
+### Issue 2.1.3 — Early Return Approval & Penalty
 
-**Justification/Notes:**
-```
-Escrow lock will happen when we have a contravt created and will do a lock so that the provider can assign vehciles
-```
+> **Decision:** Both business and provider must approve an early return. A one-week notice period avoids most disputes; less notice is penalized based on how much notice was actually given. Damage during early return is the business's responsibility (enforced via law enforcement, provider raises a dispute). Penalty communicated via SMS, email, and in-app (in-app default).
 
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ 🟡] Document the sequence clearly
-- [ 🔴] Define rollback procedures
-- [ 🟡] Update module specifications
+**Code Reality:** 🟡 **Partially built, differently shaped.** `POST /contracts/{id}/line-items/{lineItemId}/early-return` exists and accepts an `initiatorType` (`BUSINESS`/`PROVIDER`/`ADMIN`) plus a reason — consistent with a multi-party-aware flow. But the web UI (`AdminEarlyReturnPage.tsx`) shows **no dual-approval step, no notice-period countdown, and no penalty preview** before submission — see `BUSINESS_LOGIC_IMPLEMENTATION.md`. Whatever approval/notice/penalty logic exists is entirely server-side and invisible to the frontend today.
 
 ---
 
-### Issue 1.2.2: Trust Score Calculation - Module Ownership Unclear
+## 4. Approval Processes
 
-**Context:**
-- Identity module has `TrustScoreCalculator` service
-- But trust score depends on data from Contracts, Delivery, Finance modules
+*(These three issues are organizational/operational policy — reviewer roles, SLA hours, checklists — not the kind of thing that shows up as a pass/fail in code. Marked 📋 throughout; noted where an adjacent system confirms the general shape exists.)*
 
-**Question 1.2.2:** How should Identity module access data from other modules for trust score calculation?
+### Issue 2.2.1 — Document Verification Approval
 
-- [ ] Through events (subscribe to ContractCompletedEvent, DeliveryConfirmedEvent, etc.)
-- [ ] Direct queries to other modules' databases
-- [ ] Service interfaces (synchronous calls)
-- [ ] Other: _________________________________________________
+> **Decision:** Compliance Officer reviews; checklist = business lifetime, license accuracy, capital, vehicle ownership (Libre), vehicle insurance, attorney document check, insurance expiry. **48-hour SLA.** Rejection uses standard predefined reasons (not fully custom feedback). No appeal process. If the reviewer is unavailable, review simply continues once one becomes available.
 
-**Your Decision:** 
-```
-It will be through events
-```
+**Code Reality:** 📋 Policy-only. The general shape (admin verification queue with approve/reject + standard rejection reasons) is confirmed to exist (epic-01/02, `BusinessVerificationListPage.tsx` and siblings) — the specific 48-hour SLA and exact checklist items are organizational policy, not independently checkable in code.
 
-**Event Subscriptions Required:**
-- [ ] ContractCompletedEvent
-- [ ] DeliveryConfirmedEvent
-- [ ] NoShowEvent
-- [ ] DisputeResolvedEvent
-- [ ] Other: _________________________________________________
+### Issue 2.2.2 — Insurance Verification Approval
 
-**Justification/Notes:**
-```
-The trust score calculation will be handled in one place but triggered from multiple modules so having the trust score implementaion every where will lead to code redundancy that makes it hard to maintain
-```
+> **Decision:** Manual verification for MVP, moving to a hybrid (manual + API) model post-MVP. Fake certificates get the vehicle flagged/suspended. 48-hour timeline. Checklist: expiration date, insurance type, coverage amount.
 
-**Priority:** 🔴 🟡 🟢
+**Code Reality:** 📋 Policy-only / ✅ consistent with what exists — manual insurance verification via the admin vehicle-verification queue is confirmed built (epic-03); no automated insurance-API integration exists yet, consistent with "MVP = manual."
 
-**Action Required:**
-- [ 🟡] Document event flow clearly
-- [ 🔴] Update Identity module specification
-- [ 🔴] Define trust score recalculation triggers
+### Issue 2.2.3 — Settlement Approval Process
+
+> **Decision:** Auto-approve below a threshold (100,000 ETB), manual approval above it. Flagged providers require manual review. Large payouts reviewed by a finance officer. Disputes are meant to be avoided at contract-creation time (via escrow), with actual disputes routed to a dispute handler.
+
+**Code Reality:** ❔ **Not independently re-verified in this pass** — settlement/payout approval-threshold logic wasn't traced to a specific code path here. The closing reference to a "dispute handler" is the same structure Issue 5.1.4 finds **does not exist** — treat the dispute-routing half of this decision as unbuilt until proven otherwise.
 
 ---
 
-### Issue 1.2.3: Settlement Processing - Finance Module Dependency Chain
+## 5. Pre-Action Requirements
 
-**Context:**
-- Settlement requires contract completion data from Contracts module
-- Settlement requires commission rates from MasterData module
-- Settlement requires penalty data from Contracts module
+### Issue 2.3.1 — RFQ Creation Prerequisites
 
-**Question 1.2.3:** How should Finance module access data for settlement processing?
+> **Decision:** Business must be VERIFIED (status = ACTIVE); checking that status is sufficient — an unverified business means an incomplete KYC profile.
 
-- [ ] Finance queries Contracts module via internal service interface (synchronous)
-- [x] Contracts module publishes events with settlement data (asynchronous)
-- [x] Finance queries MasterData module directly for commission rates
-- [ ] Other: _________________________________________________
+**Code Reality:** ✅ Same decision as Issue 1.1.2 above, restated — implemented as decided.
 
-**Your Decision:** 
-```
-Settlement triggered by multiple events:
-1. ContractCompletedEvent → Normal settlement
-2. ContractAlteredEvent → Adjustment settlement (pro-rata refunds/charges)
-3. EarlyReturnEvent → Early termination settlement with penalties
+### Issue 2.3.2 — Bid Submission Prerequisites
 
-Finance subscribes to all three events.
-For each event, Finance:
-- Reads contract data from event payload
-- Queries MasterData for commission rates (direct DB read or Redis cache)
-- Calculates settlement amount
-- Processes payment to provider
-```
+> **Decision:** Real-time vehicle availability check, insurance-validity check, provider-suspension check, and a trust-score minimum threshold, all at bid time — and **re-validated in full at award time**, since a vehicle can become unavailable between bid and award.
 
-**Data Access Pattern:**
-```
-its an event based pub/sub way where the finance module subscribe and the contract module publish to contractCompletedEvent
-```
+**Code Reality:** 🟡 **Partially confirmed.** Fleet-capacity-aware bidding is real — `ProviderFleetCapacityService`/`ProviderFleetController` on the backend, and `SegmentCapacityMeter`/`FleetCapacityConflictSheet`/`provider-fleet-capacity-service.ts` on the web cross-check RFQ bid commitments against Direct Rental commitments per vehicle segment — strong evidence the availability-check half of this decision shipped. ⚪ A **trust-score minimum threshold gating bids** is unlikely to be implemented given Issue 1.1.1/1.2.2's finding that trust score isn't even being updated in production — don't assume this specific criterion is enforced anywhere.
 
-**Justification/Notes:**
-```
-Only the contract module can track the completenes of contracts. the responsibility of finance module will be to process finance related tasks not contract related logics. but the settlement can be triggered by contract completeion, contract alteration and some other things
-```
+### Issue 2.3.3 — Contract Activation Timeout & Rollback
 
-**Priority:** 🔴 🟡 🟢
+> **Decision:** Contract can sit in pending-activation for **5 days**; after that, notify business and provider (rather than silently auto-cancelling); rollback = contract cancellation / RFQ reactivation.
 
-**Action Required:**
-- [ 🔴] Document the chosen pattern clearly
-- [🟡] Update Finance module specification
-- [ 🔴] Define data contracts/interfaces
+**Code Reality:** 🟡 **The mechanism exists; the exact parameters weren't independently re-confirmed.** The audit found an `EscrowTimeoutJob` background job that calls `Contract.Cancel()` to produce the `CANCELLED` status — confirming *a* timeout-driven cancellation job exists, consistent with the decision's intent. The specific 5-day figure and whether it notifies-without-cancelling vs. auto-cancels wasn't verified against the job's actual logic in this pass.
 
 ---
 
-## 3. BUSINESS FLOW GAPS
+## 6. Event-Driven Workflow Issues
 
-### Gap 2.1.1: Business Award Flow - Missing Error Recovery
+*(This entire section decided on an ambitious event-infrastructure architecture — sagas, exactly-once delivery, universal idempotency keys, dead-letter queues, event sourcing/replay, strict ordering, event versioning. None of this was found to exist as a formal, separate infrastructure layer anywhere in the audited codebase. The real system is simpler: MediatR-based in-process event handlers, published after the domain transaction commits, each independently try/caught with structured logging — a legitimate, working simplification, just not what was decided here.)*
 
-**Context:**
-- Flow shows: "IF available_balance < total_escrow_required: Show error"
-- Missing: Retry mechanism, partial award handling, provider rejection handling
+### Issue 3.1.1 — Missing Critical Events
 
-**Question 2.1.1:** How should the system handle award failures and retries?
+> **Decision:** Add `EscrowLockFailedEvent`, `EscrowLockedEvent`, `ProviderRejectedAwardEvent`, `DeliveryRejectedEvent`, `InsuranceExpiringEvent`, `ContractActivationTimeoutEvent`, `SettlementDisputedEvent` to the catalog, each with defined handlers; retry policies on all events.
 
-**Award Retry After Deposit:**
-- [x] Allow business to retry award after depositing funds
-- [x] Require business to manually trigger retry
-- [ ] Auto-retry when balance becomes sufficient
-- [ ] Other: _________________________________________________
+**Code Reality:** 🟡 **Some of these events are real, at least in effect** (contract creation, escrow-lock, and timeout-driven cancellation all functionally exist per the sections above), but they weren't confirmed to exist as a formally catalogued, individually-retried event taxonomy — the real notification-side event handler roster (~35 handlers, per epic-11) is broader in event-count but was not built against this specific proposed catalog.
 
-**Your Decision:** 
-```
-IF available_balance < total_escrow_required: Show error but Allow business to retry award after depositing funds and for every award the need to have sufficent funds. There will not be an auto award that will lead to a dispute because of unintentional awarding
-```
+### Issue 3.1.2 — Event Handler Failure Guarantees
 
-**Partial Award Handling:**
-- If business can only afford 2 of 10 vehicles, what happens to remaining 8?
-  - [x] Business deposits more funds and awards remaining OR
-  - [x] Create new RFQ for remaining vehicles
-  - [ ] Cancel remaining vehicles
-  - [ ] Extend deadline and allow more bids
-  - [ ] Other: _________________________________________________
+> **Decision:** Exactly-once delivery, idempotency keys on all events, retry-with-backoff + dead-letter-queue + admin-notify on handler failure, event sourcing (replay) plus an audit trail for lost events.
 
-**Your Decision:** 
-```
-System informs business their balance can only award X vehicles out of Y requested.
-Options:
-1. Deposit more funds and award all vehicles
-2. Award partial (X vehicles) → Line item status = AWARDED, unselected bids = LOST
-3. Create new RFQ for remaining (Y-X) vehicles
+**Code Reality:** ⚪ **Not implemented as decided.** The real, confirmed pattern (epic-11) is per-handler try/catch with structured logging so one failure doesn't block the triggering transaction — a sound, simpler safety net, but there is no confirmed exactly-once guarantee, no universal idempotency-key scheme, no dead-letter queue, and no event-sourcing/replay mechanism anywhere in the audited backend. Notifications' own outbox tables (email/SMS) were explicitly found to have **no automated retry worker** — the opposite of "retry with exponential backoff on all events."
 
-RFQ Status Logic:
-- PARTIALLY_AWARDED: If RFQ has multiple line items AND some awarded + some still bidding
-- AWARDED: When ALL line items are awarded
-```
+### Issue 3.1.3 — Event Ordering, Sagas, Versioning
 
-**Provider Rejection After Award:**
-- What if provider rejects award after being awarded?
-  ```
-Manual re-award process:
-1. Notify business about provider rejection
-2. Rejected provider excluded from future awards for this RFQ
-3. Business manually selects next provider to award
-4. System reactivates bids that were in LOST status for business selection
+> **Decision:** Strict event ordering required; a formal Saga pattern for the Award → Contract Creation → Escrow → Vehicle Assignment → Delivery → Activation chain; all events versioned.
 
-Bid Status Flow:
-- BIDDING → AWARDED (selected provider)
-- BIDDING → LOST (unselected providers)
-- AWARDED → REJECTED (if provider rejects)
-- LOST → BIDDING (if awarded provider rejects, making bids available again)
-
-No penalty for legitimate first-time rejections (vehicle broken, maintenance, insurance expired).
-  ```
-
-**Justification/Notes:**
-```
-this will protect the business from awarding a bid with insufficent balance and avoid contract creation without secured fund. if there is no secured fund there will not be a vehicle assignment by providers and contract activation
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🔴] Add award retry flow after deposit
-- [🟡] Add partial award confirmation dialog
-- [🟡] Add provider rejection handling
+**Code Reality:** 🟡 **The *sequence* the saga would have encoded is real and enforced** (see Issue 1.1.3/1.2.1 above — the state machine genuinely gates activation on all those steps completing in order), but it's enforced through the contract's own state machine and per-handler logic, not a formally named saga-orchestration layer, and no event-versioning scheme was found. Treat the outcome as achieved, the specific architectural mechanism as not what was decided.
 
 ---
 
-### Gap 2.1.2: Delivery OTP Flow - Missing Failure Scenarios
+## 7. Integration Patterns
 
-**Context:**
-- Flow shows: "IF INVALID: Increment attempts, IF attempts >= 3: Block for 30 minutes"
-- Missing: OTP expiry handling, no-show handling, delivery rejection flow
+### Issue 3.2.1 — Module Communication Pattern
 
-**Question 2.1.2:** How should the system handle OTP and delivery failures?
+> **Decision:** Async (events) everywhere except validation checks, which are synchronous.
 
-**OTP Expiry Handling:**
-- [ ] Provider can request new OTP if expired
-- [ ] OTP auto-regenerates after expiry
-- [ ] Business must contact provider to get new OTP
-- [ ] Other: _________________________________________________
+**Code Reality:** ✅ Broadly consistent — MediatR-driven async domain events dominate the write path across modules (Marketplace→Contracts→Finance→Delivery), while read-side validation (fleet capacity, wallet balance checks) happens as direct synchronous queries, matching the decision's own distinction.
 
-**Your Decision:** 
-```
-Provider can request new OTP if expired
-```
+### Issue 3.2.2 — External Service Integration Resilience
 
-**Business No-Show for Delivery:**
-- What if provider arrives but business contact person is unavailable?
-  ```
-  There will be a penality. business schedule a time and place for vehicle handover and assign a contact person for handover. 
-  ```
+> **Decision:** No retry policies, no circuit breakers, no rate limiting for external services (payment gateways, SMS, email) — "out of MVP scope." SMS failure fallback = retry only.
 
-**Delivery Rejection After OTP:**
-- Can business reject delivery after OTP verification if vehicle condition is poor?
-  - [ ] Yes, with reason required
-  - [ ] No, OTP verification is final acceptance
-  - [ ] Yes, but only for specific reasons (damage, wrong vehicle, etc.)
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
- No, OTP verification is final acceptance
-```
-
-**Vehicle Condition Mismatch:**
-- What if vehicle condition doesn't match expectations?
-  ```
-  Then the business shouldn't confirm the delivery through OTP, ask provider for another vehicle replacement, if that is not worked it will raise a dispute and can award another provider. and contract will be altered after the dispute is settled (if the business decide to award another provider)
-  ```
-
-**Justification/Notes:**
-```
-OTP verification means the business confirmed the vehicle fulfilled their expectation. After they confirmed through OTP then having a damage or some issues will not be accepted but they can do an early return request which can be handled by another flow. But they can reject the delivery if they are not satisfied by the car. 
-OTP also can be expired because of different network issue like late delivery of the message to the business
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ 🔴] Add OTP regeneration flow
-- [ 🟡] Add delivery rejection flow
-- [ 🟡] Add no-show handling
+**Code Reality:** ✅ **Implemented as decided — confirmed by omission.** The notifications epic rewrite explicitly found **no background retry worker** for the email/SMS outbox and no delivery-status webhook ingestion — matching this decision's own "no retry policy" choice, not contradicting it. This is a rare case where an original "we're skipping this for MVP" decision and a later "this doesn't exist" audit finding are actually describing the same, intentional state.
 
 ---
 
-### Gap 2.1.3: Early Return Flow - Incomplete Penalty Application
+## 8. Compliance & Operational Excellence
 
-**Context:**
-- Flow shows penalty calculation but doesn't specify approval workflow, dispute handling, damage assessment
+*(4.1.x: KYC/KYB, insurance, and financial-audit compliance. These map to epics 01–03 and 08–10, all confirmed ✅ implemented at the epic level per the coverage audit; the granular enforcement mechanisms/thresholds recorded here are largely 📋 policy detail not independently re-checked line-by-line in this pass.)*
 
-**Question 2.1.3:** How should early returns be processed and approved?
+### Issue 4.1.1 — KYC/KYB Enforcement
 
-**Early Return Approval:**
-- [ ] Auto-approved (no approval needed)
-- [ ] Business approval required
-- [ ] Provider approval required
-- [ ] Both business and provider must approve
-- [ ] Other: _________________________________________________
+📋 General enforcement (business/provider must be verified before transacting) is confirmed built (epics 01/02/03, ✅ across backend/web). Specific mechanism details recorded in the original weren't re-traced individually.
 
-**Your Decision:** 
-```
-Both should approve
-```
+### Issue 4.1.2 — Insurance Compliance Enforcement
 
-**Provider Dispute of Early Return:**
-- What if provider disputes the early return reason?
-  ```
-  To avoid disputes early return will require an early return notice of a week. requesting for early return for less than a week would be penalized based on the notice time they gave. 
-  ```
+📋 Same pattern as 2.2.2 above — manual verification confirmed, automated enforcement mechanics not independently re-checked.
 
-**Damage Assessment:**
-- What if vehicle is damaged during early return?
-  ```
-  Then the business will cover the damage price and that will be enforced by law enfoement and for that the provider should rais a dispute
-  ```
+### Issue 4.1.3 — Financial Audit Trail Requirements
 
-**Penalty Communication:**
-- How is penalty communicated to business?
-  - [ ] Email notification
-  - [ ] In-app notification
-  - [ ] SMS notification
-  - [ ] All of the above
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-All of the above
-```
-
-**Justification/Notes:**
-```
-We have user communication preference SMS and email will be supported but the in-app is default
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ 🟢] Define early return approval workflow
-- [ 🟢] Add damage assessment process
-- [ 🟢] Add dispute escalation path
+❔ Not independently re-verified against a specific audit-log implementation in this pass; Wallet & Escrow (epic-08) is confirmed to have real transaction ledgers, but whether they meet this issue's specific audit-trail requirements wasn't checked line-by-line here.
 
 ---
 
-## 4. APPROVAL PROCESSES
+## 9. Operational Excellence *(explicitly marked "out of MVP scope" by the original document itself)*
 
-### Missing 2.2.1: Document Verification Approval Process
+### Issue 4.2.1 — Incident Response, 4.2.2 — Backup/Recovery, 4.2.3 — Monitoring & Alerting
 
-**Context:**
-- Documents state: "Compliance Officer Reviews" but don't specify reviewer roles, criteria, SLA, rejection process, appeal process
-
-**Question 2.2.1:** Define the document verification approval process.
-
-**Reviewer Roles:**
-- Who can review documents?
-  ```
-  Compliance Officer
-  ```
-
-**Review Criteria:**
-- What is the checklist for document review?
-  ```
-  1, Business lifetime
-  2, Business license accuracy
-  3, Business Capital
-  4, Car ownership (Libre)
-  5, Vehicle Insurance
-  6, Attorney document check
-  7, Insurance expiry
-  ```
-
-**SLA (Service Level Agreement):**
-- How long should review take?
-  - [ ] 24 hours
-  - [ ] 48 hours
-  - [ ] 72 hours
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-48 hours
-```
-
-**Rejection Process:**
-- Can documents be rejected with feedback?
-  - [ ] Yes, with detailed feedback
-  - ] Yes, with standard rejection reasons
-  - [ ] No, only approve or request resubmission
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes, with standard rejection reasons
-```
-
-**Appeal Process:**
-- What is the appeal process if documents are rejected?
-  ```
-  We don't have appeal process at all
-  ```
-
-**Reviewer Unavailability:**
-- What happens if reviewer is unavailable?
-  ```
-  There should be one. and review will be continued when its available
-  ```
-
-**Justification/Notes:**
-```
-The rejection reasons will be with a predefined rejection reasons so that the user will fullfill them 
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🟡 ] Create Document Verification SOP
-- [🔴 ] Define reviewer roles and checklist
-- [ 🔴] Add to Identity module specification
+⏸ **Deferred by the original document's own scoping**, not something this rewrite needs to reconcile against code — these were recorded as post-MVP operational concerns from the start ("Its out of MVP Scope" appears verbatim in the original section header). No code-reality verdict applies; they remain open organizational decisions if and when they're prioritized.
 
 ---
 
-### Missing 2.2.2: Insurance Verification Approval Process
+## 10. Business Process Drawbacks & Risks
 
-**Context:**
-- Documents state: "Insurance must be valid for at least 30 days"
-- Missing: Verification method, authenticity check, fraud detection, timeline
+### Drawback 5.1.1 — Manual Verification Bottleneck
 
-**Question 2.2.2:** Define the insurance verification process.
+> **Decision:** Acceptable for MVP; partial automation planned post-MVP ("need to launch fast, automation is complex scope for MVP").
 
-**Verification Method:**
-- [ ] Manual verification (MVP)
-- [ ] Automated API integration (POST-MVP)
-- [ ] Hybrid (automated + manual review)
-- [ ] Other: _________________________________________________
+**Code Reality:** ✅ Matches — manual admin verification is what's actually built (epics 01/02/03); no automation has shipped, consistent with "partial automation is a post-MVP plan," not an MVP claim.
 
-**Your Decision:** 
-```
-Manual Verification for MVP then we will have Hybrid
-```
+### Drawback 5.1.2 — No Real-Time Vehicle Availability
 
-**Authenticity Verification:**
-- How is insurance authenticity verified?
-  ```
-  Manual
-  ```
+> **Decision:** Availability checked at bid time, award time, and vehicle-assignment time. Provider can reject an award **without penalty** if the vehicle turns out to be unavailable (broken/maintenance).
 
-**Fraud Detection:**
-- What if insurance certificate is fake?
-  ```
-  We will flag that vehicle as suspended
-  ```
+**Code Reality:** 🟡 The bid-time/award-time capacity-checking half is corroborated by the fleet-capacity services referenced under Issue 2.3.2. ❔ The specific "provider rejects award without penalty" mechanic wasn't independently confirmed against a specific endpoint in this pass.
 
-**Verification Timeline:**
-- How long does verification take?
-  ```
-  48 hrs
-  ```
+### Drawback 5.1.3 — Settlement Frequency / Cash Flow
 
-**Verification Checklist:**
-- What are the verification criteria?
-  ```
- Expiration time, Insurance type, insurace coverage amount
-  ```
+> **Decision:** Not considered a real issue, since the escrow-locked fund is already paid; keep current (monthly-for-Bronze/Silver) frequency rather than moving everyone to weekly/bi-weekly.
 
-**Justification/Notes:**
-```
-on mvp level we ill do the manual verification then we will API check with supported insurance companies
-```
+**Code Reality:** ⚪ **Directly touches an unresolved contradiction found during the doc-rewrite pass** (see Issue 1.2.3 / audit §10.4): whether settlement cadence is genuinely tier-based as this decision assumes, or a flat 30-day cycle regardless of tier, is disputed between two other rewritten epic docs and was not resolved before publishing. Don't cite this decision as confirmed-implemented without resolving that contradiction first.
 
-**Priority:** 🔴 🟡 🟢
+### Drawback 5.1.4 — No Dispute Resolution Workflow
 
-**Action Required:**
-- [🟢] Define insurance verification process
-- [🟢] Add verification checklist
-- [🟢] Add fraud detection criteria
+> **Decision:** MVP dispute categories = vehicle condition mismatch, delivery no-show, early-return disagreement, settlement-amount disagreement, insurance expiry during contract. Evidence = photos, GPS data, OTP records, contract docs, communication logs. 48-hour resolution target.
+
+**Code Reality:** ⚪ **Not implemented — confirmed absent, not just unverified.** The audit is explicit: "no fraud-detection rule engine, no collusion detection, no dispute-engine entity anywhere in the backend." `Disputed`/`OnHold` exist only as unused contract status values with no supporting workflow, entities, or evidence-handling behind them. Every dispute-routing reference elsewhere in this document (Issues 2.1.2, 2.1.3, 2.2.3) ultimately depends on this workflow existing — none of those downstream flows can be fully realized until this is actually built. **This is the highest-impact open gap in the entire questionnaire.**
+
+### Risk 5.2.1 — Partial Award Complexity
+
+Decision: same as Issue 2.1.1 above (deposit more / new RFQ for remainder / award partial). ✅ Implemented — see Issue 2.1.1.
+
+### Risk 5.2.2 — Provider Rejection After Award
+
+> **Decision:** Appeal process only for first-time rejections; no penalty for legitimate rejections (broken vehicle, maintenance, expired insurance).
+
+**Code Reality:** ❔ Not independently re-verified against a specific "appeal" endpoint or first-time-vs-repeat rejection tracking in this pass — plausible given the bid-status model referenced in Issue 2.1.1, but unconfirmed.
+
+### Risk 5.2.3 — Early Return Penalty Fairness
+
+> **Decision (final, superseding this issue's own original framing of "15–25%"):** Early return penalties should be **configurable** (fixed amount or percentage), with a tiered notice-period structure — 7 days' notice = 0% penalty, 3 days = 2%, same-day = 15%. No waiver process and no Enterprise/GOV_NGO penalty negotiation for MVP; system administrators adjust rates centrally based on market feedback.
+
+**Code Reality:** 🟡 **The "configurable policy" architecture is real; the specific numbers and any client-facing preview are not.** MasterData's versioned policy/rules engine (`ContractPolicyVersion/Rule`, `EscrowPolicyVersion/Rule`, per `markdown-documentations/Master_Data_Specification.md`) is exactly the kind of admin-configurable-without-a-deploy system this decision asked for. But per `BUSINESS_LOGIC_IMPLEMENTATION.md`, the web early-return UI (`AdminEarlyReturnPage.tsx`) shows **no penalty calculator or preview at all** — whatever the live 7/3/same-day percentages actually are today lives entirely server-side and isn't independently confirmed from the frontend in this pass.
 
 ---
 
-### Missing 2.2.3: Settlement Approval Process
+## 11. Module Interaction Issues
 
-**Context:**
-- Documents state: "Automatic Processing" but don't specify approval workflow, dispute handling, large payout handling
+### Issue 6.1.1 — Circular Dependency Avoidance
 
-**Question 2.2.3:** Define the settlement approval workflow.
+> **Decision:** Hybrid pattern — reads are direct cross-module database queries (allowed), writes are event-only (no direct cross-module writes), all CUD operations publish events, MasterData is read-only/no-events (static config).
 
-**Approval Method:**
-- [ ] Auto-approve all settlements
-- [ ] Manual approval for all settlements
-- [ ] Auto-approve below threshold, manual above threshold
-- [ ] Other: _________________________________________________
+**Code Reality:** ✅ **Strongly confirmed, arguably the most prescient decision in the document.** The decision's own example event names (`BidAwardedEvent`, `ContractCreatedEvent`, `EscrowLockedEvent`, `ContractCompletedEvent`) are, per every other section above, **the actual real event names used in the shipped system** — this reads less like a forward-looking decision and more like an accurate prediction of what got built.
 
-**Your Decision:** 
-```
-Auto-approve below threshold, manual above threshold
-```
+### Issue 6.1.2 — Shared Data Access Pattern
 
-**Approval Threshold:**
-- If using threshold-based approval, what is the threshold?
-  ```
-  100,000
-  ```
+> **Decision:** Direct database reads for synchronous validation/lookups (e.g., Finance reading a business name from Identity); events for asynchronous state changes.
 
-**Disputed Settlement:**
-- What if settlement amount is disputed?
-  ```
-  We will avoid dispute from settlement upon contract creation. but the dispute will be handled by dispute handler. 
-  ```
+**Code Reality:** ✅ Consistent with confirmed behavior elsewhere in the audit — e.g. escrow computation directly looking up wallet accounts by `AccountType` string (a separate, unrelated bug the audit found — two different strings, `"COMMISSION"` vs `"PLATFORM_COMMISSION"`, used for what should be the same wallet — but the *pattern* of direct cross-module reads for lookups is exactly what that bug presupposes exists).
 
-**Flagged Provider:**
-- What if provider account is flagged?
-  - [ ] Auto-approve (flag doesn't affect settlement)
-  - [ ] Manual review required
-  - [ ] Hold settlement until flag is resolved
-  - [ ] Other: _________________________________________________
+### Issue 6.1.3 — Master Data Access & Caching
 
-**Your Decision:** 
-```
-Manual review required
-```
+> **Decision:** Direct queries to the MasterData database, with Redis caching for frequently-accessed data (commission rates, vehicle types, contract policies, lookups); cache invalidated on admin update; long TTL (~24h) since MasterData changes infrequently.
 
-**Large Payout Workflow:**
-- What is the approval workflow for large payouts?
-  ```
-  Finance officer will review them and approve them for release
-  ```
-
-**Justification/Notes:**
-```
-finance officer will check and approve them to avoid liquidation. but the main target is to creat transparency 
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🟢] Define settlement approval workflow
-- [ 🟢] Specify thresholds and flags
-- [🔴] Update Finance module specification
+**Code Reality:** ❔ **Not independently re-verified.** Direct cross-module reads of MasterData are consistent with everything else in this document, but Redis caching specifically for MasterData lookups wasn't confirmed or denied in this pass — check `Modules/MasterData/` and the DI/caching setup directly before citing this as either implemented or not.
 
 ---
 
-## 5. PRE-ACTION REQUIREMENTS
+## Summary Section (Completed 2026-07-23 — Original Was a Blank Template)
 
-### Issue 2.3.1: RFQ Creation Prerequisites - Incomplete Checklist
+The original document's closing "Overall Priority Assessment" and "Next Steps" sections were never filled in (placeholder brackets only, no sign-off name/date). Rather than invent a priority ranking the product owner never actually recorded, this summary ranks the ~35 issues above by **Code Reality status**, which is the more actionable framing for anyone picking this up now.
 
-**Context:**
-- Current: "Wallet Balance: ⚠️ NO wallet balance required"
-- Missing: Business status, onboarding completion, Terms of Service acceptance, suspension check
+**Fully implemented as decided:**
+1.1.2 (RFQ wallet requirement), 1.1.3 (escrow timing/sequence), 1.2.1 (contract-creation trigger), 2.3.1 (RFQ prerequisites), 3.2.1 (async-except-validation), 3.2.2 (no external retry/circuit-breaker — confirmed by omission), 5.1.1 (manual verification acceptable), 5.2.1 (partial award), 6.1.1 (hybrid read/write module pattern), 6.1.2 (shared data access pattern).
 
-**Question 2.3.1:** What are the complete prerequisites for RFQ creation?
+**Implemented, but meaningfully different from what was decided (needs a decision-owner's attention, not just a doc fix):**
+1.1.1 / 1.2.2 (trust score formula built correctly, but never wired into production — every provider frozen at default), 1.2.3 (settlement-trigger pattern right, cadence mechanics disputed between two epic docs), 2.1.1 (partial/split award solid, provider-rejection-reactivation flow unconfirmed), 2.1.3 (early-return endpoint exists, but no dual-approval/notice-period/penalty-preview UI), 2.3.2 (fleet-capacity checks real, trust-score bidding threshold almost certainly not enforced given 1.1.1's finding), 2.3.3 (a timeout-cancellation job exists; exact day-count/notify-vs-cancel behavior unconfirmed), 3.1.1 / 3.1.3 (the intended event sequence and outcomes are real; the formal saga/catalog/versioning architecture is not), 5.2.3 (configurable-policy architecture exists server-side; no client-facing calculator, exact numbers unconfirmed).
 
-**Prerequisites Checklist:**
-- [ ] Business must be VERIFIED (status = ACTIVE)
-- [ ] Business must have completed onboarding
-- [ ] Business must have accepted Terms of Service
-- [ ] Business must not be suspended or flagged
-- [ ] Business must have valid contact information
-- [ ] Other: _________________________________________________
+**Confirmed not implemented — open gaps, not documentation problems:**
+3.1.2 (no exactly-once delivery, no universal idempotency keys, no dead-letter queue, no event sourcing/replay — outbox retry explicitly confirmed absent), **5.1.4 (no dispute-resolution workflow of any kind anywhere in the backend — the single highest-impact gap in this entire document, since Issues 2.1.2, 2.1.3, and 2.2.3 all silently depend on it existing)**.
 
-**Your Decision:** 
-```
-- [ ] Business must be VERIFIED (status = ACTIVE)
-```
+**Policy-only / not meaningfully code-verifiable (organizational decisions, not implementation gaps):**
+2.2.1, 2.2.2, 2.2.3 (approval SLAs/reviewer roles/thresholds), 4.1.1, 4.1.2, 4.1.3 (compliance enforcement detail) — the general systems these policies govern are confirmed to exist; the specific numbers/roles recorded were never meant to be "in code" per se.
 
-**Validation Rules:**
-- How should these be validated at API level?
-  ```
-  so the business will be verified by compliance officer if the busines provided all the informations then the status will be set verified so checking that is enough
-  ```
+**Deferred by the original document's own scoping (no action needed from this rewrite):**
+4.2.1, 4.2.2, 4.2.3 (incident response, backup/recovery, monitoring — explicitly marked out-of-MVP-scope in the source).
 
-**Justification/Notes:**
-```
-Unverified business means incompleted profile and that would break the KYC verified business principle
-```
+**Not independently re-verified in this pass (check the specific code path before relying on either a yes or a no):**
+2.1.1's provider-rejection-reactivation mechanic, 4.1.3's audit-trail specifics, 5.1.2's reject-without-penalty mechanic, 5.2.2's appeal-process/first-time-rejection tracking, 6.1.3's Redis caching for MasterData.
 
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🟡] Add complete prerequisite checklist
-- [🟡] Document validation rules in API specification
-- [🔴] Update RFQ creation endpoint
+**Immediate next step if someone picks this document up to plan work:** build the dispute-resolution workflow (5.1.4) first — it's both the largest confirmed gap and the one the most other recorded decisions (2.1.2, 2.1.3, 2.2.3) assume already exists. Second priority: decide whether to wire `TrustScoreCalculator` into production events at all (1.1.1/1.2.2), since several tier/commission-rate features downstream of trust score currently operate on frozen, never-updated data.
 
 ---
 
-### Issue 2.3.2: Bid Submission Prerequisites - Missing Vehicle Availability Check
+**Questionnaire originally completed by:** the product owner, across the Nov 2025–mid 2026 window (exact sign-off name/date were never filled into the original template).
+**This status layer completed by:** documentation rewrite pass, 2026-07-23, cross-checked against `project-docs/18_Implementation_Coverage_Audit.md` and the rewritten `backlog/mvp/epic-04` through `epic-12` files.
 
-**Context:**
-- Current: "Provider must have sufficient *active* and *unassigned* vehicles"
-- Missing: Real-time availability check, insurance validity check, provider account status check
-
-**Question 2.3.2:** What validations should occur at bid submission and award time?
-
-**Pre-Bid Validation:**
-- [ ] Real-time vehicle availability check
-- [ ] Insurance validity check (must be valid through delivery date)
-- [ ] Provider account status check (not suspended)
-- [ ] Provider trust score check (minimum threshold)
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-- [ ] Real-time vehicle availability check (the provider should have active or unassigned vehicles by the requestd vehicle specs)
-- [ ] Insurance validity check (must be valid through delivery date for the active vehicles)
-- [ ] Provider account status check (not suspended)
-- [ ] Provider trust score check (minimum threshold)
-
-```
-
-**Re-Validation at Award Time:**
-- Should validations be re-checked at award time?
-  - [ ] Yes, re-validate all checks
-  - [ ] No, bid-time validation is sufficient
-  - [ ] Yes, but only critical checks (availability, insurance)
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[ ] Yes, re-validate all checks
-```
-
-**Vehicle Availability Between Bid and Award:**
-- What if vehicle becomes unavailable between bid submission and award?
-  ```
-  Everytime we will check if the provider has a valid vehicle for the request bid. 
-  ```
-
-**Justification/Notes:**
-```
-If the provider doesn't fullfill those criteria we protect them from bidding to avoid failed delivery and business disatisfaction and to avoid fraud
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🔴] Add pre-bid validation checklist
-- [🔴] Add re-validation at award time
-- [🔴] Update bid submission endpoint
-
----
-
-### Issue 2.3.3: Contract Activation Prerequisites - Dual Requirement Unclear
-
-**Context:**
-- Current: "Contract becomes active only when **BOTH** conditions are met: Escrow Lock + Vehicle Delivery"
-- Missing: Failure handling, timeout, rollback procedures
-
-**Question 2.3.3:** How should contract activation handle failures and timeouts?
-
-**Failure Scenarios:**
-- What if escrow lock succeeds but delivery fails?
-  ```
-  Penality of providers will be appplied and reactivation of other providers bid for the same RFQ but the failed provider will be excluded
-  ```
-
-- What if delivery succeeds but escrow lock fails?
-  ```
-  escrow lock will happend before delivery but after contract creation
-  ```
-
-**Timeout Handling:**
-- How long can contract stay in PENDING_ACTIVATION?
-  - [ ] 3 days
-  - [ ] 7 days
-  - [ ] 14 days
-  - [ ] No timeout
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-5 days
-```
-
-**Timeout Action:**
-- What happens if timeout is reached?
-  - [ ] Auto-cancel contract
-  - [ ] Notify business and provider
-  - [ ] Escalate to support
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Notify business and provider
-```
-
-**Rollback Procedures:**
-- What is the rollback procedure for each failure scenario?
-  ```
- contract cancellation and or RFQ activation
-  ```
-
-**Justification/Notes:**
-```
-if the contract is not activated with in 5 days we will count that the delivery is not happened or the escrow fund is not happened which needs to lead contract termination 
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🔴] Define contract activation state machine clearly
-- [🔴] Add timeout handling
-- [🔴] Add rollback procedures
-
----
-
-## 6. EVENT-DRIVEN WORKFLOW ISSUES
-
-### Gap 3.1.1: Missing Critical Events
-
-**Context:**
-- Event catalog exists but missing error events, timeout events, edge case events
-
-**Question 3.1.1:** Which missing events should be added to the event catalog?
-
-**Missing Events to Add:**
-- [ ] EscrowLockFailedEvent - What if escrow lock fails after award?
-- [ ] ProviderRejectedAwardEvent - What if provider rejects after award?
-- [ ] DeliveryRejectedEvent - What if business rejects delivery after OTP?
-- [ ] InsuranceExpiringEvent - 30-day warning
-- [ ] ContractActivationTimeoutEvent - Contract stuck in pending
-- [ ] SettlementDisputedEvent - Provider disputes settlement amount
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-- [ ] EscrowLockFailedEvent - What if escrow lock fails after award?
-- [ ] ProviderRejectedAwardEvent - What if provider rejects after award?
-- [ ] DeliveryRejectedEvent - What if business rejects delivery after OTP?
-- [ ] InsuranceExpiringEvent - 30-day warning
-- [ ] ContractActivationTimeoutEvent - Contract stuck in pending
-- [ ] SettlementDisputedEvent - Provider disputes settlement amount
-- [ ] EscrowLockedEvent  what will happen when escrow is locked or deposited?
-```
-
-**Event Handlers:**
-```
-
-- [ ] EscrowLockFailedEvent - Contract will be put in pending status
-- [ ]EscrowLockedEvent - Contract will be put in funded status
-- [ ] ProviderRejectedAwardEvent - What if provider rejects after award?
-- [ ] DeliveryRejectedEvent - What if business rejects delivery after OTP?
-- [ ] InsuranceExpiringEvent - 30-day warning
-- [ ] ContractActivationTimeoutEvent - Contract stuck in pending
-- [ ] SettlementDisputedEvent - Provider disputes settlement amount
-  
-  ```
-
-**Event Retry Policies:**
-- Should events have retry policies?
-  - [ ] Yes, all events
-  - [ ] Yes, only critical events
-  - [ ] No retry
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes, all events 
-```
-
-**Justification/Notes:**
-```
-becuase we are following event based module communication and one event should trigger the other and the failuer of one event will break the whole flow. 
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🔴] Add complete event catalog including all error and edge case events
-- [🔴] Document event handlers for each event
-- [🔴] Define event retry policies
-
----
-
-### Gap 3.1.2: Event Handler Failure Scenarios
-
-**Context:**
-- Documents show event handlers but don't specify failure handling, idempotency, timeout, event loss
-
-**Question 3.1.2:** How should event processing handle failures and ensure reliability?
-
-**Event Processing Guarantees:**
-- [ ] At-least-once delivery (events may be processed multiple times)
-- [ ] Exactly-once delivery (events processed exactly once)
-- [ ] At-most-once delivery (events may be lost)
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Exactly-once delivery (events processed exactly once)
-```
-
-**Idempotency:**
-- Should all events have idempotency keys?
-  - [ ] Yes, all events
-  - [ ] Yes, only critical events
-  - [ ] No
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes, all events
-```
-
-**Event Handler Failure:**
-- What if event handler fails?
-  - [ ] Retry with exponential backoff
-  - [ ] Send to dead letter queue
-  - [ ] Notify admin
-  - [ ] All of the above
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-All of the above
-```
-
-**Event Loss:**
-- What if event is lost?
-  - [ ] Event sourcing (replay events)
-  - [ ] Audit trail (log all events)
-  - [ ] Manual recovery process
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
- Event sourcing (replay events) and audit trail
-```
-
-**Justification/Notes:**
-```
-We need a mechanism to replay events so that the whole process will continue and having audit trail will help us to fix broken events 
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🔴] Define event processing guarantees
-- [🔴] Add idempotency keys to all events
-- [🟢] Add event retry policies and dead letter queue handling
-- [🟢] Add event sourcing or audit trail
-
----
-
-### Gap 3.1.3: Event Ordering and Dependencies
-
-**Context:**
-- Flow shows: `BidAwardedEvent` → Contracts creates contract → Finance locks escrow
-- Missing: Event ordering requirements, versioning, sequencing, saga pattern
-
-**Question 3.1.3:** How should event ordering and dependencies be handled?
-
-**Event Ordering:**
-- Are events required to arrive in order?
-  - [ ] Yes, strict ordering required
-  - ] No, handlers must handle out-of-order events
-  - [ ] Partial ordering (some events must be ordered)
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes, strict ordering required
-```
-
-**Out-of-Order Events:**
-- What if `EscrowLockedEvent` arrives before `ContractCreatedEvent`?
-  ```
-  every event should follow their order violation fo this would be considered as break of the whole flow. 
-  ```
-
-**Saga Pattern:**
-- Should multi-step transactions use saga pattern?
-  - [ ] Yes, for Award → Escrow → Contract flow
-  - [ ] No, event handlers are sufficient
-  - [ ] Yes, for all multi-step transactions
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes we need to follow Saga patter and FYI the flow is Award -> Contract creation-> Escrow -> vehicle assignment -> delivery (Handover) -> contract activation
-```
-
-**Event Versioning:**
-- Should events have version numbers?
-  - [ ] Yes, all events
-  - [ ] Yes, only breaking changes
-  - [ ] No
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-yes all 
-```
-
-**Justification/Notes:**
-```
-We need event versioning as the previous event might have an issue and we might do a retry by versioning it and updating its content
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ 🔴 Define event ordering requirements
-- [ 🔴] Add event versioning and sequencing
-- [🔴 ] Add saga pattern for multi-step transactions
-
----
-
-## 7. INTEGRATION PATTERNS
-
-### Issue 3.2.1: Module-to-Module Communication - Mixed Patterns
-
-**Context:**
-- Document shows both async events and sync service interfaces
-- Missing: Clear decision matrix for when to use which pattern
-
-**Question 3.2.1:** When should each communication pattern be used?
-
-**Decision Matrix:**
--we use async operation everywhere  except validation checkers
-  ```
-
-**Your Decision:** 
-```
- We use async operation everywhere
-```
-
-**Examples:**
-- Trust score calculation: [ ] Events [ ] Service Interface
-- Settlement data retrieval: [ ] Events [ ] Service Interface
-- Contract creation: [ ] Events [ ] Service Interface
-- Vehicle availability check: [ ] Events [ ] Service Interface
-
-**Justification/Notes:**
-```
-we need sync operation for validation check but we don't need for events and CRUD operation we need async operation
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Document decision matrix for choosing pattern
-- [ ] Add to architecture overview
-- [ ] Update module specifications
-
----
-
-### Issue 3.2.2: External Service Integration - Missing Patterns
-
-**Context:**
-- Documents mention payment gateways, SMS, Email services
-- Missing: Retry policies, circuit breakers, fallbacks, rate limiting
-
-**Question 3.2.2:** How should external service integrations handle failures?
-
-**Retry Policies:**
-- Should external service calls have retry policies?
-  - [ ] Yes, all services
-  - [ ] Yes, only critical services (payment)
-  - [ ] No
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-No
-```
-
-**Circuit Breaker:**
-- Should circuit breakers be implemented?
-  - [ ] Yes, for all external services
-  - [ ] Yes, only for payment gateways
-  - [ ] No
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-No
-```
-
-**Fallback Mechanisms:**
-- What if SMS fails?
-  - [ ] Email backup
-  - [ ] In-app notification
-  - [ ] Retry only
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Retry only
-```
-
-**Rate Limiting:**
-- Should rate limiting be implemented?
-  ```
- No
-  ```
-
-**Justification/Notes:**
-```
- Its out of MVP Scope 
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Add external service integration patterns document
-- [ ] Define retry policies, circuit breakers, fallbacks, rate limiting
-- [ ] Add to infrastructure architecture
-
----
-
-## 8. COMPLIANCE & OPERATIONAL EXCELLENCE
-
-### Gap 4.1.1: KYC/KYB Compliance - Missing Enforcement Mechanisms
-
-**Context:**
-- Documents state: "Mandatory verification before platform access"
-- Missing: API-level enforcement, violation logging, grace period, audit process
-
-**Question 4.1.1:** How should KYC/KYB compliance be enforced?
-
-**API-Level Enforcement:**
-- How should this be enforced at API level?
-  - [ ] Authorization policies (middleware)
-  - [ ] Service-level checks
-  - [ ] Both
-  - [ ] Other: Its a manual verification for MVP
-
-**Your Decision:** 
-```
-Its a manual verification for MVP
-```
-
-**Grace Period:**
-- Can users browse before verification?
-  - [ ] Yes, browsing allowed
-  - [ ] No, verification required for all access
-  - [ ] Yes, but limited features only
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes, but limited features only
-```
-
-**Violation Logging:**
-- How should compliance violations be logged?
-  ```
-  Its out of MVP Scope
-  ```
-
-**Audit Process:**
-- How often should compliance audits be performed?
-  ```
-  Auditing will be, who verified a specific business and when 
-  ```
-
-**Justification/Notes:**
-```
-Its too early to complex this as we have 
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Define API-level enforcement (authorization policies)
-- [ ] Add compliance violation logging and alerting
-- [ ] Add regular compliance audit process
-
----
-
-### Gap 4.1.2: Insurance Compliance - Missing Automated Enforcement
-
-**Context:**
-- Documents state: "Zero tolerance: No vehicle without valid insurance"
-- Missing: Enforcement at assignment, expiry monitoring, auto-suspension, notification timeline
-
-**Question 4.1.2:** How should insurance compliance be enforced and monitored?
-
-**Enforcement at Vehicle Assignment:**
-- How is this enforced when provider tries to assign vehicle to contract?
-  ```
-  we will check the vehcile insurance expiry and block that vehicle from being listed for assignment
-  ```
-
-**Insurance Expiry During Contract:**
-- What if insurance expires during contract?
-  - [ ] Auto-suspend contract
-  - [ ] Notify provider and business
-  - [ ] Allow contract to continue
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Notify provider and business
-```
-
-**Expiry Monitoring:**
-- How is insurance expiry monitored?
-  - [ ] Scheduled job (daily check)
-  - [ ] Event-driven (on contract creation)
-  - [ ] Both
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Both
-```
-
-**Notification Timeline:**
-- When should notifications be sent?
-  - [ ] 30 days before expiry
-  - [ ] 7 days before expiry
-  - [ ] On expiry
-  - [ ] All of the above
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-All
-```
-
-**Justification/Notes:**
-```
-Notification needs to be sent for both business and provider. for provider to renew it. for busienss to stop driving un insured vehicles
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🟡] Define insurance validation at vehicle assignment time
-- [🟢] Add scheduled job to check insurance expiry daily
-- [ 🟡] Add notification workflow
-
----
-
-### Gap 4.1.3: Financial Compliance - Missing Audit Trail Requirements
-
-**Context:**
-- Documents mention: "Double-entry ledger", "Audit trails"
-- Missing: What events to audit, retention policy, access control, tamper protection
-
-**Question 4.1.3:** What are the financial audit requirements?
-
-**Events to Audit:**
-- What financial events must be audited?
-  - [ ] All financial events
-  - [ ] Only events above threshold (e.g., ETB 10,000)
-  - [ ] Only critical events (payments, settlements, escrow)
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-All
-```
-
-**Retention Policy:**
-- How long are audit logs retained?
-  - [ ] 1 year
-  - [ ] 3 years
-  - [ ] 7 years (regulatory requirement)
-  - [ ] Indefinitely
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-7 years
-```
-
-**Access Control:**
-- Who can access audit logs?
-  - [ ] Compliance officers only
-  - ] Admin users
-  - [ ] Finance team
-  - [ ] All of the above
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-All
-```
-
-**Tamper Protection:**
-- How are audit logs protected from tampering?
-  - [ ] Append-only database
-  - [ ] Blockchain
-  - [ ] Encrypted logs
-  - [ ] All of the above
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Append only database
-```
-
-**Justification/Notes:**
-```
-we implement this for MVP level
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ 🔴] Define financial audit requirements
-- [🟡] Add immutable audit log
-- [ 🟢] Add audit log retention policy
-- [ 🔴] Add access control for audit logs
-
----
-
-
-
-## 9. OPERATIONAL EXCELLENCE ( Its out of MVP Scope)
-
-### Missing 4.2.1: Incident Response Process
-
-**Context:**
-- No specification for payment gateway downtime, database unavailability, Keycloak downtime, on-call, escalation
-
-**Question 4.2.1:** Define the incident response process.
-
-**On-Call Rotation:**
-- Who is on-call?
-  ```
-  [Your response here]
-  ```
-
-**Escalation Path:**
-- What is the escalation path?
-  ```
-  [Your response here]
-  ```
-
-**Common Incidents - Runbooks:**
-- Payment gateway down:
-  ```
-  [Your response here]
-  ```
-
-- Database unavailable:
-  ```
-  [Your response here]
-  ```
-
-- Keycloak down:
-  ```
-  [Your response here]
-  ```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Create Incident Response Plan document
-- [ ] Define on-call rotation and escalation paths
-- [ ] Create runbooks for common incidents
-
----
-
-### Missing 4.2.2: Data Backup and Recovery Process
-
-**Context:**
-- Documents mention: "Automated backups (daily)" but missing retention, RTO, RPO, testing schedule
-
-**Question 4.2.2:** Define the backup and recovery strategy.
-
-**Backup Retention Policy:**
-- How long are backups retained?
-  - [ ] 30 days
-  - [ ] 60 days
-  - [ ] 90 days
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[Your response here]
-```
-
-**RTO (Recovery Time Objective):**
-- How long to restore?
-  - [ ] 1 hour
-  - [ ] 4 hours
-  - [ ] 24 hours
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[Your response here]
-```
-
-**RPO (Recovery Point Objective):**
-- How much data can be lost?
-  - [ ] 0 (no data loss)
-  - [ ] 1 hour
-  - [ ] 24 hours
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[Your response here]
-```
-
-**Backup Testing Schedule:**
-- How often are backups tested?
-  - [ ] Weekly
-  - [ ] Monthly
-  - [ ] Quarterly
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[Your response here]
-```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Define backup and recovery strategy
-- [ ] Specify RTO, RPO, retention, testing
-- [ ] Add to deployment guide
-
----
-
-### Missing 4.2.3: Performance Monitoring and Alerting
-
-**Context:**
-- Documents mention: "Monitoring (Sentry)" but missing metrics, thresholds, dashboards, alert routing
-
-**Question 4.2.3:** Define the monitoring and alerting strategy.
-
-**Key Metrics to Monitor:**
-- [ ] API response time
-- [ ] Error rate
-- [ ] Database query performance
-- [ ] External service latency
-- [ ] Business metrics (RFQ creation, bids, contracts)
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[Your response here]
-```
-
-**Alert Thresholds:**
-- When to page on-call?
-  ```
-  [Your response here - e.g., "API response time > 2s", "Error rate > 5%"]
-  ```
-
-**Dashboards Needed:**
-- [ ] Technical metrics dashboard
-- [ ] Business metrics dashboard
-- [ ] Error tracking dashboard
-- [ ] All of the above
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[Your response here]
-```
-
-**Alert Routing:**
-- How are alerts routed?
-  - [ ] Email
-  - [ ] SMS
-  - [ ] PagerDuty
-  - [ ] Slack
-  - [ ] All of the above
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-[Your response here]
-```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Define monitoring and alerting strategy
-- [ ] Specify key metrics, alert thresholds, dashboards, alert routing
-- [ ] Add to operations documentation
-
----
-
-## 10. BUSINESS PROCESS DRAWBACKS & RISKS
-
-### Drawback 5.1.1: Manual Verification Bottleneck
-
-**Context:**
-- All KYC/KYB and insurance verification is manual
-- Impact: Scalability limitation, slow onboarding, high operational cost
-
-**Question 5.1.1:** Is manual verification acceptable for MVP, and what is the POST-MVP plan?
-
-**MVP Acceptance:**
-- [ ] Yes, acceptable for MVP
-- [ ] No, must automate for MVP
-- [ ] Partial automation (some checks automated)
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
- Acceptable for MVP
-```
-
-**POST-MVP Automation Plan:**
-- What is the plan for POST-MVP?
-  ```
- Partial Automation
-  ```
-
-**Justification/Notes:**
-```
-We ned to launch fast and automation will be complex scope for mvp
-```
-
-**Priority:** 🔴 🟡 🟢
-
----
-
-### Drawback 5.1.2: No Real-Time Vehicle Availability 
-
-**Context:**
-- Vehicle availability checked at bid time, not real-time
-- Impact: Potential fulfillment failures, poor user experience
-
-**Question 5.1.2:** How should vehicle availability be handled?
-
-**Current Approach:**
-- [ ] Acceptable with re-validation at award time
-- [ ] Must implement real-time availability for MVP
-- [ ] Implement real-time availability for POST-MVP
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Check previous responses of mine in the above wuestions
-Aailablity check will be done on bid time and award time and on vehicle assignment time for a contract
-```
-
-**Provider Rejection Handling:**
-- Allow provider to reject award if vehicle unavailable?
-  - [ ] Yes, with penalty
-  - [ ] Yes, without penalty
-  - [ ] No, provider is committed
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes Without penality
-```
-
-**Justification/Notes:**
-```
-The vehicle might br broken, or in maintaiance
-```
-
-**Priority:** 🔴 🟡 🟢
-
----
-
-### Drawback 5.1.3: Settlement Frequency Creates Cash Flow Issues
-
-**Context:**
-- Bronze/Silver providers get monthly settlements
-- Impact: Cash flow issues for small providers, competitive disadvantage
-
-**Question 5.1.3:** What is the settlement frequency strategy?
-
-**MVP Settlement Frequency:**
-- [ ] Keep monthly for Bronze/Silver (as designed)
-- [ ] Change to weekly for all tiers
-- [ ] Change to bi-weekly for all tiers
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-We don't need to worry about settlement issue as we pay the escrow locked fund
-```
-
-**POST-MVP Plan:**
-- [ ] Implement instant payouts (Epic 17)
-- [ ] Keep current frequency
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Keep current frequency
-```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
----
-
-### Drawback 5.1.4: No Dispute Resolution Workflow
-
-**Context:**
-- Documents mention disputes but no clear resolution process
-- Impact: Unclear handling, potential conflicts, legal risk
-
-**Question 5.1.4:** Define the dispute resolution workflow.
-
-**Dispute Categories:**
-- What are the dispute categories?
-  ```
-MVP Dispute Categories (ALL must be handled):
-1. Vehicle condition mismatch
-2. Delivery no-show (provider claims arrived, business claims no-show)
-3. Early return disagreement  
-4. Settlement amount disagreement
-5. Insurance expiry during contract
-  ```
-
-**Evidence Requirements:**
-- What evidence is required for disputes?
-  ```
-- Photo of the vehicles
-- GPS location data
-- OTP verification records
-- Contract documents
-- Communication logs
-  ```
-
-**Resolution Timeline:**
-- How long should resolution take?
-  - [ ] 24 hours
-  - [ ] 48 hours
-  - [ ] 72 hours
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-48 hrs
-```
-
-**Escalation Path:**
-- What is the escalation path?
-  ```
-  [skip this 
-  ```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Define dispute resolution workflow
-- [ ] Specify dispute categories, evidence requirements, resolution timeline, escalation path
-
----
-
-### Risk 5.2.1: Partial Award Complexity
-
-**Context:**
-- Partial awards based on wallet balance create complexity
-- Impact: Unclear business process for remaining vehicles
-
-**Question 5.2.1:** How should partial awards be handled?
-
-**Partial Award Handling:**
-- If business can only afford 2 of 10 vehicles:
-  - [ ] Business deposits more funds and awards remaining
-  - [ ] Create new RFQ for remaining vehicles
-  - [ ] Cancel remaining vehicles
-  - [ ] Extend deadline and allow more bids
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-check above 
-```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Define partial award handling process
-- [ ] Document in business rules
-
----
-
-### Risk 5.2.2: Provider Rejection After Award
-
-**Context:**
-- Documents state "No acceptance required" - provider is committed if they bid
-- Impact: What if provider genuinely cannot fulfill?
-
-**Question 5.2.2:** How should provider rejections be handled?
-
-**Legitimate Rejection Scenarios:**
-- What are legitimate rejection scenarios (force majeure)?
-  ```
-  Vehicle broken, vehcile in maintainance , insurance expired
-  ```
-
-**Appeal Process:**
-- Should there be an appeal process for provider rejections?
-  - [ ] Yes, with review process
-  - [ ] No, rejection is final
-  - [ ] Yes, but only for first-time rejections
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Yes, but only for first-time rejections
-```
-
-**Penalty System:**
-- Should there be a tiered penalty system?
-  - [ ] Yes, harsh for repeated rejections, lenient for first-time with valid reason
-  - [ ] No, same penalty for all rejections
-  - [ ] No penalty for legitimate rejections
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-No penalty for legitimate rejections
-```
-
-**Justification/Notes:**
-```
-there will not be a penality if the car is broken
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Define legitimate rejection scenarios
-- [ ] Add appeal process for provider rejections
-- [ ] Add tiered penalty system
-
----
-
-### Risk 5.2.3: Early Return Penalty Fairness
-
-**Context:**
-- Early return penalty is tier-based (15-25% of remaining amount)
-- Impact: Might be too harsh, potential disputes, could discourage usage
-
-**Question 5.2.3:** Are early return penalties fair, and should there be waiver processes?
-
-**Penalty Rates Review:**
-- Are current penalty rates (15-25%) acceptable?
-  - [x] Other: Configurable penalty system (fixed amount or percentage)
-
-**Your Decision:** 
-```
-Early return penalties should be CONFIGURABLE (either fixed amount or percentage).
-Notice period penalties are also configurable with tiered structure:
-- 7 days notice: 0% penalty
-- 3 days notice: 2% penalty  
-- Same day: 15% penalty
-```
-
-**Waiver Process:**
-- Should there be a waiver process for legitimate reasons?
-  - [ ] Yes, for business closure, force majeure
-  - [ ] No, no waivers
-  - [ ] Yes, but only for Enterprise/GOV_NGO tiers
-  - [x] Other: Out of MVP scope
-
-**Your Decision:** 
-```
-No waiver process for MVP. Penalties apply based on configuration.
-```
-
-**Penalty Negotiation:**
-- Should Enterprise/GOV_NGO tiers be able to negotiate penalties?
-  - [ ] Yes
-  - [x] No - Out of MVP scope
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-No penalty negotiation for MVP. All tiers follow configured penalty structure.
-```
-
-**Justification/Notes:**
-```
-Configurable penalty system provides flexibility without complex negotiation workflows for MVP.
-System administrators can adjust penalty rates based on market feedback.
-```
-
-**Priority:** 🔴 HIGH
-
-**Action Required:**
-- [ ] Review penalty rates with business stakeholders
-- [ ] Add waiver process for legitimate reasons
-- [ ] Add penalty negotiation process for Enterprise/GOV_NGO tiers
-
----
-
-## 11. MODULE INTERACTION ISSUES
-
-### Issue 6.1.1: Circular Dependency Risk
-
-**Context:**
-- Identity ↔ Contracts ↔ Finance potential circular dependency
-- Impact: Tight coupling, difficult to maintain
-
-**Question 6.1.1:** How should module dependencies be structured to avoid circular dependencies?
-
-**Dependency Rules:**
-- [x] Enforce one-way dependencies for writes (via events)
-- [x] Allow read-only cross-module database queries
-- [x] State changes via events (create/update/delete)
-- [x] Data fetching via direct database reads
-
-**Your Decision:** 
-```
-Hybrid Pattern:
-- READ operations: Direct database queries allowed (Finance/Contract can query Identity & MasterData tables)
-- WRITE operations: Event-driven only (no direct writes to other module databases)
-- State changes: Publish events for all CUD operations (Contract, Marketplace, Delivery, Finance, Identity)
-- MasterData: No events (static configuration data, read-only access)
-```
-
-**Dependency Graph:**
-- Draw or describe the dependency graph:
-  ```
-READ Dependencies (Direct DB Queries):
-  MasterData ← Finance, Contract, Marketplace, Delivery, Identity (all read)
-  Identity ← Finance, Contract, Marketplace, Delivery (read business/provider data)
-
-WRITE Dependencies (Event-Driven):
-  Marketplace → BidAwardedEvent → Contract, Finance
-  Contract → ContractCreatedEvent → Finance, Delivery, Identity
-  Finance → EscrowLockedEvent → Contract, Identity
-  Delivery → DeliveryConfirmedEvent → Contract, Identity
-  Contract → ContractCompletedEvent → Finance, Identity
-  
-No circular write dependencies. Reads are cross-module but read-only.
-  ```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Document dependency graph clearly
-- [ ] Enforce one-way dependencies only
-- [ ] Update module specifications
-
----
-
-### Issue 6.1.2: Shared Data Access Patterns
-
-**Context:**
-- Multiple modules need to read from Identity (Business, Provider data)
-- Missing: Clear pattern for shared data access
-
-**Question 6.1.2:** How should modules access shared data?
-
-**Shared Data Access Pattern:**
-- [x] Read-only cross-schema queries (same database, different schemas) - MVP
-- [ ] Extract to shared service or API - POST-MVP
-- [ ] Service interfaces (synchronous calls)
-- [x] Events (asynchronous) - for state changes only
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Direct database reads for synchronous data fetching (validation, lookups).
-Events for asynchronous state changes (create/update/delete operations).
-
-Example:
-- Finance needs business name → Direct query to Identity.businesses table
-- Contract completed → Publish ContractCompletedEvent → Finance subscribes → Process settlement
-```
-
-**Justification/Notes:**
-```
-[Your notes here]
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [ ] Define shared data access pattern
-- [ ] Document in architecture overview
-
----
-
-### Issue 6.1.3: Master Data Module - Unclear Integration
-
-**Context:**
-- Master Data module provides lookup types, commission strategies, contract policies
-- Missing: How other modules access this data
-
-**Question 6.1.3:** How should other modules access Master Data?
-
-**Master Data Access Pattern:**
-- [ ] Direct queries to Master Data database
-- [ ] Service interface (synchronous calls)
-- [ ] Redis cache for frequently accessed data
-- [ ] Events (asynchronous updates)
-- [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Direct queries to Master Data database
-Redis cache for frequently accessed data
-```
-
-**Cache Strategy:**
-- Should Master Data be cached?
-  - [x] Yes, in Redis
-  - [ ] No, direct queries only
-  - [x] Yes, for frequently accessed data
-  - [ ] Other: _________________________________________________
-
-**Your Decision:** 
-```
-Cache ALL MasterData in Redis for performance:
-- Commission rates
-- Vehicle types  
-- Contract policies
-- Lookups and lookup types
-```
-
-**Cache Invalidation:**
-- How should cache be invalidated?
-  ```
-Cache invalidation on update:
-1. Admin updates MasterData via API
-2. API updates database
-3. API invalidates specific cache keys
-4. Next read fetches fresh data and updates cache
-
-Cache TTL: Consider long TTL (24 hours) since MasterData changes infrequently.
-  ```
-
-**Justification/Notes:**
-```
-if there is a change on master data that changes should be reflected other wise the system will operate by old data
-```
-
-**Priority:** 🔴 🟡 🟢
-
-**Action Required:**
-- [🟡] Define master data access pattern
-- [🟡] Specify cache strategy and invalidation
-- [🟡] Update module specifications
-
----
-
-## SUMMARY SECTION
-
-### Overall Priority Assessment
-
-**Critical Issues (Must Fix Before MVP Launch):**
-```
-[List issue numbers that are critical]
-```
-
-**High Priority Issues (Should Fix Before MVP Launch):**
-```
-[List issue numbers that are high priority]
-```
-
-**Medium Priority Issues (Can Fix Post-MVP):**
-```
-[List issue numbers that are medium priority]
-```
-
-**Low Priority Issues (Nice to Have):**
-```
-[List issue numbers that are low priority]
-```
-
----
-
-### Next Steps
-
-**Immediate Actions:**
-```
-[Your response here]
-```
-
-**Documentation Updates Required:**
-```
-[Your response here]
-```
-
-**Implementation Changes Required:**
-```
-[Your response here]
-```
-
----
-
-**Questionnaire Completed By:** _________________________  
-**Date:** _________________________  
-**Review Date:** _________________________
-
----
-
-**END OF QUESTIONNAIRE**
-
-
-
-
-
+**END OF DOCUMENT**

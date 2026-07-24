@@ -1,365 +1,96 @@
-# MVP Documentation - Progress Summary
+# MVP_MODULAR Documentation — Currency Tracker
 
-**Date:** November 26, 2025, 5:50 PM  
-**Status:** In Progress  
-**Completion:** 47% (8 of 17 documents)
-
----
-
-## ✅ **COMPLETED DOCUMENTS (8)**
-
-| # | Document | Size (KB) | Lines | Status |
-|---|----------|-----------|-------|--------|
-| 1 | **00_EXECUTIVE_SUMMARY.md** | 17.6 | 383 | ✅ Complete |
-| 2 | **01_ARCHITECTURE_OVERVIEW.md** | 39.7 | 1,033 | ✅ Complete |
-| 3 | **02_DATABASE_SCHEMA_DESIGN.md** | 18.5 | 509 | ✅ Complete |
-| 4 | **03_API_SPECIFICATIONS.md** | 18.4 | 874 | ✅ Complete |
-| 5 | **05_BUSINESS_LOGIC_FLOWS.md** | 31.9 | 878 | ✅ Complete |
-| 6 | **CRITICAL_BUSINESS_RULE_UPDATE.md** | 19.5 | 582 | ✅ Complete |
-| 7 | **Identity_and_Compliance_Module.md** | 24.6 | 717 | ✅ Complete |
-| 8 | **Marketplace_Module.md** | 21.2 | 650 | ✅ Complete |
-
-**Total Completed:** 191.4 KB, ~5,626 lines
+**Last verified against code:** 2026-07-23
+**Status:** Repurposed. Originally this file tracked *how many pre-implementation spec documents had been authored* (a writing-progress checklist, dated November 26, 2025, when none of the code existed yet). The product is now substantially built — 12 MVP epics and partial post-MVP work (see `00_EXECUTIVE_SUMMARY.md`) — so "% of docs written" is no longer a useful thing to track. This file now tracks **which documents in this `MVP_MODULAR/` tree have been reverified against running code, and which still reflect the pre-implementation plan.**
+**Primary source of truth for implementation status:** `project-docs/18_Implementation_Coverage_Audit.md` — a 2026-07-23, code-grounded audit covering backend, web, and both Flutter mobile apps against all 21 product epics. This file only tracks documentation *currency inside this specific folder*; for "is feature X actually built," read the audit, not this file.
 
 ---
 
-## 🔄 **REMAINING DOCUMENTS (9)**
+## How to read this file
 
-### **Module Specifications (5)**
-- [ ] Contracts_Module.md
-- [ ] Finance_Module.md
-- [ ] Delivery_Module.md
-- [ ] Master_Data_and_Settings_Module.md
-- [ ] Auth_and_Keycloak_Module.md
-
-### **Implementation Guides (4)**
-- [ ] 06_FRONTEND_ARCHITECTURE.md
-- [ ] 07_EVENT_DRIVEN_PATTERNS.md
-- [ ] 08_SECURITY_COMPLIANCE.md
-- [ ] 09_DEPLOYMENT_GUIDE.md
-- [ ] 10_TESTING_STRATEGY.md
-- [ ] Business_Rules.md
-- [ ] UI_System_Design_Guidelines.md
+- **✅ Rewritten** — re-verified against running code as part of the 2026-07-23 audit-driven rewrite pass (this file's own pass, or an earlier one covering the contract cluster). Treat as current.
+- **✔️ Confirmed accurate (not rewritten)** — the audit specifically checked this file against code and found it already correct; no rewrite was needed.
+- **⚠️ Not reverified** — still reflects the November 2025 pre-implementation plan. May be partially or wholly accurate by coincidence, but has not been checked against code in this pass. Do not cite it as a current spec without verifying first.
+- **🔴 Known stale** — specifically flagged as likely or confirmed wrong (usually because it was written for an architecture/frontend stack that was never actually built).
 
 ---
 
-## 📊 **WHAT'S BEEN DOCUMENTED**
+## File-by-file status
 
-### **1. Executive Summary** ✅
-- Market opportunity & vision
-- Architecture decisions (Modular Monolith + BFF)
-- MVP scope (Tier 1 + Partial Fulfillment + Trust Score)
-- 5 module breakdown
-- Success metrics & timeline
-- Cost structure & revenue model
-- Implementation phases
+### Root-level
 
-### **2. Architecture Overview** ✅
-- Complete system architecture diagrams
-- 5 module specifications with folder structures
-- MediatR event-driven patterns
-- Single DbContext with schema separation
-- BFF authentication flow
-- Docker Compose deployment
-- Horizontal scaling strategy
-- Microservices migration path
+| File | Status | Note |
+|---|---|---|
+| `00_EXECUTIVE_SUMMARY.md` | ✅ Rewritten | Corrected epic/story counts (21 epics, 129 stories), tech stack (React not Angular, no separate BFF service), and current implementation status |
+| `01_ARCHITECTURE_OVERVIEW.md` | ✅ Rewritten | Corrected module list (8 real modules, not 5 or 7), removed fictional YARP/BFF-gateway topology, added current-vs-proposed split |
+| `DOCUMENTATION_PROGRESS.md` | ✅ Rewritten | This file — repurposed from a doc-writing tracker into a doc-currency tracker |
+| `02_DATABASE_SCHEMA_DESIGN.md` | ⚠️ Not reverified | Predates code; schema/table counts were written before any migration existed. Treat as historical/aspirational only |
+| `03_API_SPECIFICATIONS.md` | ⚠️ Not reverified | Same caveat — written before real controllers existed |
+| `05_BUSINESS_LOGIC_FLOWS.md` | ⚠️ Not reverified | Likely describes pre-implementation flows (e.g. RFQ escrow-check timing) that may have since changed — cross-check against `CRITICAL_BUSINESS_RULE_UPDATE.md` and the relevant epic before trusting either |
+| `06_FRONTEND_ARCHITECTURE.md` | 🔴 Known stale (assumed) | Named and dated for the original plan; given that plan specified Angular 19 and the real web app is React 18.3 + Vite (`architecture` peers `.agent/roles/frontend-developer.md` and `markdown-documentations/Frontend_Architecture_Guide.md` both had this exact Angular-vs-React drift confirmed), this file should be treated as wrong until specifically re-verified. Not opened as part of this pass — flagged, not fixed |
+| `07_EVENT_DRIVEN_PATTERNS.md` | ⚠️ Not reverified | Likely still frames RabbitMQ as the primary bus rather than MediatR — see `01_ARCHITECTURE_OVERVIEW.md` §1.4 for the corrected picture |
+| `08_SECURITY_COMPLIANCE.md` | ⚠️ Not reverified | Cross-check against `architecture/auth-service-microservice-spec.md` (rewritten, authoritative) before trusting |
+| `09_DEPLOYMENT_GUIDE.md` | ⚠️ Not reverified | Cross-check against real `backend/docker-compose*.yml` files (see `01_ARCHITECTURE_OVERVIEW.md` §1.7) — likely still describes a BFF container that doesn't exist |
+| `10_TESTING_STRATEGY.md` | ⚠️ Not reverified | |
+| `Business_Rules.md` | ⚠️ Not reverified | |
+| `CRITICAL_BUSINESS_RULE_UPDATE.md` | ⚠️ Not reverified | Documents one specific rule change (escrow check moved from RFQ-creation to award-time); worth checking against current bidding-award code before trusting, but plausible as still-accurate given it reads as a mid-build correction rather than a day-one plan |
+| `UI_System_Design_Guidelines.md` | ⚠️ Not reverified | |
+| `FRONTEND_AI_PROMPT.md` | ⚠️ Not reverified | |
+| `UI_DESIGN_GENERATION_PROMPT.md` | ⚠️ Not reverified | |
 
-### **3. Database Schema Design** ✅
-- All 6 schemas documented:
-  - `masterdata` (22 tables)
-  - `identity` (22 tables)
-  - `marketplace` (8 tables)
-  - `contracts` (9 tables)
-  - `wallet` (12 tables)
-  - `delivery` (7 tables)
-- 80+ table definitions with columns & constraints
-- Critical indexes for performance
-- Migration execution order
-- Double-entry accounting patterns
-- Immutable snapshots design
+### `04_MODULE_SPECIFICATIONS/`
 
-### **4. API Specifications** ✅
-- Complete RESTful API endpoints for all modules
-- Authentication & authorization (Bearer JWT via BFF)
-- Request/response schemas with examples
-- Error handling & error codes
-- Rate limiting specifications
-- Blind bidding API patterns
-- Wallet balance validation
+| File | Status | Note |
+|---|---|---|
+| `Contracts_Module.md` | ✅ Rewritten | Rewritten alongside the contract-cluster pass (with `epic-06-contract-management.md` and `MVP_CONTRACT_STATE_MACHINE.md`) — current |
+| `Auth_and_Keycloak_Module.md` | ⚠️ Not reverified | Cross-check against `architecture/auth-service-microservice-spec.md` (rewritten, authoritative) — likely still describes Auth as a separate service |
+| `Delivery_Module.md` | ⚠️ Not reverified | Likely missing the return-trip OTP + inspection checklist system documented in `backlog/mvp/epic-07-otp-delivery-verification.md`'s rewrite |
+| `Finance_Module.md` | ⚠️ Not reverified | Cross-check against `backlog/mvp/epic-08-wallet-escrow.md` (rewritten) — likely undersells payment-gateway maturity |
+| `Identity_and_Compliance_Module.md` | ⚠️ Not reverified | Cross-check against `backlog/mvp/epic-12-risk-trust-scoring.md` (rewritten) — likely presents trust scoring as live/wired when it is currently unwired from production events |
+| `Marketplace_Module.md` | ⚠️ Not reverified | Cross-check against `backlog/mvp/epic-04-rfq-management.md` / `epic-05-bidding-engine.md` (both rewritten) — likely predates the line-item/split-award model |
+| `Master_Data_and_Settings_Module.md` | ⚠️ Not reverified | Cross-check against `markdown-documentations/Master_Data_Specification.md` |
 
-### **5. Business Logic Flows** ✅
-- End-to-end user journeys
-- Business registration & KYB
-- Provider registration & KYC
-- Vehicle registration & insurance
-- RFQ creation (NO escrow check) ⚠️
-- Blind bidding process
-- Award with escrow validation ⚠️
-- Partial awards based on wallet balance
-- Contract creation & activation
-- OTP delivery verification
-- Partial fulfillment & early returns
-- Monthly settlement cycles
-- Trust score calculation algorithm
+### `MVP_final_docs/`
 
-### **6. Critical Business Rule Update** ✅
-- **KEY CHANGE:** Escrow validation moved from RFQ creation to Award
-- Detailed flow diagrams
-- Partial award logic & examples
-- Race condition protection
-- Code implementation examples
-- API changes
-- Test scenarios
-- Implementation checklist
+| File | Status | Note |
+|---|---|---|
+| `MVP_CONTRACT_STATE_MACHINE.md` | ✅ Rewritten | Authoritative, current — the full 18-state Contracts lifecycle model. Cross-referenced extensively from `00_EXECUTIVE_SUMMARY.md` and `01_ARCHITECTURE_OVERVIEW.md` in this pass |
+| `MVP_DIRECT_RENTAL_SPECIFICATION.md` | ✔️ Confirmed accurate | Per `project-docs/18_Implementation_Coverage_Audit.md` §7.1, this doc is real and correct — its only issue was being disconnected from the epic index, now fixed by `backlog/post-mvp/epic-21-direct-rental.md` |
+| `MVP_DIRECT_RENTAL_STATE_MACHINE.md` | ✔️ Confirmed accurate | Same as above |
+| `MVP_ADMIN_WALLET_OPERATIONS_SPECIFICATION.md` | ⚠️ Not reverified | |
+| `MVP_AUTHORITATIVE_BUSINESS_RULES.md` | ⚠️ Not reverified | |
+| `MVP_DISPUTE_RESOLUTION_WORKFLOW.md` | ⚠️ Not reverified | Cross-check against `project-docs/18_Implementation_Coverage_Audit.md` §5, §8 — no dispute-engine entities exist anywhere in code today; this doc may describe a workflow with nothing behind it, the same gap already confirmed in `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` |
+| `MVP_EVENT_CATALOG_AND_HANDLERS.md` | ⚠️ Not reverified | Cross-check against the real event-flow diagrams in `MVP_CONTRACT_STATE_MACHINE.md` §10 for at least the Contracts-module subset |
+| `MVP_MODULE_INTEGRATION_SPECIFICATION.md` | ⚠️ Not reverified | |
+| `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` | ⚠️ Not reverified | Cross-check against `backlog/mvp/epic-10-monthly-renewal-settlement.md` (rewritten) — note the settlement-cadence contradiction flagged in the coverage audit §10.4 (tier-based cadence vs. rolling 30-day cycle) is still unresolved in code as of 2026-07-23 |
+| `SETTLEMENT_ENHANCEMENTS_ADDENDUM.md` | ⚠️ Not reverified | Same cadence caveat as above |
 
-### **7. Identity & Compliance Module** ✅
-- User account management (Keycloak mapping)
-- Business KYB workflow
-- Provider KYC workflow
-- Vehicle registration & insurance tracking
-- Trust score calculation service
-- Insurance expiry monitoring (background service)
-- Tier assignment logic
-- Complete code examples
+### `database/`, `frontendguides/`
 
-### **8. Marketplace Module** ✅
-- RFQ creation (no wallet check)
-- RFQ publication & notification
-- Blind bidding service (SHA-256 hashing)
-- Price validation (floor/ceiling)
-- Award with wallet validation
-- Partial award calculation
-- Market price tracking
-- Complete code examples
+| File(s) | Status | Note |
+|---|---|---|
+| `database/database-erd.md`, `database/database-schema-design.md` | ⚠️ Not reverified | Same caveat as `02_DATABASE_SCHEMA_DESIGN.md` |
+| `frontendguides/*.md` (12 files: `ADMIN_PORTAL_GUIDE.md`, `API_INTEGRATION_SPEC.md`, `AUTHENTICATION_GUIDE.md`, `BUSINESS_ANALYSIS_QUESTIONNAIRE.md`, `BUSINESS_LOGIC_IMPLEMENTATION.md`, `BUSINESS_PORTAL_GUIDE.md`, `FORM_VALIDATIONS_SPEC.md`, `LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md`, `ONBOARDING_GUIDE.md`, `PROVIDER_PORTAL_GUIDE.md`, `REALTIME_FEATURES.md`, `SEARCH_FILTER_PAGINATION.md`, `USER_STORIES_COMPLETE.md`) | ⚠️ Not reverified | Not opened as part of this pass. Given the confirmed Angular-vs-React drift found elsewhere in the repo (`.agent/roles/frontend-developer.md`, `markdown-documentations/Frontend_Architecture_Guide.md`, `markdown-documentations/FRONTEND_AUDIT_REPORT.md` — all rewritten already per `project-docs/18_Implementation_Coverage_Audit.md` §8), these guides are a reasonable next place to look for the same drift; treat with suspicion until checked |
 
 ---
 
-## 🎯 **KEY ARCHITECTURAL DECISIONS DOCUMENTED**
+## Historical snapshot (preserved for reference only — do not treat as current)
 
-### **Technology Stack**
-- ✅ Backend: .NET 9 (C# 13)
-- ✅ Frontend: Angular 19 + Signals (not NgRx)
-- ✅ Database: PostgreSQL 16
-- ✅ Auth: Keycloak + BFF (YARP)
-- ✅ Events: MediatR (in-process)
-- ✅ Cache: Redis 7
-- ✅ Storage: MinIO
-- ✅ Real-time: SignalR
-
-### **Architecture Pattern**
-- ✅ Modular Monolith (not Microservices)
-- ✅ 5 Consolidated Modules:
-  1. Identity & Compliance
-  2. Marketplace
-  3. Contracts
-  4. Finance
-  5. Delivery
-- ✅ Single PostgreSQL DB with 6 schemas
-- ✅ BFF for token management
-- ✅ Role-based frontend portals (Business/Provider/Admin)
-
-### **MVP Scope**
-- ✅ Tier 1: All core features
-- ✅ Tier 2: Partial fulfillment + Trust score
-- ❌ Post-MVP: GPS tracking, group bidding, mobile apps
-
-### **Critical Business Rules**
-- ✅ **RFQ Creation:** NO wallet balance required
-- ✅ **Award:** Wallet balance REQUIRED
-- ✅ **Partial Awards:** Fully supported
-- ✅ **Escrow Lock:** Happens after award confirmation
-- ✅ **Insurance:** Zero tolerance - mandatory for all vehicles
-- ✅ **Blind Bidding:** Provider identity hashed until award
-- ✅ **Trust Score:** 0-100 scale, tier-based commission
+The original version of this file, dated November 26, 2025, recorded 8 of a planned 17 documents as "complete" (191.4 KB, ~5,626 lines) at a point when **zero production code existed yet** — "complete" meant "the pre-implementation spec was written," not "the feature is built and matches the spec." That distinction matters: several of those 8 "complete" documents (`00_EXECUTIVE_SUMMARY.md`, `01_ARCHITECTURE_OVERVIEW.md`, `Identity_and_Compliance_Module.md` — now `04_MODULE_SPECIFICATIONS/Identity_and_Compliance_Module.md`, `Marketplace_Module.md` — now `04_MODULE_SPECIFICATIONS/Marketplace_Module.md`) described an Angular frontend, a YARP BFF, and a 5-module backend that were never built as specified. Being "complete" as a writing task did not make them accurate, and two of the five (Executive Summary, Architecture Overview) needed a full rewrite in this pass as a direct result.
 
 ---
 
-## 📈 **DOCUMENTATION QUALITY METRICS**
+## Recommended order for a future rewrite pass on the remaining ⚠️ files
 
-### **Completeness**
-- ✅ Executive summary with business context
-- ✅ Complete architecture diagrams
-- ✅ All database schemas defined
-- ✅ API specifications with examples
-- ✅ Business logic flows with state machines
-- ✅ Code examples in C# for all workflows
-- ✅ Event-driven patterns documented
-- ✅ Critical business rules highlighted
+Highest-value first, based on how far the coverage audit found each underlying area to have diverged:
 
-### **Clarity**
-- ✅ Clear flow diagrams (ASCII art)
-- ✅ Step-by-step workflows
-- ✅ Real-world examples
-- ✅ Code snippets for implementation
-- ✅ Error handling patterns
-- ✅ Validation rules
-
-### **Actionability**
-- ✅ Ready for development team
-- ✅ No ambiguity in requirements
-- ✅ Clear module boundaries
-- ✅ Defined event contracts
-- ✅ Database migration scripts referenced
-- ✅ API contracts specified
+1. `04_MODULE_SPECIFICATIONS/Marketplace_Module.md` and `04_MODULE_SPECIFICATIONS/Finance_Module.md` — RFQ/bidding and wallet/escrow are among the most-diverged areas per the audit
+2. `06_FRONTEND_ARCHITECTURE.md` — highest suspicion of being flatly wrong (Angular vs. React)
+3. `04_MODULE_SPECIFICATIONS/Auth_and_Keycloak_Module.md` — cross-check against the already-rewritten `architecture/auth-service-microservice-spec.md`
+4. `MVP_final_docs/MVP_DISPUTE_RESOLUTION_WORKFLOW.md` — likely describes a workflow with zero supporting code (no dispute-engine entities exist anywhere)
+5. `MVP_final_docs/MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md` and `SETTLEMENT_ENHANCEMENTS_ADDENDUM.md` — resolve the tier-based-vs-rolling-30-day settlement cadence contradiction in code first (coverage audit §10.4), then rewrite both consistently
+6. Everything else in `04_MODULE_SPECIFICATIONS/`, then `05`–`10`, then `frontendguides/`, then `database/`
 
 ---
 
-## 🚀 **NEXT STEPS**
-
-### **Immediate (Complete Remaining Docs)**
-
-1. **Contracts Module** (Est. 20 KB)
-   - Contract lifecycle management
-   - Vehicle assignment tracking
-   - Partial fulfillment logic
-   - Amendment workflows
-   - Penalty calculations
-
-2. **Finance Module** (Est. 25 KB)
-   - Wallet management
-   - Double-entry ledger
-   - Escrow lock/release
-   - Settlement cycles
-   - Commission calculation
-   - Payment gateway integration
-
-3. **Delivery Module** (Est. 18 KB)
-   - OTP generation/verification
-   - Handover evidence capture
-   - Return processing
-   - SLA tracking
-
-4. **Master Data Module** (Est. 15 KB)
-   - Lookup management
-   - Settings configuration
-   - Policy versioning
-   - Tier definitions
-
-5. **Auth & Keycloak Module** (Est. 15 KB)
-   - Keycloak configuration
-   - Role mapping
-   - BFF implementation
-   - Token management
-
-### **Frontend Architecture** (Est. 30 KB)
-- Angular 19 structure
-- Signal-based state management
-- Role-based portals
-- Component library
-- Routing strategy
-- API integration patterns
-
-### **Event-Driven Patterns** (Est. 20 KB)
-- MediatR configuration
-- Event catalog
-- Event handlers
-- Cross-module communication
-- Event sourcing patterns
-
-### **Security & Compliance** (Est. 20 KB)
-- OAuth2/OIDC flows
-- RBAC implementation
-- Data encryption
-- Audit logging
-- GDPR compliance
-
-### **Deployment Guide** (Est. 25 KB)
-- Docker Compose setup
-- Environment configuration
-- CI/CD pipeline
-- Monitoring & logging
-- Backup strategies
-
-### **Testing Strategy** (Est. 20 KB)
-- Unit testing approach
-- Integration testing
-- E2E testing
-- Test coverage goals
-- Mock strategies
-
-### **Business Rules** (Est. 15 KB)
-- Complete rule catalog
-- Validation logic
-- Penalty calculations
-- Proration formulas
-- Commission tiers
-
-### **UI Design Guidelines** (Est. 20 KB)
-- Design system
-- Component library
-- Tailwind configuration
-- Responsive patterns
-- Accessibility
-
----
-
-## 📊 **ESTIMATED COMPLETION**
-
-### **Current Progress**
-- **Completed:** 191.4 KB (8 documents)
-- **Remaining:** ~223 KB (9 documents)
-- **Total Estimated:** ~414 KB (17 documents)
-
-### **Completion Percentage**
-- **By Size:** 46% complete
-- **By Count:** 47% complete (8 of 17)
-
-### **Time Estimate**
-- **Remaining:** ~2-3 hours for all 9 documents
-- **Per Document:** ~15-20 minutes average
-
----
-
-## ✅ **QUALITY ASSURANCE**
-
-### **Documentation Standards Met**
-- ✅ Consistent formatting (Markdown)
-- ✅ Clear section headers
-- ✅ Code examples in all specs
-- ✅ Flow diagrams for complex processes
-- ✅ Cross-references between documents
-- ✅ Version numbers and dates
-- ✅ Table of contents in long documents
-- ✅ Business rules clearly highlighted
-- ✅ API contracts with request/response examples
-- ✅ Database schemas with constraints
-
-### **Technical Accuracy**
-- ✅ Aligned with .NET 9 best practices
-- ✅ Follows Angular 19 patterns
-- ✅ PostgreSQL 16 features utilized
-- ✅ Keycloak OAuth2/OIDC standards
-- ✅ MediatR event patterns
-- ✅ Docker Compose configuration
-- ✅ RESTful API design principles
-
-### **Business Alignment**
-- ✅ Reflects Ethiopian market context
-- ✅ Addresses trust & compliance needs
-- ✅ Supports blind bidding requirements
-- ✅ Enables partial fulfillment
-- ✅ Tier-based commission structure
-- ✅ Escrow protection for businesses
-- ✅ Settlement cycles for providers
-
----
-
-## 🎯 **RECOMMENDATION**
-
-**Continue with systematic creation of remaining 9 documents.**
-
-The documentation created so far is:
-- ✅ **Production-ready**
-- ✅ **Comprehensive**
-- ✅ **Actionable**
-- ✅ **Technically accurate**
-- ✅ **Business-aligned**
-
-**Estimated time to complete:** 2-3 hours
-
-**Shall I proceed with creating the remaining module specifications and implementation guides?**
-
----
-
-**Last Updated:** November 26, 2025, 5:50 PM  
-**Next Update:** Upon completion of remaining documents
+**Next Document:** [00_EXECUTIVE_SUMMARY.md](./00_EXECUTIVE_SUMMARY.md)

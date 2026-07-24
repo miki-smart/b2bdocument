@@ -1,715 +1,299 @@
-# Marketplace Module - Specification
+# Marketplace Module — Specification
 
-**Module Name:** Marketplace  
-**Version:** 1.1 MVP  
-**Date:** December 22, 2025 (Updated)  
-**Database Schema:** `marketplace`  
-**Related Documents:** MVP_AUTHORITATIVE_BUSINESS_RULES.md (Section 1, 2)
+**Module Name:** Marketplace
+**Version:** 2.0 (rewritten against running code)
+**Last verified against code:** 2026-07-23
+**Location:** `Modules/Marketplace/**` inside `Marketplace.API` (.NET 9 modular monolith) — this is a folder/namespace inside one deployable, not a separate `marketplace-core` service
+**Related documents:** `backlog/mvp/epic-04-rfq-management.md`, `backlog/mvp/epic-05-bidding-engine.md`, `backlog/post-mvp/epic-21-direct-rental.md`, `project-docs/partial-fulfillment-spec.md`, `project-docs/18_Implementation_Coverage_Audit.md` §4 and §10.3
 
 ---
 
-## 📋 Overview
+## What changed in this rewrite
+
+The previous version of this document (v1.2, dated December 2025 / updated June 2026) described a single-vehicle-type, whole-RFQ bidding model with price floor/ceiling validation and a `BiddingController`. None of that matches the running code. This rewrite replaces it entirely:
+
+- **RFQ is a header + `RFQLineItem[]` model**, not single vehicle-type/date-range. `RFQ.StartDate`/`EndDate` are computed properties (`Min`/`Max` across line items), not stored columns.
+- **Bidding is per-line-item at the quantity level** (`RFQBidItem`), not a single bid amount per RFQ. No specific vehicle is chosen at bid time on any surface.
+- **Awards can be split** across multiple providers per line item (`RFQBidAward`), followed by a **separate, universal post-award vehicle-assignment step** (`RFQAwardVehicleAssignment`) — this step exists identically on backend, web, and both mobile apps (§10.3 of the audit corrected an earlier claim that it was mobile-only).
+- **There is no price floor/ceiling validation, no `MarketPriceSnapshot`/`MarketPriceService`, and no `BiddingController`** in the real codebase — the previous doc's "Market Intelligence" and "Price Validation" sections describe code that does not exist as a live guard. (`IPriceValidator`/`PriceValidator` do exist in `Domain/Services`, but are not called from any bid/award command — see Known Gaps.)
+- **The weighted bid-ranking algorithm and anti-collusion detection that the previous doc's business-rules section implied were live are not built anywhere** — confirmed by repo-wide search across backend, web, and both mobile apps.
+- **Direct Rental** (fixed-price, non-bidding vehicle booking) is a second, fully-built product line inside this same module, folded in here because it lives in the same `Modules/Marketplace/**` tree and shares fleet-capacity accounting with RFQ bidding. It was previously undocumented at the epic level; it now has its own epic (`backlog/post-mvp/epic-21-direct-rental.md`).
+- **Contract creation from an awarded bid is genuinely event-driven**, resolving an open question in `epic-05-bidding-engine.md` Story 5.5: `AwardBidCommandHandler` contains a `// TODO: Publish BidAwardedEvent...` comment that reads as if nothing publishes it — but `RFQBid.MarkAsAwarded()` (called earlier in the same handler) already raises `BidAwardedEvent`, and the Contracts module's `BidAwardedEventHandler` consumes it, pulling all pending awards for that bid from the EF Core change tracker (since domain events dispatch before `SaveChanges`) and creating one contract per bid. The TODO comment is stale/misleading, not a real gap — verified directly against both handler bodies.
+
+---
+
+## Overview
 
 ### Purpose
-The Marketplace Module manages the **RFQ (Request for Quote) lifecycle** and **blind bidding process**. It connects businesses seeking vehicles with providers offering them through a transparent, competitive marketplace.
+
+The Marketplace module owns two parallel acquisition channels that both feed the same downstream Contract → Escrow → Delivery → Settlement pipeline:
+
+1. **RFQ / blind bidding** — a business publishes a multi-line-item Request for Quotation; providers submit blind, per-line-item bids; the business awards (possibly splitting a line item across several providers); awarded providers then assign specific vehicles.
+2. **Direct Rental** — a business browses a catalog of provider-listed vehicles at fixed daily rates, adds them to a cart, and submits per-provider requests; providers accept/reject at vehicle-level granularity; accepted vehicles flow straight into a contract with vehicles pre-assigned (no separate post-award assignment step).
+
+Both channels produce a `Contract` with a different `SourceType` (`"RFQ"` vs `"DIRECT_RENTAL"`) but otherwise hand off to identical Contracts-module machinery. The Marketplace module does not move money (Finance module), run OTP delivery verification (Delivery module), or compute trust scores (Identity module) — it reacts to and publishes events around those.
 
 ### Responsibilities
 
-✅ **RFQ Management**
-- Multi-line-item RFQ creation
-- RFQ publication and lifecycle
-- Bid deadline management
+**RFQ lifecycle**
+- Multi-line-item RFQ creation, update (full line-item replace only), publish, manual close, deadline extension (including reviving an `EXPIRED` RFQ), cancellation
+- Automatic expiry via a 5-minute-poll background job
+- Provider discovery/browse with fleet-match filtering (`myMatchesOnly`) — visibility is **not** fleet-gated, only the publish-time notification is
 
-✅ **Blind Bidding**
-- Provider identity anonymization (SHA-256 hashing)
-- Bid submission and validation
-- Price floor/ceiling enforcement
+**Blind bidding**
+- Per-line-item bid submission at the quantity level (no vehicle chosen), one bid per provider per line item, bundling multiple line items in one submission
+- SHA-256 provider-identity hashing (`RFQBidSnapshot`) plus a trust-score/tier snapshot at submission time
+- Bid update (partial-item semantics) and withdrawal, including a deliberate hard-delete-and-resubmit path after withdrawal
 
-✅ **Award Processing**
-- Bid evaluation and selection
-- Split awards (multiple providers per line item)
-- Partial awards (based on wallet balance)
-- Provider identity revelation
+**Award processing**
+- Split awards across multiple providers per line item, with wallet-affordability validation and an affordable-quantity suggestion on shortfall
+- Fleet-segment capacity re-validation at award time
+- Auto-rejection of non-awarded bids once an RFQ reaches full `AWARDED` status
 
-✅ **Market Intelligence**
-- Market price tracking
-- Bid statistics
-- Provider matching
+**Post-award vehicle assignment**
+- Linking specific vehicles from an awarded provider's fleet to their award, identically across all four surfaces
 
----
+**Direct Rental (fixed-price channel)**
+- Provider vehicle listing (rate + opt-in toggle), business catalog browse, multi-provider cart, per-provider request submission with wallet-gate and race-condition re-check, vehicle-level accept/reject, 48-hour auto-expiry, fleet-capacity conflict preview shared with RFQ bidding, automatic contract creation on acceptance
+- Admin on-behalf-of operations across the whole Direct Rental surface
 
-## 🗄️ Database Schema
-
-### Tables (8 Total)
-
-1. `rfq` - RFQ header
-2. `rfq_line_item` - Vehicle requirements per RFQ
-3. `rfq_bid` - Provider bid header
-4. `rfq_bid_snapshot` - Anonymized bid details (blind bidding)
-5. `rfq_bid_award` - Winning bids
-6. `rfq_line_item_fulfillment` - Delivery tracking
-7. `rfq_award_vehicle_assignment` - Specific vehicles assigned
-8. `marketplace_event_log` - Audit trail
+**Market intelligence** — not real. The previous doc's `MarketPriceSnapshot`/`MarketPriceService` do not exist in code; there is no price floor/ceiling enforcement anywhere in the live bid/award path.
 
 ---
 
-## 🏗️ Module Structure
+## Database Schema
+
+### RFQ / Bidding tables
+
+| Table | Schema | Purpose |
+|---|---|---|
+| `rfqs` | default | RFQ header (`RFQ`) |
+| `rfq_line_items` | `marketplace` | Per-line-item vehicle type/quantity/term/dates (`RFQLineItem`) |
+| `rfq_bids` | default | Provider bid header (`RFQBid`) |
+| `rfq_bid_items` | `marketplace` | Per-line-item quantity/price within a bid (`RFQBidItem`) |
+| `rfq_bid_snapshots` | `marketplace` | Blind-bidding anonymized snapshot: hashed provider ID + trust/tier at submission (`RFQBidSnapshot`) |
+| `rfq_bid_history` | `marketplace` | Audit trail of bid changes with JSON diffs (`RFQBidHistory`) |
+| `rfq_bid_awards` | default | Awarded bid records, one per (bid, line item) award (`RFQBidAward`) |
+| `rfq_award_vehicle_assignments` | `marketplace` | Specific vehicles assigned to an award (`RFQAwardVehicleAssignment`) |
+| `rfq_line_item_fulfillments` | `marketplace` | Post-award delivery/return progress per award (`RFQLineItemFulfillment`) |
+| `rfq_status_history` | `marketplace` | RFQ status transition audit trail (`RFQStatusHistory`) |
+| `marketplace_event_logs` | `marketplace` | Generic marketplace audit entity — **`MarketplaceEventLog.Create()` has zero call sites anywhere in the backend; the table exists but nothing ever writes to it** |
+
+### Direct Rental tables
+
+| Table | Schema | Purpose |
+|---|---|---|
+| `direct_rental_carts` | `marketplace` | Business shopping cart, one active cart per business (`DirectRentalCart`) |
+| `direct_rental_cart_items` | `marketplace` | Vehicle + dates + snapshotted daily rate in cart (`DirectRentalCartItem`) |
+| `direct_rental_requests` | `marketplace` | One request per provider, created from a cart submit (`DirectRentalRequest`) |
+| `direct_rental_request_line_items` | `marketplace` | Vehicles grouped by type within a request (`DirectRentalRequestLineItem`) |
+| `direct_rental_request_vehicles` | `marketplace` | Specific vehicle instance accept/reject rows (`DirectRentalRequestVehicle`) |
+| `direct_rental_request_status_history` | `marketplace` | Status transition audit trail (`DirectRentalRequestStatusHistory`) |
+
+---
+
+## Module Structure (actual folders)
 
 ```
-Marketplace/
+Modules/Marketplace/
 ├── Domain/
 │   ├── Entities/
-│   │   ├── RFQ.cs
-│   │   ├── RFQLineItem.cs
-│   │   ├── RFQBid.cs
-│   │   ├── RFQBidSnapshot.cs
-│   │   ├── RFQBidAward.cs
-│   │   └── MarketPriceSnapshot.cs
-│   │
-│   ├── Events/
-│   │   ├── RFQCreatedEvent.cs
-│   │   ├── RFQPublishedEvent.cs
-│   │   ├── BidSubmittedEvent.cs
-│   │   ├── BidAwardedEvent.cs
-│   │   └── RFQClosedEvent.cs
-│   │
+│   │   ├── RFQ.cs, RFQLineItem.cs
+│   │   ├── RFQBid.cs, RFQBidItem.cs, RFQBidSnapshot.cs, RFQBidHistory.cs
+│   │   ├── RFQBidAward.cs, RFQAwardVehicleAssignment.cs, RFQLineItemFulfillment.cs
+│   │   ├── RFQStatusHistory.cs
+│   │   ├── MarketplaceEventLog.cs         (dead — zero writes anywhere)
+│   │   ├── DirectRentalCart.cs, DirectRentalCartItem.cs
+│   │   └── DirectRentalRequest.cs, DirectRentalRequestLineItem.cs,
+│   │       DirectRentalRequestVehicle.cs, DirectRentalRequestStatusHistory.cs
 │   ├── Enums/
-│   │   ├── RFQStatus.cs
-│   │   ├── BidStatus.cs
-│   │   └── AwardStatus.cs
-│   │
+│   │   ├── FuelType.cs   (ANY, ELECTRIC, PETROL, DIESEL, CNG, HYBRID)
+│   │   └── RFQTerm.cs    (SHORT_TERM, LONG_TERM)
+│   ├── Events/MarketplaceEvents.cs (all RFQ/bid/direct-rental domain events, single file)
 │   └── Services/
-│       ├── IBlindBiddingService.cs
-│       ├── BlindBiddingService.cs
-│       ├── IPriceValidator.cs
-│       └── PriceValidator.cs
+│       ├── BlindBiddingService.cs / IBlindBiddingService.cs   (SHA-256 provider-ID hashing)
+│       ├── PriceValidator.cs / IPriceValidator.cs             (present but not called from any bid/award path — see Known Gaps)
+│       ├── ProviderFleetCapacityService.cs / IProviderFleetCapacityService.cs (shared segment-capacity engine, RFQ + Direct Rental)
+│       ├── VehicleAvailabilityService.cs, FuelTypeNormalizer.cs, CapacitySegment.cs, FleetCapacityModels.cs
+│       └── DirectRentalRequestHistoryService.cs / IDirectRentalRequestHistoryService.cs (+ ...HistoryTriggers.cs)
 │
 ├── Application/
-│   ├── Commands/
-│   │   ├── CreateRFQCommand.cs
-│   │   ├── PublishRFQCommand.cs
-│   │   ├── SubmitBidCommand.cs
-│   │   ├── AwardBidCommand.cs
-│   │   └── CalculateMaxAffordableCommand.cs
-│   │
-│   ├── Queries/
-│   │   ├── GetOpenRFQsQuery.cs
-│   │   ├── GetRFQByIdQuery.cs
-│   │   ├── GetBidsForRFQQuery.cs
-│   │   └── GetProviderBidsQuery.cs
-│   │
-│   ├── DTOs/
-│   │   ├── RFQDto.cs
-│   │   ├── RFQLineItemDto.cs
-│   │   ├── BidDto.cs
-│   │   └── AwardDto.cs
-│   │
-│   └── Validators/
-│       ├── CreateRFQValidator.cs
-│       ├── SubmitBidValidator.cs
-│       └── AwardBidValidator.cs
+│   ├── RFQ/
+│   │   ├── Commands/ CreateRFQCommand, UpdateRFQCommand, PublishRFQCommand, CloseRFQCommand,
+│   │   │             ExtendRFQDeadlineCommand, CancelRFQCommand
+│   │   └── Queries/  GetRFQQuery, GetRFQsByBusinessQuery, GetActiveRFQsQuery,
+│   │                 GetActiveRFQsForProviderQuery, GetRFQStatusHistoryQuery, GetRecommendedRFQsQuery
+│   ├── RFQBid/
+│   │   ├── Commands/ SubmitBidCommand, UpdateBidCommand, WithdrawBidCommand, AwardBidCommand,
+│   │   │             AssignVehiclesToAwardCommand, ReleaseAwardVehicleAssignmentCommand, RevokeAwardCommand
+│   │   └── Queries/  GetBidQuery, GetBidsByRFQQuery, GetBidsByProviderQuery,
+│   │                 GetBidAwardAssignmentsQuery, GetAwardAssignmentStatusQuery
+│   ├── DirectRentalCart/
+│   │   ├── Commands/ AddToCartCommand, UpdateCartItemCommand, RemoveFromCartCommand, SubmitCartCommand
+│   │   └── Queries/  (cart + submit-preview queries)
+│   ├── DirectRentalRequest/
+│   │   ├── Commands/ RespondToDirectRentalRequestCommand, CancelDirectRentalRequestCommand
+│   │   └── Queries/  GetDirectRentalRequestsQuery, GetDirectRentalRequestByIdQuery,
+│   │                 GetDirectRentalRequestStatusHistoryQuery, GetDirectRentalAcceptPreviewQuery
+│   ├── DirectRentalVehicle/Queries/ (catalog browse/detail)
+│   └── ProviderFleet/Queries/ (fleet-capacity dashboards for providers, `ProviderFleetController`)
 │
-├── Infrastructure/
-│   ├── Repositories/
-│   │   ├── IRFQRepository.cs
-│   │   ├── RFQRepository.cs
-│   │   ├── IBidRepository.cs
-│   │   └── BidRepository.cs
-│   │
-│   └── Services/
-│       └── MarketPriceService.cs
-│
-└── API/
-    └── Controllers/
-        ├── RFQController.cs
-        └── BiddingController.cs
+└── Infrastructure/
+    ├── Configurations/ (EF Core mappings)
+    └── Repositories/ (RFQ, RFQBid, Awards, DirectRentalCart, DirectRentalRequest, etc.)
 ```
+
+Controllers live outside the module tree, under `Marketplace.API/Controllers/Marketplace/`: `RFQController`, `BidController`, `RfqAwardController`, `DirectRentalCartController`, `DirectRentalRequestController`, `DirectRentalVehicleController`, `ProviderFleetController`. The admin Direct Rental surface (`AdminDirectRentalController`) lives under `Controllers/Admin/`.
 
 ---
 
-## 🔄 Key Workflows
+## Core Entities (field-level)
 
-### 1. Create RFQ
+### RFQ
+- `BusinessId`, `RFQNumber` (auto-generated), `Title`, `Status` (string, 9 real values — see below), `Type` (`STANDARD`/`URGENT`/`LONG_TERM`), `SubmissionDeadline`, `AwardedAt`
+- `StartDate`/`EndDate` — **`[NotMapped]` computed properties**: `Min(LineItems.RequiredFrom)` / `Max(LineItems.RequiredTo)`, not stored columns
+- `PickupCity`/`DropoffCity` (optional), `IsBlind` (always `true`), `ContractDurationDays` (optional, currently unused by any read path found)
+- Status values actually produced by entity methods: `DRAFT, PUBLISHED, BIDDING, BIDDING_CLOSED, PARTIALLY_AWARDED, AWARDED, EXPIRED, CANCELLED, COMPLETED` (9 values — the entity's own status-comment lists only 7, omitting `BIDDING_CLOSED` and `EXPIRED`)
+- Methods: `Publish()` (`DRAFT→PUBLISHED`), `StartBidding()` (`PUBLISHED→BIDDING`, called on first bid), `CloseBidding()`, `MarkExpired()`, `Cancel()` (blocked only from `AWARDED`/`COMPLETED`), `MarkAsPartiallyAwarded()`, `MarkAsAwarded()`, `MarkAsCompleted()`, `Update()` (`DRAFT`/`PUBLISHED` only), `ClearLineItems()`, `RevertToBidding()`, `ExtendDeadline()`, `ReopenBiddingForDeadlineExtension()`, `RestoreAfterExtension(previousStatus)` (falls back to `BIDDING` if no prior status found)
 
-```csharp
-// Command
-public class CreateRFQCommand : IRequest<Guid>
-{
-    public Guid BusinessId { get; set; }
-    public string Title { get; set; }
-    public string Description { get; set; }
-    public DateTime StartDate { get; set; }
-    public DateTime EndDate { get; set; }
-    public DateTime BidDeadline { get; set; }
-    public List<RFQLineItemDto> LineItems { get; set; }
-}
+### RFQLineItem
+- `RFQId`, `VehicleType`, `Quantity`, `Term` (`RFQTerm`: `SHORT_TERM`/`LONG_TERM`), `Purpose` (required, ≤500 chars), `FuelType` (optional `FuelType` enum), `RequiredFrom`/`RequiredTo`, `Specifications` (optional), `TargetPricePerUnit` (optional), `PickupLocation`/`DropoffLocation` (optional)
+- `DurationDays` — `[NotMapped]` computed as `Ceiling(RequiredTo − RequiredFrom)`
+- Factory (`Create`) throws if `Term == SHORT_TERM` and duration exceeds 30 days — enforced in the domain layer, not just the web wizard
 
-// Handler
-public class CreateRFQCommandHandler : IRequestHandler<CreateRFQCommand, Guid>
-{
-    private readonly IRFQRepository _rfqRepository;
-    private readonly IMediator _mediator;
-    
-    public async Task<Guid> Handle(CreateRFQCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Validate dates
-        if (request.StartDate < DateTime.UtcNow.AddDays(3))
-            throw new BusinessException("Start date must be at least 3 days from now");
-        
-        if (request.BidDeadline >= request.StartDate)
-            throw new BusinessException("Bid deadline must be before start date");
-        
-        // 2. Validate line items
-        if (request.LineItems.Sum(x => x.QuantityRequired) > 50)
-            throw new BusinessException("Maximum 50 vehicles per RFQ");
-        
-        // ⚠️ NO wallet balance check here (per updated business rules)
-        
-        // 3. Create RFQ
-        var rfq = new RFQ
-        {
-            Id = Guid.NewGuid(),
-            BusinessId = request.BusinessId,
-            Title = request.Title,
-            Description = request.Description,
-            StartDate = request.StartDate,
-            EndDate = request.EndDate,
-            BidDeadline = request.BidDeadline,
-            Status = RFQStatus.Draft,
-            CreatedAt = DateTime.UtcNow
-        };
-        
-        // 4. Create line items
-        var lineItems = request.LineItems.Select(li => new RFQLineItem
-        {
-            Id = Guid.NewGuid(),
-            RFQId = rfq.Id,
-            VehicleTypeCode = li.VehicleTypeCode,
-            EngineTypeCode = li.EngineTypeCode,
-            QuantityRequired = li.QuantityRequired,
-            WithDriver = li.WithDriver,
-            PreferredTags = li.PreferredTags?.ToArray()
-        }).ToList();
-        
-        // 5. Save to database
-        await _rfqRepository.AddAsync(rfq);
-        await _rfqRepository.AddLineItemsAsync(lineItems);
-        
-        // 6. Publish event
-        await _mediator.Publish(new RFQCreatedEvent
-        {
-            RFQId = rfq.Id,
-            BusinessId = rfq.BusinessId,
-            Title = rfq.Title
-        });
-        
-        return rfq.Id;
-    }
-}
-```
+### RFQBid
+- `RFQId`, `ProviderId`, `Status` (`SUBMITTED`/`WITHDRAWN`/`REJECTED`/`AWARDED`), `TotalAmount`, `ValidUntil` (optional), `Notes` (optional)
+- Methods: `AddItem()`, `Withdraw()` (blocked if `AWARDED`), `MarkAsAwarded()` (raises `BidAwardedEvent` — see Key Workflows §5), `Reject()`, `Update()` (`SUBMITTED`/`PENDING` only), `RevokeAward()`
+
+### RFQBidItem
+- `BidId`, `RFQLineItemId`, `UnitPrice`, `Quantity`, `Description` (optional)
+
+### RFQBidSnapshot (blind bidding)
+- `RFQBidId`, `HashedProviderId` (SHA-256), `BidAmountPerUnit`, `QuantityOffered`, `ProviderTierCode` (optional), `ProviderTrustScore` (int, snapshotted at submission)
+
+### RFQBidHistory
+- `RFQBidId`, `Action` (`CREATED`/`UPDATED`/`WITHDRAWN`/`REJECTED`/`AWARDED`), `PreviousStatus`/`NewStatus`, `PreviousTotalAmount`/`NewTotalAmount`, `ChangedByUserId`/`ChangedByUserType` (`PROVIDER`/`BUSINESS`/`ADMIN`), `ChangeDetails` (JSON diff), `Notes`, `ChangedAt`
+
+### RFQBidAward
+- `RFQBidId`, `RFQLineItemId`, `QuantityAwarded`, `AgreedPricePerUnit`, `AwardedAt`
+
+### RFQAwardVehicleAssignment
+- `RFQBidAwardId`, `VehicleId`, `AssignedAt`, `ReleasedAt` (optional), `Status` (string: `ASSIGNED`/`DELIVERED`/`RETURNED`)
+- Methods: `MarkDelivered()`, `Release()` (→ `RETURNED`, stamps `ReleasedAt`)
+
+### RFQLineItemFulfillment
+- `RFQLineItemId`, `RFQBidAwardId`, `QuantityDelivered`, `QuantityReturned`, `Status` (`PENDING`/`PARTIAL`/`FULFILLED`/`COMPLETED`)
+- Methods: `RecordDelivery()`, `RecordReturn()`, `MarkAsFulfilled()`
+
+### RFQStatusHistory
+- `RFQId`, `FromStatus`/`ToStatus`, `Trigger` (`SYSTEM_EXPIRE`, `USER_PUBLISH`, `USER_CANCEL`, `USER_EXTEND_DEADLINE`, `USER_AWARD`, `USER_PARTIAL_AWARD`, `USER_REVERT_BIDDING`, `USER_CLOSE_BIDDING`), `TriggeredByUserId`/`TriggeredByUserType` (`BUSINESS`/`ADMIN`/`SYSTEM`/`PROVIDER`), `Notes`, `ChangedAt`
+
+### DirectRentalCart / DirectRentalCartItem
+- Cart: `BusinessId`, `Items[]`; computed `TotalVehicles`, `TotalAmount`, `UniqueProvidersCount` (all excluding soft-deleted items)
+- CartItem: `CartId`, `VehicleId`, `ProviderId`, `StartDate`/`EndDate`, `DailyRate` (snapshotted at add time), denormalized `PlateNumber`/`Make`/`Model`/`Type`; computed `TotalDays`/`TotalAmount`
+- `Cart.AddItem()` throws if the vehicle is already in the cart (soft-deleted items excluded from the check)
+
+### DirectRentalRequest
+- `RequestNumber` (`DR-{yyyyMMdd}-{seq}`), `BusinessId`, `ProviderId`, `Status` (`PENDING`/`ACCEPTED`/`PARTIALLY_ACCEPTED`/`REJECTED`/`EXPIRED`/`CANCELLED`), `StartDate`/`EndDate`, `TotalAmount`, `IsAllOrNone`, `SpecialInstructions` (≤1000 chars), `RejectionReason`, `ExpiresAt` (48h from creation), `RespondedAt`, `CancelledAt`/`CancelReason`
+- Methods: `Accept()`, `AcceptPartial()` (blocked if `IsAllOrNone`), `Reject(reason)` (≥10 chars), `Expire()`, `Cancel(reason?)` (only from `PENDING`, before `ExpiresAt`)
+- Computed: `TotalDays`, `IsActive`, `HoursRemaining`
+
+### DirectRentalRequestLineItem
+- `DirectRentalRequestId`, `VehicleType`, `Quantity`, `SubtotalAmount`, `Status` (`PENDING`/`ACCEPTED`/`PARTIALLY_ACCEPTED`/`REJECTED`), `RejectionReason`
+- `UpdatePartialAcceptanceStatus()` derives line-item status from its vehicles' individual decisions
+
+### DirectRentalRequestVehicle
+- `LineItemId`, `VehicleId`, `IsAccepted` (nullable bool — `null` = pending), `RejectionReason` (≥5 chars if rejecting), denormalized `PlateNumber`/`Make`/`Model`, `DailyRate`, `TotalAmount`
+
+### DirectRentalRequestStatusHistory
+- Same shape as `RFQStatusHistory`; triggers: `USER_SUBMIT`, `USER_CANCEL`, `PROVIDER_ACCEPT`, `PROVIDER_PARTIAL_ACCEPT`, `PROVIDER_REJECT`, `SYSTEM_EXPIRE`, `SYSTEM_CONTRACT_CREATED`
 
 ---
 
-### 2. Publish RFQ
+## Key Workflows
 
-```csharp
-// Command
-public class PublishRFQCommand : IRequest<Unit>
-{
-    public Guid RFQId { get; set; }
-    public Guid BusinessId { get; set; }
-}
+### 1. RFQ creation → publish → bidding
+`CreateRFQCommand` creates `DRAFT` + line items (30-day `SHORT_TERM` cap enforced in `RFQLineItem.Create`). `PublishRFQCommand` requires ≥1 line item, moves to `PUBLISHED`, fires `RFQPublishedEvent` → `RFQPublishedNotificationHandler` computes matching providers **live at notify time** (not persisted) by checking active-vehicle-type match, and fans out in-app/push/email/SMS respecting each provider's own preference toggles. The RFQ only moves to `BIDDING` when the **first bid** is submitted, not at publish time. Editing is allowed while `DRAFT` or `PUBLISHED` (a full line-item replace, no per-item patch) — existing bids on unaffected line items are not invalidated.
 
-// Handler
-public class PublishRFQCommandHandler : IRequestHandler<PublishRFQCommand, Unit>
-{
-    private readonly IRFQRepository _rfqRepository;
-    private readonly IMediator _mediator;
-    
-    public async Task<Unit> Handle(PublishRFQCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Get RFQ
-        var rfq = await _rfqRepository.GetByIdAsync(request.RFQId);
-        
-        if (rfq == null)
-            throw new NotFoundException("RFQ not found");
-        
-        if (rfq.BusinessId != request.BusinessId)
-            throw new ForbiddenException("Not authorized");
-        
-        // 2. Validate status
-        if (rfq.Status != RFQStatus.Draft)
-            throw new BusinessException("RFQ already published");
-        
-        // 3. Validate has line items
-        var lineItems = await _rfqRepository.GetLineItemsAsync(rfq.Id);
-        if (!lineItems.Any())
-            throw new BusinessException("RFQ must have at least one line item");
-        
-        // 4. Update status
-        rfq.Status = RFQStatus.Published;
-        rfq.PublishedAt = DateTime.UtcNow;
-        await _rfqRepository.UpdateAsync(rfq);
-        
-        // 5. Publish event (Notifications module will notify eligible providers)
-        await _mediator.Publish(new RFQPublishedEvent
-        {
-            RFQId = rfq.Id,
-            BusinessId = rfq.BusinessId,
-            Title = rfq.Title,
-            BidDeadline = rfq.BidDeadline,
-            LineItems = lineItems.Select(li => new
-            {
-                li.VehicleTypeCode,
-                li.QuantityRequired,
-                li.WithDriver
-            }).ToList()
-        });
-        
-        return Unit.Value;
-    }
-}
-```
+### 2. Blind bid submission
+`SubmitBidCommand` validates the RFQ is `PUBLISHED`/`BIDDING`/`PARTIALLY_AWARDED` and the deadline hasn't passed, checks one-bid-per-provider-per-line-item, caps quantity at the line item's remaining un-awarded slots, and gates on fleet-segment capacity (`IProviderValidationService`/`ProviderFleetCapacityService`) — no specific vehicle is chosen. Creates `RFQBid` + `RFQBidItem`s + a blind `RFQBidSnapshot` (SHA-256 hashed provider ID + trust score/tier at that instant). First bid on a `PUBLISHED` RFQ calls `StartBidding()`.
+
+### 3. Bid update / withdrawal
+`UpdateBidCommand` is a partial-item update (omitted items are left untouched), re-validates fleet capacity excluding the bid's own existing reservation, and logs a JSON diff to `RFQBidHistory`. `WithdrawBidCommand` sets `WITHDRAWN`; `SubmitBidCommand` **hard-deletes** any prior `WITHDRAWN` bid row for the same (provider, RFQ) pair before inserting a new one, deliberately allowing resubmission after withdrawal.
+
+### 4. Business bid review
+`GetBidsByRFQQuery`/`GetBidQuery` return bids at any time after publish (not gated behind RFQ closure). **Verified gap:** both queries set `ProviderName` unconditionally on the returned DTO regardless of award status, despite a doc comment saying "NULL if not awarded." Blind bidding is enforced today only by the web UI not rendering that field — a direct API call or alternate client can see the real provider name pre-award.
+
+### 5. Split award and contract-creation trigger
+`AwardBidCommand` accepts a flat `{bidId, lineItemId, quantityAwarded}` list, validates cumulative award doesn't exceed a line item's requested quantity, checks business wallet `AvailableBalance` against `Σ quantityAwarded × unitPrice × min(durationDays, 30)`, and validates provider fleet-segment capacity per new award quantity. On insufficient balance, the error includes an estimated affordable quantity. For each award: creates `RFQBidAward`, calls `bid.MarkAsAwarded()` (which raises `BidAwardedEvent(BidId, RFQId, ProviderId)` as a domain event), and logs `RFQBidHistory`. RFQ becomes `AWARDED` only once every line item is fully awarded, otherwise `PARTIALLY_AWARDED`; only on full `AWARDED` are other still-`SUBMITTED` bids auto-rejected.
+
+**Contract creation is genuinely event-driven, not a TODO gap.** `BidAwardedEventHandler` (Contracts module) handles the same `BidAwardedEvent` raised by `bid.MarkAsAwarded()`. Because domain events dispatch *before* `SaveChanges`, the handler first checks the EF Core change tracker for pending (not-yet-persisted) awards for that bid via `GetPendingAwardsByBidId`, falling back to a database read for re-processing. It groups all of the bid's awards into contract line items, resolves the provider's commission rate from their current tier via MasterData (defaulting to 5% on any lookup failure), derives contract start/end dates from the awarded line items only (not the RFQ header), and sends `CreateContractCommand`. The `// TODO: Publish BidAwardedEvent...` comment left inside `AwardBidCommandHandler` is stale — the event is already published, just from inside `bid.MarkAsAwarded()` rather than explicitly in the handler.
+
+### 6. Post-award vehicle assignment (universal pattern)
+`RFQAwardVehicleAssignment` links specific vehicles to an award via `POST /rfq/awards/{awardId}/vehicles` / `DELETE .../vehicles/{vehicleId}` / `GET .../eligible-vehicles`, identical across backend, web (`AwardAssignPage.tsx`), and both mobile apps. Assignment status progresses `ASSIGNED → DELIVERED → RETURNED`, feeding the Contracts module's delivery lifecycle.
+
+### 7. RFQ auto-expiry, manual close, deadline extension
+`RFQDeadlineJob` (hosted `BackgroundService`, 5-minute poll) marks `PUBLISHED`/`BIDDING` RFQs past deadline as `EXPIRED`, recording `SYSTEM_EXPIRE` history and firing `RFQExpiredEvent`. `PUT /{id}/close` moves to `BIDDING_CLOSED`. `PUT /{id}/extend-deadline` (default +3 days) reopens a `BIDDING_CLOSED` RFQ to `BIDDING`, or — for an `EXPIRED` RFQ — restores whichever status it held immediately before expiry (falling back to `BIDDING` if no history row exists).
+
+### 8. RFQ cancellation
+`DELETE /{id}` blocks only `AWARDED`/`COMPLETED`; cancelling a `PARTIALLY_AWARDED` RFQ does not itself unwind escrow already locked for prior awards — that is a Contracts/Finance concern. No structured cancellation-reason field exists on the entity.
+
+### 9. Direct Rental: catalog → cart → submit → respond → contract
+Provider enables a vehicle (`Vehicle.EnableDirectRental()`, requires `APPROVED` status + positive `DailyRentalRate`, blocked if contract/award-committed). Business browses the catalog (excludes locked vehicles), builds a multi-provider cart (`DirectRentalCartController`), and submits (`SubmitCartCommandHandler`): groups cart items by provider then vehicle type, checks wallet balance, re-validates vehicle availability transactionally (aborting on any newly-locked vehicle), and creates one `DirectRentalRequest` per provider with a 48-hour `expiresAt`. Provider responds vehicle-by-vehicle (`RespondToDirectRentalRequestCommand`) — full accept, partial accept (blocked if `IsAllOrNone`), or reject; `DirectRentalRequest.Accept()`/`AcceptPartial()`/`Reject()` derive the overall outcome from per-vehicle decisions. `ExpireDirectRentalRequestsJob` (hourly `BackgroundService`) auto-expires unanswered `PENDING` requests. On `ACCEPTED`/`PARTIALLY_ACCEPTED`, `DirectRentalRequestAcceptedEventHandler` (Contracts module) creates a contract with vehicles pre-assigned — no separate post-award assignment step, unlike the RFQ path.
+
+### 10. Fleet-capacity conflict preview
+Before responding to a Direct Rental request, a provider can call `GET /direct-rental/requests/{id}/accept-preview` (`GetDirectRentalAcceptPreviewQuery`) to see per-vehicle conflict codes (`DR_ACCEPT_AWARD_NOT_FULLY_ASSIGNED`, `DR_ACCEPT_VEHICLE_ON_AWARD`, `DR_ACCEPT_BID_CAPACITY`) against their RFQ bid/award commitments, via the same `IProviderFleetCapacityService` used for RFQ bidding. The preview is advisory — the actual `respond` call re-enforces the same gate server-side.
 
 ---
 
-### 3. Submit Bid (Blind Bidding)
+## Events
 
-```csharp
-// Service Interface
-public interface IBlindBiddingService
-{
-    string HashProviderId(Guid providerId);
-    bool VerifyProviderHash(Guid providerId, string hash);
-}
+`Domain/Events/MarketplaceEvents.cs` (single file, all records):
 
-// Implementation
-public class BlindBiddingService : IBlindBiddingService
-{
-    private const string SALT = "movello-blind-bidding-salt-2025"; // Store in config
-    
-    public string HashProviderId(Guid providerId)
-    {
-        var input = $"{providerId}{SALT}";
-        using var sha256 = SHA256.Create();
-        var hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(input));
-        var hash = Convert.ToBase64String(hashBytes);
-        
-        // Return masked version for display: "Provider •••4411"
-        return $"Provider •••{hash.Substring(hash.Length - 4)}";
-    }
-    
-    public bool VerifyProviderHash(Guid providerId, string hash)
-    {
-        var computed = HashProviderId(providerId);
-        return computed == hash;
-    }
-}
+**RFQ/Bid:** `RFQCreatedEvent`, `RFQPublishedEvent`, `RFQExpiredEvent`, `BidSubmittedEvent`, `BidAwardedEvent(BidId, RFQId, ProviderId)`, `BidRejectedEvent`, `BidWithdrawnEvent`
 
-// Command
-public class SubmitBidCommand : IRequest<Guid>
-{
-    public Guid RFQId { get; set; }
-    public Guid ProviderId { get; set; }
-    public List<BidLineItemDto> LineItemBids { get; set; }
-}
+**Direct Rental:** `DirectRentalRequestSubmittedEvent`, `DirectRentalRequestAcceptedEvent`, `DirectRentalRequestPartiallyAcceptedEvent`, `DirectRentalRequestRejectedEvent`, `DirectRentalRequestExpiredEvent`, `DirectRentalRequestCancelledEvent`
 
-// Handler
-public class SubmitBidCommandHandler : IRequestHandler<SubmitBidCommand, Guid>
-{
-    private readonly IRFQRepository _rfqRepository;
-    private readonly IBidRepository _bidRepository;
-    private readonly IBlindBiddingService _blindBiddingService;
-    private readonly IPriceValidator _priceValidator;
-    private readonly IMediator _mediator;
-    
-    public async Task<Guid> Handle(SubmitBidCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Validate RFQ is open for bidding
-        var rfq = await _rfqRepository.GetByIdAsync(request.RFQId);
-        
-        if (rfq.Status != RFQStatus.Published)
-            throw new BusinessException("RFQ is not open for bidding");
-        
-        if (DateTime.UtcNow > rfq.BidDeadline)
-            throw new BusinessException("Bid deadline has passed");
-        
-        // 2. PRE-BID VALIDATION (BR-004)
-        await ValidateProviderEligibilityAsync(request.ProviderId, request.LineItemBids, rfq);
-        
-        // 3. Validate prices
-        foreach (var bidItem in request.LineItemBids)
-        {
-            var lineItem = await _rfqRepository.GetLineItemByIdAsync(bidItem.LineItemId);
-            
-            var isValid = await _priceValidator.ValidatePriceAsync(
-                lineItem.VehicleTypeCode,
-                bidItem.UnitPrice
-            );
-            
-            if (!isValid)
-                throw new BusinessException($"Price out of acceptable range for {lineItem.VehicleTypeCode}");
-        }
-        
-        // 4. Create bid header
-        var bid = new RFQBid
-        {
-            Id = Guid.NewGuid(),
-            RFQId = request.RFQId,
-            ProviderId = request.ProviderId,
-            Status = BidStatus.Submitted,
-            SubmittedAt = DateTime.UtcNow
-        };
-        
-        await _bidRepository.AddAsync(bid);
-        
-        // 5. Create blind bid snapshots (anonymized)
-        var snapshots = request.LineItemBids.Select(bidItem => new RFQBidSnapshot
-        {
-            Id = Guid.NewGuid(),
-            RFQLineItemId = bidItem.LineItemId,
-            RFQBidId = bid.Id,
-            HashedProviderId = _blindBiddingService.HashProviderId(request.ProviderId),
-            UnitPrice = bidItem.UnitPrice,
-            QuantityOffered = bidItem.QuantityOffered,
-            Notes = bidItem.Notes,
-            CreatedAt = DateTime.UtcNow
-        }).ToList();
-        
-        await _bidRepository.AddSnapshotsAsync(snapshots);
-        
-        // 6. Publish event
-        await _mediator.Publish(new BidSubmittedEvent
-        {
-            BidId = bid.Id,
-            RFQId = request.RFQId,
-            ProviderId = request.ProviderId
-        });
-        
-        return bid.Id;
-    }
-}
-```
+`MarketplaceEventLog` is the module's own generic audit-log entity for these events, but **`MarketplaceEventLog.Create()` has zero call sites anywhere in the backend** — the table and entity exist and are mapped, but nothing ever writes a row. The real audit trail for RFQ/bid/request lifecycle changes is `RFQStatusHistory`/`RFQBidHistory`/`DirectRentalRequestStatusHistory`, not this entity.
 
 ---
 
-### 4. Award Bid (with Wallet Validation)
+## APIs (controllers, actual routes)
 
-```csharp
-// Command
-public class AwardBidCommand : IRequest<List<Guid>>
-{
-    public Guid RFQId { get; set; }
-    public Guid BusinessId { get; set; }
-    public List<AwardDto> Awards { get; set; }
-}
-
-// Handler
-public class AwardBidCommandHandler : IRequestHandler<AwardBidCommand, List<Guid>>
-{
-    private readonly IRFQRepository _rfqRepository;
-    private readonly IBidRepository _bidRepository;
-    private readonly IWalletService _walletService;
-    private readonly IMediator _mediator;
-    
-    public async Task<List<Guid>> Handle(AwardBidCommand request, CancellationToken cancellationToken)
-    {
-        // 1. Validate RFQ
-        var rfq = await _rfqRepository.GetByIdAsync(request.RFQId);
-        
-        if (rfq.BusinessId != request.BusinessId)
-            throw new ForbiddenException("Not authorized");
-        
-        if (rfq.Status != RFQStatus.BiddingClosed && DateTime.UtcNow <= rfq.BidDeadline)
-            throw new BusinessException("Bidding is still open");
-        
-        // 2. AWARD VALIDATION (BR-006)
-        // a. Validate all bids still exist and providers still eligible
-        foreach (var award in request.Awards)
-        {
-            var bid = await _bidRepository.GetByIdAsync(award.BidId);
-            if (bid == null || bid.Status != BidStatus.Submitted)
-                throw new BusinessException($"Bid {award.BidId} is no longer valid");
-            
-            // Re-validate provider eligibility at award time
-            await ValidateProviderAtAwardTimeAsync(bid.ProviderId, award);
-        }
-        
-        // 3. Calculate total escrow required (BR-008)
-        decimal totalEscrowRequired = 0;
-        var awardDetails = new List<(AwardDto award, decimal escrowAmount)>();
-        
-        foreach (var award in request.Awards)
-        {
-            var bid = await _bidRepository.GetByIdAsync(award.BidId);
-            var snapshot = await _bidRepository.GetSnapshotAsync(award.LineItemId, award.BidId);
-            
-            var lineItem = await _rfqRepository.GetLineItemByIdAsync(award.LineItemId);
-            var escrowMultiplier = await GetEscrowMultiplierAsync(lineItem.ContractPeriod);
-            var escrowAmount = award.QuantityAwarded * snapshot.UnitPrice * escrowMultiplier;
-            
-            totalEscrowRequired += escrowAmount;
-            awardDetails.Add((award, escrowAmount));
-        }
-        
-        // 4. WALLET VALIDATION - CRITICAL (BR-006, BR-007)
-        var wallet = await _walletService.GetBusinessWalletAsync(request.BusinessId);
-        var availableBalance = wallet.Balance - wallet.LockedBalance;
-        
-        if (availableBalance < totalEscrowRequired)
-        {
-            // Calculate max affordable quantity (BR-007)
-            var maxAffordable = await CalculateMaxAffordableQuantityAsync(
-                request.Awards, 
-                availableBalance
-            );
-            
-            throw new InsufficientFundsException(new
-            {
-                Required = totalEscrowRequired,
-                Available = availableBalance,
-                Shortfall = totalEscrowRequired - availableBalance,
-                MaxAffordableQuantity = maxAffordable.Quantity,
-                MaxAffordableVehicles = maxAffordable.VehicleCount,
-                Message = $"Your balance is sufficient for {maxAffordable.VehicleCount} vehicles out of {request.Awards.Sum(a => a.QuantityAwarded)} requested.",
-                Options = new[]
-                {
-                    new { Action = "DEPOSIT", Amount = totalEscrowRequired - availableBalance, Text = $"Deposit ETB {totalEscrowRequired - availableBalance:N2} to award all vehicles" },
-                    new { Action = "PARTIAL_AWARD", Quantity = maxAffordable.VehicleCount, Text = $"Award {maxAffordable.VehicleCount} vehicles with current balance" },
-                    new { Action = "CANCEL", Text = "Cancel award" }
-                }
-            });
-        }
-        
-        // 5. Create awards
-        var awardIds = new List<Guid>();
-        
-        foreach (var awardDto in request.Awards)
-        {
-            var bid = await _bidRepository.GetByIdAsync(awardDto.BidId);
-            var snapshot = await _bidRepository.GetSnapshotAsync(awardDto.LineItemId, awardDto.BidId);
-            
-            var award = new RFQBidAward
-            {
-                Id = Guid.NewGuid(),
-                RFQLineItemId = awardDto.LineItemId,
-                RFQBidId = awardDto.BidId,
-                ProviderId = bid.ProviderId, // NOW REVEALED
-                QuantityAwarded = awardDto.QuantityAwarded,
-                UnitPrice = snapshot.UnitPrice,
-                TotalAmount = awardDto.QuantityAwarded * snapshot.UnitPrice,
-                AwardedAt = DateTime.UtcNow
-            };
-            
-            await _bidRepository.AddAwardAsync(award);
-            awardIds.Add(award.Id);
-            
-            // 5. Publish event for each award (Contracts & Finance modules listen)
-            await _mediator.Publish(new BidAwardedEvent
-            {
-                AwardId = award.Id,
-                RFQId = request.RFQId,
-                LineItemId = awardDto.LineItemId,
-                BidId = awardDto.BidId,
-                ProviderId = bid.ProviderId,
-                BusinessId = request.BusinessId,
-                QuantityAwarded = award.QuantityAwarded,
-                UnitPrice = award.UnitPrice,
-                TotalAmount = award.TotalAmount,
-                EscrowAmount = award.TotalAmount * 1.0m // 100% escrow
-            });
-        }
-        
-        // 6. Update RFQ status
-        rfq.Status = RFQStatus.Awarded;
-        await _rfqRepository.UpdateAsync(rfq);
-        
-        return awardIds;
-    }
-    
-    // PRE-BID VALIDATION (BR-004)
-    private async Task ValidateProviderEligibilityAsync(
-        Guid providerId, 
-        List<BidLineItemDto> bidItems, 
-        RFQ rfq)
-    {
-        // 1. Provider account status check
-        var provider = await _identityService.GetProviderAsync(providerId);
-        
-        if (provider.Status != ProviderStatus.VERIFIED)
-            throw new BusinessException(\"Provider account must be VERIFIED to submit bids\");
-        
-        // 2. Vehicle availability check
-        var providerVehicles = await _identityService.GetActiveVehiclesAsync(providerId);
-        
-        foreach (var bidItem in bidItems)
-        {
-            var lineItem = await _rfqRepository.GetLineItemByIdAsync(bidItem.LineItemId);
-            
-            // Match vehicles by type and check availability through delivery date
-            var matchingVehicles = providerVehicles.Count(v => 
-                v.VehicleTypeCode == lineItem.VehicleTypeCode &&
-                v.Status == VehicleStatus.Active &&
-                v.IsUnassigned == true
-            );
-            
-            // Note: Provider can bid for more than they currently have
-            // Business may choose to split awards or award partial quantities
-            if (matchingVehicles == 0)
-            {
-                throw new BusinessException(\n                    $\"No active and unassigned vehicles of type {lineItem.VehicleTypeCode}. \" +\n                    \"At least 1 matching vehicle is required to bid.\"\n                );\n            }\n        }\n        \n        // 3. Insurance validity check\n        foreach (var bidItem in bidItems)\n        {
-            var lineItem = await _rfqRepository.GetLineItemByIdAsync(bidItem.LineItemId);\n            var matchingVehicles = providerVehicles.Where(v => \n                v.VehicleTypeCode == lineItem.VehicleTypeCode\n            );\n            \n            var deliveryDate = rfq.StartDate;\n            var requiredCoverageEndDate = deliveryDate.AddDays(30); // +30 days buffer\n            \n            var validInsuredVehicles = matchingVehicles.Count(v =>\n                v.Insurance != null &&\n                v.Insurance.Status == InsuranceStatus.Active &&\n                v.Insurance.CoverageEndDate >= requiredCoverageEndDate\n            );\n            \n            if (validInsuredVehicles == 0)\n            {\n                throw new BusinessException(\n                    $\"All vehicles for {lineItem.VehicleTypeCode} must have valid insurance \" +\n                    $\"through {requiredCoverageEndDate:yyyy-MM-dd}\"\n                );\n            }\n        }\n        \n        // 4. Trust score check (if configured)\n        var minTrustScore = await _settingsService.GetSettingAsync<int?>(\"min.trust.score.for.bidding\");\n        if (minTrustScore.HasValue && provider.TrustScore < minTrustScore.Value)\n        {\n            throw new BusinessException(\n                $\"Minimum trust score of {minTrustScore.Value} required to bid. \" +\n                $\"Current score: {provider.TrustScore}\"\n            );\n        }\n    }\n    \n    // RE-VALIDATION AT AWARD TIME (BR-009)\n    private async Task ValidateProviderAtAwardTimeAsync(Guid providerId, AwardDto award)\n    {\n        var provider = await _identityService.GetProviderAsync(providerId);\n        \n        if (provider.Status != ProviderStatus.VERIFIED)\n        {\n            throw new BusinessException(\n                $\"Provider {provider.Name} is no longer verified. Cannot award bid.\"\n            );\n        }\n        \n        // Check vehicles still available\n        var vehicles = await _identityService.GetActiveVehiclesAsync(providerId);\n        var lineItem = await _rfqRepository.GetLineItemByIdAsync(award.LineItemId);\n        \n        var availableVehicles = vehicles.Count(v => \n            v.VehicleTypeCode == lineItem.VehicleTypeCode &&\n            v.Status == VehicleStatus.Active &&\n            v.IsUnassigned == true\n        );\n        \n        if (availableVehicles < award.QuantityAwarded)\n        {\n            throw new BusinessException(\n                $\"Provider {provider.Name} no longer has {award.QuantityAwarded} available vehicles. \" +\n                $\"Currently available: {availableVehicles}\"\n            );\n        }\n    }\n    \n    // PARTIAL AWARD CALCULATION (BR-007)\n    private async Task<(int Quantity, int VehicleCount)> CalculateMaxAffordableQuantityAsync(\n        List<AwardDto> awards, \n        decimal availableBalance)\n    {\n        decimal runningTotal = 0;\n        int affordableVehicles = 0;\n        \n        // Sort awards by unit price (lowest first) to maximize vehicle count\n        var sortedAwards = new List<(AwardDto award, decimal unitPrice, decimal escrowMultiplier)>();\n        \n        foreach (var award in awards)\n        {\n            var snapshot = await _bidRepository.GetSnapshotAsync(award.LineItemId, award.BidId);\n            var lineItem = await _rfqRepository.GetLineItemByIdAsync(award.LineItemId);\n            var escrowMultiplier = await GetEscrowMultiplierAsync(lineItem.ContractPeriod);\n            \n            sortedAwards.Add((award, snapshot.UnitPrice, escrowMultiplier));\n        }\n        \n        sortedAwards = sortedAwards.OrderBy(a => a.unitPrice).ToList();\n        \n        // Calculate how many vehicles can be afforded\n        foreach (var (award, unitPrice, escrowMultiplier) in sortedAwards)\n        {\n            var costPerVehicle = unitPrice * escrowMultiplier;\n            var affordableFromThisAward = (int)Math.Floor((availableBalance - runningTotal) / costPerVehicle);\n            \n            var actuallyAffordable = Math.Min(affordableFromThisAward, award.QuantityAwarded);\n            \n            affordableVehicles += actuallyAffordable;\n            runningTotal += actuallyAffordable * costPerVehicle;\n            \n            if (runningTotal >= availableBalance)\n                break;\n        }\n        \n        return (affordableVehicles, affordableVehicles);\n    }\n    \n    private async Task<decimal> GetEscrowMultiplierAsync(string contractPeriod)\n    {\n        // Get from settings or use defaults\n        return contractPeriod switch\n        {\n            \"MONTH\" => 1.0m,   // 100% for monthly\n            \"EVENT\" => 1.0m,   // 100% for events\n            \"WEEK\" => 0.25m,   // 25% for weekly (if supported)\n            _ => 1.0m\n        };\n    }
-}
-```
+| Controller | Base route | Key endpoints |
+|---|---|---|
+| `RFQController` | `api/marketplace/rfqs` | `POST` (create, admin can create-on-behalf-of via `BusinessId`, auto-publishes), `PUT /{id}`, `PUT /{id}/publish`, `PUT /{id}/close`, `PUT /{id}/extend-deadline`, `DELETE /{id}`, `GET /{id}`, `GET /{id}/status-history`, `GET` (list/browse) |
+| `BidController` | `api/marketplace/bids` | `POST`, `PUT /{id}`, `DELETE /{id}`, `POST /award`, `GET /{id}`, `GET`, `GET /rfq/{rfqId}`, `GET /provider/{providerId}`, `GET /{id}/award-assignments` |
+| `RfqAwardController` | `api/marketplace/rfq/awards` | `GET /{awardId}/assignments`, `POST /{awardId}/vehicles`, `DELETE /{awardId}/vehicles/{vehicleId}`, `GET /{awardId}/eligible-vehicles` |
+| `DirectRentalVehicleController` | `api/marketplace/direct-rental/vehicles` | `GET` (catalog list), `GET /{vehicleId}` (detail) |
+| `DirectRentalCartController` | `api/marketplace/cart` | `GET`, `POST /items`, `PATCH /items/{cartItemId}`, `DELETE /items/{cartItemId}`, `GET /submit-preview`, `POST /submit` |
+| `DirectRentalRequestController` | `api/marketplace/direct-rental/requests` | `GET`, `GET /{requestId}`, `GET /{requestId}/history`, `POST /{requestId}/cancel`, `POST /{requestId}/respond`, `GET /{requestId}/accept-preview` |
+| `ProviderFleetController` | `api/marketplace/provider/fleet` | `GET /capacity`, `POST /capacity/bid-preview`, `GET /action-items` |
+| `AdminDirectRentalController` (`Controllers/Admin/`) | `api/admin/direct-rental` | Vehicle browse, request list/detail/history, business-cart CRUD + submit-preview + submit (tagged `ADMIN`), respond-on-behalf-of-provider — all `[Authorize(Policy = "AdminOnly")]` |
 
 ---
 
-### 5. Price Validation
+## Known Gaps (verified by code search, zero call sites unless noted)
 
-```csharp
-// Service Interface
-public interface IPriceValidator
-{
-    Task<bool> ValidatePriceAsync(string vehicleTypeCode, decimal unitPrice);
-    Task<MarketPriceRange> GetMarketPriceRangeAsync(string vehicleTypeCode);
-}
-
-// Implementation
-public class PriceValidator : IPriceValidator
-{
-    private readonly IMarketPriceService _marketPriceService;
-    
-    public async Task<bool> ValidatePriceAsync(string vehicleTypeCode, decimal unitPrice)
-    {
-        var range = await GetMarketPriceRangeAsync(vehicleTypeCode);
-        
-        // Floor: 50% of market average
-        // Ceiling: 200% of market average
-        return unitPrice >= range.Floor && unitPrice <= range.Ceiling;
-    }
-    
-    public async Task<MarketPriceRange> GetMarketPriceRangeAsync(string vehicleTypeCode)
-    {
-        // Get average price from last 30 days of contracts
-        var marketAverage = await _marketPriceService.GetAveragePriceAsync(
-            vehicleTypeCode,
-            DateTime.UtcNow.AddDays(-30),
-            DateTime.UtcNow
-        );
-        
-        if (marketAverage == 0)
-        {
-            // No market data - use default ranges
-            marketAverage = GetDefaultPrice(vehicleTypeCode);
-        }
-        
-        return new MarketPriceRange
-        {
-            VehicleTypeCode = vehicleTypeCode,
-            Average = marketAverage,
-            Floor = marketAverage * 0.5m,
-            Ceiling = marketAverage * 2.0m
-        };
-    }
-    
-    private decimal GetDefaultPrice(string vehicleTypeCode)
-    {
-        // Default prices for common vehicle types
-        return vehicleTypeCode switch
-        {
-            "EV_SEDAN" => 3500m,
-            "SEDAN" => 3000m,
-            "SUV" => 4500m,
-            "MINIBUS_12" => 8000m,
-            "BUS_30" => 15000m,
-            _ => 5000m
-        };
-    }
-}
-```
+1. **Weighted bid-ranking algorithm does not exist anywhere** — no composite price/trust/condition/response-time scoring, no admin-configurable weights, on any surface. The web's `sortBy` is a single-column client sort only.
+2. **Anti-collusion detection does not exist anywhere** — no identical-bid, same-IP, or shared-bank-account checks. `RFQBid`/`RFQBidItem`/`RFQBidHistory` don't even capture an IP address, so there's no data to build the cheapest signal from.
+3. **Blind bidding is not enforced server-side.** `GetBidsByRFQQuery`/`GetBidQuery` set `ProviderName` unconditionally; only the web client's choice not to render it protects identity pre-award.
+4. **`MarketplaceEventLog` is dead code** — mapped entity and table, zero writes.
+5. **`IPriceValidator`/`PriceValidator` exist in `Domain/Services` but are not called from `SubmitBidCommand`, `UpdateBidCommand`, or `AwardBidCommand`** — no price floor/ceiling is enforced anywhere in the live bid/award path, despite the service being fully coded.
+6. **No persisted "eligible providers at publish time" table** — `RFQPublishedNotificationHandler` computes matches live and doesn't audit who was notified.
+7. **The 10-line-item / 50-vehicle-per-RFQ caps are enforced only in the web Zod schema**, not confirmed server-side in `RFQ`/`RFQLineItem`.
+8. **Editing a `PUBLISHED` RFQ's line items does not invalidate bids already placed against the prior definitions.**
+9. **No structured cancellation-reason field** on `RFQ` (free-text notes only via the status-history API caller) or bid-withdrawal-reason field on `RFQBid`.
+10. **Resubmission-after-withdrawal is real and deliberate** (`SubmitBidCommandHandler` hard-deletes the prior `WITHDRAWN` row) — not a bug, but it means the platform does not prevent "withdraw and watch, then resubmit near the deadline."
+11. **No escrow lock occurs at Direct Rental cart submit** — the wallet check at submit-preview/submit is an estimate only; funds aren't actually held until the resulting contract reaches its escrow stage (documented as a known MVP limitation in `MVP_DIRECT_RENTAL_SPECIFICATION.md` §12).
+12. **Fleet-capacity accept-preview and the actual accept-time gate share the same `IProviderFleetCapacityService` codepath today** (low risk of drift), but they are two separate call sites — if one is ever changed without the other, a provider could see a false "safe to accept" signal.
 
 ---
 
-## 📡 Events Published
+## Integration Points
 
-### RFQPublishedEvent
-```csharp
-public class RFQPublishedEvent : INotification
-{
-    public Guid RFQId { get; set; }
-    public Guid BusinessId { get; set; }
-    public string Title { get; set; }
-    public DateTime BidDeadline { get; set; }
-    public List<object> LineItems { get; set; }
-}
-```
-
-### BidAwardedEvent
-```csharp
-public class BidAwardedEvent : INotification
-{
-    public Guid AwardId { get; set; }
-    public Guid RFQId { get; set; }
-    public Guid LineItemId { get; set; }
-    public Guid BidId { get; set; }
-    public Guid ProviderId { get; set; }
-    public Guid BusinessId { get; set; }
-    public int QuantityAwarded { get; set; }
-    public decimal UnitPrice { get; set; }
-    public decimal TotalAmount { get; set; }
-    public decimal EscrowAmount { get; set; }
-}
-```
-
----
-
-## 📡 Events Consumed
-
-### BusinessVerifiedEvent
-```csharp
-// From Identity Module
-public class BusinessVerifiedEventHandler : INotificationHandler<BusinessVerifiedEvent>
-{
-    public async Task Handle(BusinessVerifiedEvent notification, CancellationToken cancellationToken)
-    {
-        // Business can now create RFQs
-        // No action needed in Marketplace module
-    }
-}
-```
-
-### ProviderVerifiedEvent
-```csharp
-// From Identity Module
-public class ProviderVerifiedEventHandler : INotificationHandler<ProviderVerifiedEvent>
-{
-    public async Task Handle(ProviderVerifiedEvent notification, CancellationToken cancellationToken)
-    {
-        // Provider can now bid on RFQs
-        // No action needed in Marketplace module
-    }
-}
-```
-
----
-
-## ✅ Business Rules
-
-1. **RFQ Creation:** No wallet balance required ✅
-2. **Award:** Wallet balance REQUIRED ⚠️
-3. **Partial Awards:** Fully supported based on available funds
-4. **Bid Deadline:** Minimum 24 hours from publication
-5. **Start Date:** Minimum 3 days from publication
-6. **Max Vehicles:** 50 vehicles per RFQ
-7. **Blind Bidding:** Provider identity hashed until award
-8. **Price Validation:**
-   - Floor: 50% of market average
-   - Ceiling: 200% of market average
-9. **Market Price:** Calculated from last 30 days
-10. **Split Awards:** Multiple providers per line item allowed
-11. **Insurance Check:** All bid vehicles must have valid insurance
-12. **Vehicle Availability:** Provider must have enough active vehicles
-
----
-
-**Next Module:** [Contracts_Module.md](./Contracts_Module.md)
+- **Contracts module:** consumes `BidAwardedEvent` (via `BidAwardedEventHandler` → `CreateContractCommand`, RFQ path) and `DirectRentalRequestAcceptedEvent`/`...PartiallyAcceptedEvent` (via `DirectRentalRequestAcceptedEventHandler` → `CreateDirectRentalContractCommand`, Direct Rental path); reads/cancels `DeliverySession` rows when a post-delivery vehicle is unassigned.
+- **Finance module:** `IWalletService`/`IWalletCalculationService` provide business wallet balance checks at RFQ award time and Direct Rental cart submit-preview/submit; actual escrow locking happens downstream once a contract exists, triggered by `ContractCreatedEvent`.
+- **Identity module:** `Provider.TrustScore` read live and snapshotted into `RFQBidSnapshot` at bid submission; `IProviderValidationService`/`ProviderFleetCapacityService` gate bid/award/Direct-Rental-accept eligibility on verification status and fleet-segment capacity; `Vehicle.IsAvailableForDirectRental`/`EnableDirectRental()`/`DisableDirectRental()` and vehicle status/insurance drive Direct Rental catalog eligibility.
+- **MasterData module:** provider tier + commission-strategy lookup for contract commission rate, resolved at contract-creation time on both the RFQ path (`BidAwardedEventHandler`) and the Direct Rental path (`CreateDirectRentalContractCommandHandler`), each with its own 5% default fallback.
+- **Notifications module:** `RFQPublishedNotificationHandler` (4-channel fanout, live fleet-match filtering), `BidSubmittedEvent`/`BidWithdrawnEvent`/`BidRejectedEvent` notifications, `DirectRentalNotificationHandlers` for submit/accept/reject/expire/cancel.

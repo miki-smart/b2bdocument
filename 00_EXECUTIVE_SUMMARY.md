@@ -1,481 +1,232 @@
-# Movello B2B Mobility Marketplace - MVP Executive Summary
+# Movello B2B Mobility Marketplace — Executive Summary
 
-**Version:** 1.0 MVP  
-**Date:** November 26, 2025  
-**Status:** Production-Ready Specification  
-**Architecture:** Modular Monolith with BFF Pattern
+**Version:** 2.0 (rewritten against running code)
+**Last verified against code:** 2026-07-23
+**Original version:** 1.0, November 26, 2025 — written **before** implementation began, as a forward-looking specification. Several of its core claims (Angular frontend, a separate YARP BFF/API-gateway service, 5 modules, a week-by-week build timeline) describe a plan that was superseded during actual development and never matched what was built. This revision replaces those claims with what is verified in code today.
+**Status:** Mature MVP — substantially built and in active use, with partial post-MVP work underway. This is **not** a from-scratch plan; treat this document as a description of an existing system.
+**Ground truth:** `project-docs/18_Implementation_Coverage_Audit.md` (2026-07-23) — the code-grounded audit this rewrite is based on. Where this summary and that audit ever disagree, trust the audit and re-verify against code.
 
 ---
 
-## 🎯 Executive Overview
+## Executive Overview
 
-Movello is a B2B mobility marketplace platform connecting **Business Clients** with **Vehicle Providers** through a transparent, secure, and efficient blind-bidding system. This document serves as the authoritative specification for the Minimum Viable Product (MVP) implementation.
+Movello (CarClaks) is a B2B mobility marketplace connecting **Business Clients** with **Vehicle Providers** through a blind-bidding RFQ system, plus a separate fixed-price **Direct Rental** booking surface. The platform spans four buildable surfaces: a single .NET backend, a React web app, and two Flutter mobile apps (business and provider).
 
 ### Vision Statement
 
-To revolutionize B2B vehicle rental in Ethiopia by creating a trusted, transparent marketplace that eliminates inefficiencies, reduces costs, and ensures compliance through technology-driven automation.
+To make B2B vehicle rental in Ethiopia transparent, trustworthy, and largely automated — competitive blind bidding instead of opaque quotes, escrow-backed contracts instead of manual invoicing, and OTP-verified handover instead of paper trails.
 
 ---
 
-## 📊 Market Opportunity
+## Market Opportunity
 
 ### Target Market
-- **Primary:** Ethiopian businesses requiring fleet rentals (1-365 days)
+- **Primary:** Ethiopian businesses requiring fleet rentals (1–365 days)
 - **Secondary:** Vehicle providers (individuals, agents, rental companies)
-- **Market Size:** $50M+ annual B2B vehicle rental market in Addis Ababa alone
+- **Market Size:** $50M+ annual B2B vehicle rental market in Addis Ababa alone (business estimate, not a code fact)
 
 ### Problem Statement
 1. **Opacity:** No transparent pricing, businesses overpay
-2. **Trust Deficit:** High risk of fraud, vehicle quality issues
+2. **Trust Deficit:** Fraud risk, vehicle quality issues
 3. **Manual Processes:** Paper-based contracts, cash payments
 4. **Compliance Gaps:** Insurance lapses, unlicensed operators
 
-### Movello Solution
-- **Blind Bidding:** Competitive pricing, provider anonymity until award
-- **Trust Scoring:** 0-100 provider ratings based on performance
-- **Escrow System:** Automated payment protection
-- **Digital Verification:** OTP-based vehicle handover, GPS tracking
-- **Compliance Enforcement:** Mandatory insurance, KYC/KYB verification
+### Movello Solution (as actually implemented)
+- **Blind Bidding:** Line-item RFQs with per-item, multi-provider split awards; provider identity is withheld by the web UI until award (the API itself does not withhold the field server-side — see the known gap noted in `backlog/mvp/epic-05-bidding-engine.md`).
+- **Trust Scoring:** A real, formula-based provider trust score (0–100) and tier system (Bronze/Silver/Gold/Platinum) exists and is DI-registered — but per the audit, it currently has **zero production call sites** and every provider's score is effectively frozen at its default. There is **no** business-side risk score.
+- **Escrow System:** Automated escrow lock on contract creation, with retry/backoff and a timeout-driven auto-cancel job.
+- **Digital Verification:** OTP-based vehicle handover (delivery) plus a separate return-trip OTP and inspection checklist. GPS/geofence tracking does **not** exist in code (post-MVP, not started).
+- **Compliance Enforcement:** Mandatory insurance and KYC/KYB verification before platform access.
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
-### Pattern: Modular Monolith with BFF
+### Pattern: Single .NET 9 Modular Monolith — no separate BFF/gateway service
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Angular 19 Frontend                      │
-│              (Business Portal | Provider Portal)            │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────────┐
-│           BFF (Backend-for-Frontend) - YARP                 │
-│        (API Gateway + Auth Aggregation + Routing)           │
-└────────────────────┬────────────────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────────────────┐
-│              Marketplace.API (.NET 9)                       │
-│                  Modular Monolith                           │
-├─────────────────────────────────────────────────────────────┤
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │ Identity │  │Marketplace│  │Contracts │  │ Finance  │   │
-│  │  Module  │  │  Module  │  │  Module  │  │  Module  │   │
-│  └──────────┘  └──────────┘  └──────────┘  └──────────┘   │
-│  ┌──────────┐                                               │
-│  │ Delivery │                                               │
-│  │  Module  │                                               │
-│  └──────────┘                                               │
-├─────────────────────────────────────────────────────────────┤
-│         MediatR (In-Process Event Bus)                      │
-├─────────────────────────────────────────────────────────────┤
-│      Single PostgreSQL 16 DB (6 Schemas)                    │
-│  masterdata | identity | marketplace | contracts            │
-│  wallet | delivery                                          │
-└─────────────────────────────────────────────────────────────┘
-         │              │              │
-    ┌────▼────┐    ┌───▼────┐    ┌───▼────┐
-    │Keycloak │    │ Redis  │    │ MinIO  │
-    │  Auth   │    │ Cache  │    │Storage │
-    └─────────┘    └────────┘    └────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                      CLIENT SURFACES                               │
+│  React 18.3 + Vite 6 web app       Flutter mobile apps              │
+│  (business/provider/admin portals   business_app · provider_app     │
+│   in one SPA, role-based routing)   (flutter_riverpod, go_router)   │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │ HTTPS (direct — no gateway hop)
+┌───────────────────────────▼─────────────────────────────────────────┐
+│                   Marketplace.API (.NET 9)                          │
+│           Single deployable — one Program.cs, one csproj            │
+├───────────────────────────────────────────────────────────────────┤
+│  Modules/  Auth · Identity · Marketplace · Contracts ·               │
+│            Finance · Delivery · MasterData · Notifications          │
+│  (8 modules — see 01_ARCHITECTURE_OVERVIEW.md §1.3)                  │
+├───────────────────────────────────────────────────────────────────┤
+│  MediatR (in-process events, dominant) · SignalR (NotificationHub)   │
+│  BffTokenRefreshMiddleware (in-process cookie↔bearer translation,    │
+│  not a separate BFF service)                                        │
+└───────────────────────────┬─────────────────────────────────────────┘
+                            │
+        ┌───────────────────┼───────────────────┬───────────────┐
+        ▼                   ▼                   ▼               ▼
+   PostgreSQL 16        Keycloak            Redis           MinIO
+  (EF Core 9 + Npgsql) (direct-grant auth) (cache)      (S3-compatible)
+                            │
+                       RabbitMQ (provisioned — package + docker
+                       service exist; per the coverage audit,
+                       barely used in production code today)
 ```
 
-### Key Architectural Decisions
+This diagram, and every claim in this document, should be read together with:
+- `architecture/modular-monolith-architecture.md` — authoritative module-boundary and extraction methodology
+- `architecture/module-layout-convention.md` — authoritative per-module folder shape
+- `01_ARCHITECTURE_OVERVIEW.md` (this suite) — the detailed version of the diagram above
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| **Pattern** | Modular Monolith | 30-50% faster MVP development, easier debugging, clear microservices migration path |
-| **Backend** | .NET 9 (C# 13) | Performance, async/await, LINQ, strong typing, EF Core 9 |
-| **Frontend** | Angular 19 + Signals | Modern reactive state, standalone components, TypeScript 5.6 |
-| **Database** | PostgreSQL 16 | ACID compliance, JSONB support, schema separation, proven reliability |
-| **Auth** | Keycloak + BFF | Industry-standard OAuth2/OIDC, centralized identity, BFF for token management |
-| **Events** | MediatR (in-process) | Simple for monolith, easy migration to RabbitMQ for microservices |
-| **Cache** | Redis 7 | Session storage, rate limiting, temporary data |
-| **Storage** | MinIO | S3-compatible, self-hosted, cost-effective for MVP |
-| **Real-time** | SignalR | WebSocket support for live bid updates, notifications |
+### Key Architectural Decisions (as built, not as originally planned)
 
----
-
-## 🎯 MVP Scope Definition
-
-### Tier 1: Core Features (MUST-HAVE)
-
-#### 1. Identity & Compliance
-- ✅ Business registration with KYB (Know Your Business)
-- ✅ Provider registration with KYC (Know Your Customer)
-- ✅ Vehicle registration with mandatory insurance verification
-- ✅ Document upload and admin verification workflow
-- ✅ Trust score calculation (0-100 scale)
-
-#### 2. Marketplace & Bidding
-- ✅ Multi-line-item RFQ creation
-- ✅ Blind bidding (provider identity hashed until award)
-- ✅ Split awards (multiple providers per line item)
-- ✅ Bid validation (price floors, vehicle eligibility)
-
-#### 3. Contract Management
-- ✅ Automated contract generation from awards
-- ✅ Multi-provider contract support
-- ✅ Vehicle assignment tracking
-- ✅ Partial fulfillment handling
-- ✅ Early return processing with proration
-
-#### 4. Delivery & Verification
-- ✅ OTP-based vehicle handover (6-digit, 5-minute expiry)
-- ✅ Photo evidence capture (4 angles + interior)
-- ✅ Odometer and fuel level recording
-- ✅ Return inspection workflow
-
-#### 5. Finance & Wallet
-- ✅ Digital wallet (Business & Provider)
-- ✅ Escrow lock/release automation
-- ✅ Monthly settlement cycles
-- ✅ Tier-based commission (5-10%)
-- ✅ Payment integration (Chapa, Telebirr)
-- ✅ Refund processing
-
-#### 6. Notifications
-- ✅ Email notifications (SendGrid)
-- ✅ SMS notifications (Twilio/Africa's Talking)
-- ✅ In-app notifications (SignalR)
-- ✅ Event-driven triggers
-
-### Tier 2: Enhanced Features (INCLUDED IN MVP)
-
-- ✅ **Partial Fulfillment:** Under-delivery, early returns, vehicle-level tracking
-- ✅ **Trust Score Calculation:** Automated scoring based on:
-  - Contract completion rate
-  - On-time delivery rate
-  - Cancellation rate
-  - Average ratings
-  - No-show incidents
-
-### Post-MVP (Excluded)
-
-- ❌ GPS/Geofence tracking (PLC providers only)
-- ❌ Group bidding (provider consortiums)
-- ❌ Instant payouts
-- ❌ Provider loan facilities
-- ❌ Insurance marketplace
-- ❌ Mobile applications (iOS/Android)
-- ❌ Advanced analytics dashboards
+| Decision | Actual choice | Notes |
+|----------|--------------|-------|
+| **Pattern** | Single .NET 9 modular monolith (`Marketplace.API`) | One `.csproj` in `backend/src` besides the test project; one deployable container |
+| **Backend** | .NET 9, EF Core 9 + Npgsql/PostgreSQL | Confirmed via `Marketplace.API.csproj` |
+| **Web frontend** | React 18.3 + Vite 6 + TanStack Query + Zustand + shadcn/ui | **Not Angular.** Confirmed via `movello-marketplace-core/package.json`. A single Vite SPA with role-based routing, not 3 separate portal apps. |
+| **Mobile** | Flutter only — `business_app`, `provider_app` (`flutter_riverpod`, `go_router`) | Flutter-only since inception; older mobile-spec docs' "React Native or Flutter" hedge is stale, not an open decision. |
+| **Auth** | Keycloak, called **directly, in-process** by `Modules/Auth` (`KeycloakAuthService`) via Resource Owner Password Credentials grant | No separate Auth microservice, no separate BFF/gateway service. A real `BffTokenRefreshMiddleware` exists, but as in-process middleware inside the same monolith — see `architecture/auth-service-microservice-spec.md` §1. |
+| **Events** | MediatR (in-process) is the dominant, actively-used mechanism | `RabbitMQ.Client` is a real package dependency and a real docker-compose service, but the coverage audit found minimal active production usage today — provisioned, not primary. |
+| **Cache** | Redis | Session/cache data |
+| **Storage** | MinIO | S3-compatible object storage for documents/photos |
+| **Payments** | Chapa.NET SDK — Chapa/Telebirr/CBEBirr webhook processing **is live today**, not a future item | Confirmed via `Chapa.NET` package and `PaymentController.cs` |
+| **Push/Notifications** | FirebaseAdmin (FCM), SMTP email, SMS (Afromessage), SignalR (`NotificationHub`) for real-time in-app | Admin-configurable multi-channel system with credential rotation — far beyond a simple "send email/SMS" MVP scope |
+| **Logging** | Serilog (structured, file + console + Seq sinks) | |
 
 ---
 
-## 📦 Module Breakdown
+## Product Scope: 21 Epics, 129 Stories
 
-### 1. Identity & Compliance Module
-**Responsibility:** User management, KYC/KYB, vehicle compliance, trust scoring
+The product backlog (`backlog/README.md`) organizes scope as **21 epics — 12 MVP + 9 post-MVP — totaling 129 user stories.** This supersedes any earlier "20 epics" framing: **Direct Rental**, a fully-shipped fixed-price (non-bidding) vehicle-booking feature that existed in code across all four surfaces without an epic number, was formalized as **epic-21** on 2026-07-23.
 
-**Entities:**
-- `user_account` (Keycloak mapping)
-- `business` (Business clients)
-- `provider` (Vehicle providers)
-- `vehicle` (Vehicle registry)
-- `vehicle_insurance` (Insurance tracking)
-- `provider_trust_score_history`
+### Current implementation status (condensed from the coverage audit's epic × surface matrix — see that document for the full table)
 
-**Key Features:**
-- Document verification workflow
-- Insurance expiry monitoring
-- Trust score calculation engine
-- Tier assignment (Bronze → Platinum)
+**MVP epics (01–12) — all implemented, several materially diverged from their epic docs:**
+- Epics 01–03 (onboarding, vehicle/insurance): implemented across backend/web, largely as documented with some undocumented admin/lifecycle additions.
+- Epics 04–05 (RFQ/Bidding): implemented, but as a **header + line-item + multi-provider split-award model** on backend/web, and a **fleet-bid-then-assign-vehicles** pattern on mobile — neither shape matches the epic text. The weighted bid-ranking formula and anti-collusion detection specified as Definition-of-Done in epic-05 **do not exist in any surface**.
+- Epic 06 (Contracts): implemented, but with an **18-state string-based lifecycle** (not the enum-driven, 4-state `pending/active/suspended/completed` model the epic describes), a dual-party OTP signing step, and no "renew" concept (contract **extension** instead) — the single most-diverged epic in the backlog. See `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` for the authoritative state model.
+- Epic 07 (OTP delivery): implemented, plus an undocumented return-trip OTP + inspection checklist system.
+- Epic 08 (Wallet/Escrow) and Epic 11 (Notifications): both **dramatically exceed** their epic docs — live payment-gateway webhooks, admin-configurable multi-channel notifications, SignalR real-time hub.
+- Epic 09–10 (Ledger/Settlement): implemented; provider-submitted invoice-approval flow inverts epic-09's assumption.
+- Epic 12 (Trust/Risk): provider trust-score formula exists but is **not wired into production** (frozen at default); no business risk score, no fraud engine, no dispute-engine entities exist anywhere.
 
----
-
-### 2. Marketplace Module
-**Responsibility:** RFQ management, blind bidding, award processing
-
-**Entities:**
-- `rfq` (Request for Quote header)
-- `rfq_line_item` (Vehicle requirements)
-- `rfq_bid` (Provider bids)
-- `rfq_bid_snapshot` (Blind bidding anonymization)
-- `rfq_bid_award` (Winning bids)
-
-**Key Features:**
-- Multi-line-item RFQ creation
-- Blind bidding with hashed provider IDs
-- Split award support
-- Market price tracking
+**Post-MVP epics (13–21):**
+- Epics 13, 15, 17, 18, 19, 20 (Group Bidding, Geofence/GPS, Instant Payouts, Loans, Insurance Marketplace, API/Enterprise): **confirmed not started** — zero code on any surface.
+- Epic 14 (Analytics Dashboard): **partially started** — dashboard-embedded charts on web/backend, basic stat cards on mobile; nowhere near full scope.
+- Epic 16 (Mobile Applications): **the most-built post-MVP epic** — both Flutter apps exist, plus a 19-controller/100+-endpoint Mobile API surface — but still missing pieces against its own Definition of Done (biometric auth, true offline sync, RFQ templates).
+- Epic 21 (Direct Rental): **fully shipped** across backend, web, and both mobile apps — cart → request → provider accept/reject, its own admin surface, its own background expiry job. Was undocumented as an epic until this pass.
 
 ---
 
-### 3. Contracts Module
-**Responsibility:** Contract lifecycle, vehicle assignments, amendments
+## Module Breakdown (8 real backend modules)
 
-**Entities:**
-- `contract` (Contract header)
-- `contract_line_item` (Per-provider line items)
-- `contract_vehicle_assignment` (Per-vehicle tracking)
-- `contract_amendment` (Change requests)
-- `contract_penalty` (Violations)
+Confirmed via `backend/src/Marketplace.API/Modules/` — this is the real module list; do not use any older doc's 5-module or 7-module framing.
 
-**Key Features:**
-- Automated contract generation
-- Partial fulfillment tracking
-- Early return processing
-- Amendment workflows
+### 1. Auth Module
+Keycloak integration — direct-grant login/refresh/logout, admin-API session listing, role sync. No local session/MFA tables; MFA is explicitly unimplemented (`VerifyMfaAsync` throws `NotSupportedException`). See `architecture/auth-service-microservice-spec.md` §1 for full detail — not duplicated here.
 
----
+### 2. Identity Module
+Business/Provider/Vehicle registration, KYC/KYB document verification, trust-score calculation service (built, not wired to events), tier assignment, insurance tracking, security/risk events (`RiskEvent`/`AccountFlag` — generic security events, not a scored risk model).
 
-### 4. Finance Module
-**Responsibility:** Wallets, escrow, settlement, commission
+### 3. Marketplace Module
+RFQ (header + line items), blind bidding, per-line-item bids with full audit trail (`RFQBidSnapshot`/`RFQBidHistory`), multi-provider split awards, post-award vehicle-assignment endpoints shared by web and both mobile apps, Direct Rental cart/request/vehicle entities and controllers.
 
-**Entities:**
-- `wallet_account` (Digital wallets)
-- `wallet_ledger_transaction` (Double-entry ledger)
-- `escrow_lock` (Contract security deposits)
-- `settlement_cycle` (Provider payouts)
-- `commission_entry` (Platform earnings)
+### 4. Contracts Module
+Contract lifecycle (18 real status strings, not the 4-state model in older docs), vehicle-assignment sub-lifecycle, dual-party OTP e-signature, two-party completion flow, termination request/approve, contract extension (UI built, backend endpoint currently missing — see epic-06 §6.11). See `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` for the full authoritative model.
 
-**Key Features:**
-- Double-entry accounting
-- Automated escrow management
-- Monthly settlement cycles
-- Tier-based commission (5-10%)
-- Payment gateway integration
+### 5. Finance Module
+Digital wallets (business & provider), double-entry ledger, automated escrow lock/release with retry, monthly settlement cycles, tier-based commission, live Chapa/Telebirr/CBEBirr payment-gateway webhook processing, refunds. Two competing escrow-computation code paths and two disagreeing tier-threshold schemes coexist in code today (documented in `backlog/mvp/epic-08-wallet-escrow.md`) — a real inconsistency, not a documentation error.
+
+### 6. Delivery Module
+OTP-based vehicle handover (6-digit, SHA-256 hashed, 5-minute expiry), photo evidence capture, odometer/fuel recording, a separate return-trip OTP + vehicle inspection checklist system. `DeliveryVehicleHandover`, `DeliverySLAViolation`, `DeliveryFailureReason`, `DeliveryEventLog` entities exist in the domain/DB but nothing currently writes to them.
+
+### 7. MasterData Module
+Versioned policy/rules engine — `CommissionStrategyVersion/Rule`, `ContractPolicyVersion/Rule`, `EscrowPolicyVersion/Rule`, `SettlementPolicyVersion/Rule`, business/provider tiers, document types, geography, banks, lookups. See `markdown-documentations/Master_Data_Specification.md`.
+
+### 8. Notifications Module
+Admin-configurable multi-channel system — email (SMTP), SMS (Afromessage), push (Firebase/FCM), each with credential rotation and live test-send (`NotificationAdminController`, 40+ endpoints), plus a real-time SignalR `NotificationHub`. Far beyond epic-11's "email/SMS, WebSocket optional" scope.
 
 ---
 
-### 5. Delivery Module
-**Responsibility:** Vehicle handover, OTP verification, returns
+## Security & Compliance
 
-**Entities:**
-- `delivery_session` (Delivery tracking)
-- `delivery_otp` (OTP generation/verification)
-- `delivery_vehicle_handover` (Evidence capture)
-- `delivery_return_session` (Return processing)
+### Authentication & Authorization (as built)
+- **Keycloak**, called directly and in-process by `Modules/Auth` — Resource Owner Password Credentials grant, not an OIDC browser redirect. Web stores tokens as HttpOnly cookies set directly by `AuthController`; mobile receives tokens in the JSON response body (no cookies) and stores them via secure device storage.
+- **`BffTokenRefreshMiddleware`** — real, in-process middleware that silently refreshes an expiring access-token cookie before `[Authorize]` middleware runs. This is the actual (and only) "BFF" in the system — not a separate deployable. See `architecture/auth-service-microservice-spec.md` §1.5.
+- **RBAC** via Keycloak realm roles (`business-admin`, `business-user`, `provider-admin`, `provider-driver`, `platform-admin`, etc.).
+- **MFA is not implemented** — `KeycloakAuthService.VerifyMfaAsync` explicitly throws `NotSupportedException`.
 
-**Key Features:**
-- 6-digit OTP (SHA-256 hashed, 5-min expiry)
-- Photo evidence (5 angles)
-- Odometer/fuel tracking
-- Return inspection
-
----
-
-## 🔐 Security & Compliance
-
-### Authentication & Authorization
-- **OAuth2/OIDC** via Keycloak
-- **Role-Based Access Control (RBAC)**
-  - `business-admin`, `business-user`
-  - `provider-admin`, `provider-driver`
-  - `platform-admin`, `compliance-officer`
-- **BFF Pattern** for token management and API aggregation
-
-### Data Protection
-- **Encryption at Rest:** PostgreSQL TDE (Transparent Data Encryption)
-- **Encryption in Transit:** TLS 1.3 for all communications
-- **PII Protection:** Hashed provider IDs during blind bidding
-- **Audit Trails:** All financial and contract changes logged
-
-### Compliance
-- **KYC/KYB:** Mandatory verification before platform access
-- **Insurance:** Zero-tolerance policy, contracts blocked without valid insurance
-- **Financial:** Double-entry ledger, immutable transaction records
-- **GDPR-Ready:** Data export, deletion workflows (future)
+### Data Protection & Compliance
+- **PII/Blind bidding:** provider identity is withheld by the web UI until award; the API itself returns `ProviderName` unconditionally regardless of award status — enforcement is UI-only today, a real gap flagged in the rewritten epic-05.
+- **KYC/KYB:** mandatory verification before platform access.
+- **Insurance:** zero-tolerance policy enforced at vehicle-approval time.
+- **Financial:** double-entry ledger; two known inconsistent code paths for escrow computation and platform-commission wallet lookup exist today (see Finance Module above) and should be reconciled by engineering, not documentation.
 
 ---
 
-## 📈 Performance & Scalability
+## Non-Functional Targets (design goals — not measured production metrics)
 
-### Target Metrics (MVP)
-- **Concurrent Users:** 500+
-- **RFQs per Day:** 100+
-- **Contracts per Month:** 500+
-- **API Response Time:** <200ms (p95)
-- **Database Queries:** <50ms (p95)
-- **Uptime:** 99.5%
+These are design targets carried from the original MVP planning pass; they have **not** been re-verified against live production telemetry as part of this rewrite. Treat them as goals, not achieved SLAs.
 
-### Scalability Strategy
-1. **Horizontal Scaling:** Stateless API servers behind load balancer
-2. **Database:** Read replicas for reporting queries
-3. **Caching:** Redis for session data, frequently accessed lookups
-4. **CDN:** Static assets (images, documents) via CloudFlare
-5. **Future:** Extract high-load modules to microservices
+- Concurrent users: 500+
+- RFQs/day: 100+
+- Contracts/month: 500+
+- API response time: <200ms (p95, target)
+- Uptime: 99.5% (target)
 
 ---
 
-## 🚀 Deployment Architecture
+## Deployment Architecture (as configured in the repo)
 
-### Development Environment
-```
-Docker Compose:
-- marketplace-api (1 container)
-- postgres (1 container)
-- keycloak (1 container)
-- redis (1 container)
-- minio (1 container)
-- bff (1 container)
-```
+Confirmed via `backend/docker-compose*.yml` (split per environment: `development`, `prod`, `infrastructure.{dev,prod}`, `keycloak`, `monitoring`).
 
-### Production Environment (MVP)
-```
-Single Server (DigitalOcean/AWS):
-- 8 vCPU, 16GB RAM
-- Docker Compose orchestration
-- Nginx reverse proxy
-- Let's Encrypt SSL
-- Automated backups (daily)
-```
+- **`marketplace-api`** — single container, the entire .NET 9 monolith. No separate BFF/gateway container exists.
+- **`postgres`** — single PostgreSQL instance.
+- **`keycloak`** — identity provider, its own compose file.
+- **`redis`**, **`minio`**, **`rabbitmq`** — cache, object storage, and message broker (provisioned; see Events note above on actual RabbitMQ usage level).
+- **Web** (`movello-marketplace-core`) — a separate Vite/React build with its own `docker-compose*.yml` files, deployed independently of the backend (typically behind Nginx as static assets).
+- **Mobile** — Flutter apps built and distributed natively (APK/IPA via app stores), not containerized.
 
-### CI/CD Pipeline
-```
-GitHub → GitHub Actions → Docker Build → Deploy to Production
-- Automated tests on PR
-- Staging deployment on merge to develop
-- Production deployment on merge to main
-```
+`02_DATABASE_SCHEMA_DESIGN.md` and `03_API_SPECIFICATIONS.md` in this documentation suite predate the current codebase and were **not** re-verified as part of this rewrite pass — read them as historical/aspirational rather than current fact until they get their own audit pass (see `DOCUMENTATION_PROGRESS.md`).
 
 ---
 
-## 📊 Success Metrics
+## Current Priorities (from the coverage audit's open-items list)
 
-### Business Metrics
-- **GMV (Gross Merchandise Value):** $100K+ in first 3 months
-- **Active Businesses:** 50+ registered, 20+ transacting
-- **Active Providers:** 100+ registered, 50+ with active contracts
-- **Platform Commission:** 7% average (tier-based 5-10%)
+Rather than a forward "week 1 / week 2" build plan (the MVP is already substantially built), the real near-term priorities identified by the audit are:
 
-### Technical Metrics
-- **API Uptime:** 99.5%+
-- **Bug Escape Rate:** <5% to production
-- **Test Coverage:** 70%+ (unit + integration)
-- **Deployment Frequency:** Weekly releases
-
-### User Experience Metrics
-- **RFQ to Award Time:** <24 hours average
-- **Contract Activation Time:** <2 hours (after OTP verification)
-- **Settlement Processing:** 100% on-time monthly payouts
-- **Trust Score Accuracy:** <10% dispute rate
+1. **Wire the missing `POST /contracts/{contractId}/extend` endpoint** — the web "Extend Contract" button is fully built and calls a route that doesn't exist on any controller (highest-priority gap in Epic 06).
+2. **Decide whether to wire `TrustScoreCalculator`/`TierCalculationService` into production events at all** — both are fully built and unit-tested but have zero call sites; every provider's trust score is currently frozen at its default.
+3. **Reconcile the two disagreeing escrow-computation and settlement-cadence code paths** in Finance (see Module Breakdown above and `project-docs/18_Implementation_Coverage_Audit.md` §10.2–§10.4).
+4. **Rewrite remaining stale docs** in this tree and elsewhere — several files in `04_MODULE_SPECIFICATIONS/`, `05_BUSINESS_LOGIC_FLOWS.md` onward were written pre-implementation and have not yet had an audit-driven rewrite pass (tracked in `DOCUMENTATION_PROGRESS.md`).
+5. **Product decision, not engineering:** whether to build the epic-05 bid-ranking/anti-collusion logic and the epic-12 business risk score / fraud engine / dispute workflow that are specified but do not exist in any surface.
 
 ---
 
-## 🗓️ Implementation Timeline
+## Documentation Index
 
-### Phase 1: Foundation (Weeks 1-2) - COMPLETED
-- ✅ Architecture finalization
-- ✅ Database schema design
-- ✅ Development environment setup
-- ✅ Keycloak configuration
+This executive summary is part of the `MVP_MODULAR/` documentation suite. **Currency varies by file** — see `DOCUMENTATION_PROGRESS.md` for a file-by-file status, and `project-docs/18_Implementation_Coverage_Audit.md` for the authoritative implementation-vs-doc status across the whole platform (not just this tree).
 
-### Phase 2: Core Modules (Weeks 3-6) - IN PROGRESS
-- 🔄 Identity & Compliance Module (70% complete)
-- 🔄 Marketplace Module (structure only)
-- 🔄 Contracts Module (structure only)
-- 🔄 Finance Module (structure only)
-- 🔄 Delivery Module (structure only)
+**Rewritten and verified against code as of 2026-07-23:**
+1. `00_EXECUTIVE_SUMMARY.md` ← you are here
+2. `01_ARCHITECTURE_OVERVIEW.md`
+3. `DOCUMENTATION_PROGRESS.md`
+4. `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` (rewritten in an earlier pass)
 
-### Phase 3: Integration (Weeks 7-8)
-- ⏳ Module integration via MediatR
-- ⏳ BFF implementation
-- ⏳ Payment gateway integration
-- ⏳ Notification system
-
-### Phase 4: Testing & Hardening (Weeks 9-10)
-- ⏳ Unit test coverage (70%+)
-- ⏳ Integration testing
-- ⏳ Security audit
-- ⏳ Performance optimization
-
-### Phase 5: Beta Launch (Week 11)
-- ⏳ Pilot with 5 businesses, 10 providers
-- ⏳ Bug fixes and refinements
-- ⏳ User feedback incorporation
-
-### Phase 6: Production Launch (Week 12)
-- ⏳ Public launch
-- ⏳ Marketing campaign
-- ⏳ Onboarding support
+**Not reverified in this pass — treat as historical/pre-implementation until audited:**
+- `02_DATABASE_SCHEMA_DESIGN.md`, `03_API_SPECIFICATIONS.md`
+- `04_MODULE_SPECIFICATIONS/*.md` — except `Contracts_Module.md`, which **was** rewritten alongside the contract-cluster pass
+- `05_BUSINESS_LOGIC_FLOWS.md` through `10_TESTING_STRATEGY.md`, `Business_Rules.md`, `UI_System_Design_Guidelines.md`, `CRITICAL_BUSINESS_RULE_UPDATE.md`
+- `06_FRONTEND_ARCHITECTURE.md` in particular is named as if it still describes an Angular frontend — high suspicion of drift, flagged for priority review
+- `frontendguides/*.md` (12 files) and `database/*.md`
+- `MVP_final_docs/MVP_DIRECT_RENTAL_SPECIFICATION.md` / `MVP_DIRECT_RENTAL_STATE_MACHINE.md` — confirmed **accurate** per the audit (§7.1), just historically disconnected from the epic index (now linked via `backlog/post-mvp/epic-21-direct-rental.md`)
+- `MVP_final_docs/MVP_ADMIN_WALLET_OPERATIONS_SPECIFICATION.md`, `MVP_AUTHORITATIVE_BUSINESS_RULES.md`, `MVP_DISPUTE_RESOLUTION_WORKFLOW.md`, `MVP_EVENT_CATALOG_AND_HANDLERS.md`, `MVP_MODULE_INTEGRATION_SPECIFICATION.md`, `MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md`, `SETTLEMENT_ENHANCEMENTS_ADDENDUM.md` — not confirmed either way in this pass
 
 ---
 
-## 💰 Cost Structure
-
-### Development Costs (One-Time)
-- **Engineering Team:** 3 developers × 12 weeks = $60K
-- **Design & UX:** $5K
-- **Infrastructure Setup:** $2K
-- **Total:** $67K
-
-### Monthly Operating Costs (MVP)
-- **Server Hosting:** $200/month (DigitalOcean)
-- **Keycloak/Auth:** $0 (self-hosted)
-- **Email (SendGrid):** $50/month
-- **SMS (Africa's Talking):** $100/month
-- **Payment Gateway Fees:** 2.5% of GMV
-- **Monitoring (Sentry):** $50/month
-- **Total:** ~$400/month + variable payment fees
-
-### Revenue Model
-- **Platform Commission:** 5-10% per transaction (tier-based)
-- **Target:** $100K GMV/month = $7K commission revenue
-- **Break-even:** Month 2-3
-
----
-
-## 🎯 Next Steps
-
-### Immediate Actions (This Week)
-1. ✅ Finalize MVP specifications (this document)
-2. ⏳ Complete database migrations
-3. ⏳ Implement remaining module structures
-4. ⏳ Set up BFF layer
-
-### Short-Term (Next 2 Weeks)
-1. ⏳ Complete Identity & Compliance Module
-2. ⏳ Complete Marketplace Module
-3. ⏳ Complete Contracts Module
-4. ⏳ Integrate payment gateways
-
-### Medium-Term (Next 4 Weeks)
-1. ⏳ Complete Finance Module
-2. ⏳ Complete Delivery Module
-3. ⏳ End-to-end testing
-4. ⏳ Beta launch preparation
-
----
-
-## 📚 Documentation Index
-
-This executive summary is part of a comprehensive documentation suite:
-
-1. **00_EXECUTIVE_SUMMARY.md** ← You are here
-2. **01_ARCHITECTURE_OVERVIEW.md** - Detailed technical architecture
-3. **02_DATABASE_SCHEMA_DESIGN.md** - Complete database specifications
-4. **03_API_SPECIFICATIONS.md** - RESTful API documentation
-5. **04_MODULE_SPECIFICATIONS/** - Per-module detailed specs
-   - Identity_and_Compliance_Module.md
-   - Marketplace_Module.md
-   - Contracts_Module.md
-   - Finance_Module.md
-   - Delivery_Module.md
-   - Master_Data_and_Settings_Module.md
-   - Auth_and_Keycloak_Module.md
-6. **05_BUSINESS_LOGIC_FLOWS.md** - End-to-end workflows
-7. **06_FRONTEND_ARCHITECTURE.md** - Angular 19 implementation
-8. **07_EVENT_DRIVEN_PATTERNS.md** - MediatR event specifications
-9. **08_SECURITY_COMPLIANCE.md** - Security and compliance details
-10. **09_DEPLOYMENT_GUIDE.md** - Infrastructure and deployment
-11. **10_TESTING_STRATEGY.md** - QA and testing approach
-12. **Business_Rules.md** - Complete business rules reference
-13. **UI_System_Design_Guidelines.md** - Design system and components
-
----
-
-## ✅ Sign-Off
-
-**Prepared By:** CTO & Technical Architecture Team  
-**Reviewed By:** Product Management, Engineering Leads  
-**Approved By:** CEO, Board of Directors  
-**Date:** November 26, 2025  
-**Version:** 1.0 MVP  
-**Status:** ✅ **APPROVED FOR IMPLEMENTATION**
-
----
-
-**This document represents the authoritative specification for Movello MVP. All development work must align with these specifications. Any deviations require formal change request and approval.**
+**This document describes a system that is already largely built.** For anything not covered here in enough depth, consult `project-docs/18_Implementation_Coverage_Audit.md` first — it is the authoritative reconciliation between documentation and running code across backend, web, and both mobile apps.
 
 **Next Document:** [01_ARCHITECTURE_OVERVIEW.md](./01_ARCHITECTURE_OVERVIEW.md)

@@ -1,522 +1,253 @@
 # Settlement Processing Enhancements - Addendum
 
-**Document Version**: 1.0  
-**Date**: February 19, 2026  
-**Status**: Implemented  
-**Related Documents**: 
-- MVP_SETTLEMENT_PROCESSING_SPECIFICATION.md
-- MVP_AUTHORITATIVE_BUSINESS_RULES.md (BR-031, BR-031A)
-- Finance_Module.md
+**Document Version**: 2.0
+**Last verified against code: 2026-07-23** — verified directly against `Controllers/Finance/SettlementController.cs`, `Modules/Finance/Application/Settlement/Commands/GenerateSettlementCommand.cs`, `ApproveSettlementPayoutCommand.cs`, `Modules/Finance/Domain/Entities/SettlementCycle.cs`, `SettlementPayout.cs`, `SettlementPayoutLineItem.cs`, `MonthlySettlementSchedule.cs`, and `Modules/Finance/Application/Services/SettlementScheduleService.cs`.
+**Status**: Implemented, with material corrections below — v1.0 (February 19, 2026) described the intended design accurately at a conceptual level but got two structural details wrong: **(1)** the double-entry wallet transaction does **not** happen during settlement *generation* — it happens later, at admin *approval*, and generation only creates `PENDING_ADMIN_APPROVAL` records; **(2)** `vehicle_plate_number` on `settlement_payout_line_items` is a real column but is **never actually populated** by the code that writes to it — every row has `vehiclePlateNumber = null` today. Both corrections are detailed in §3–§4 below. This rewrite also resolves the open cadence question flagged in `project-docs/18_Implementation_Coverage_Audit.md` §10.4 — see §2.
+
+**Related Documents**:
+- `backlog/mvp/epic-08-wallet-escrow.md`, `project-docs/service-specs/14_Wallet_Engine_Flow_Specification.md` (escrow lock this settlement pipeline releases against; both rewritten 2026-07-23)
+- `backlog/mvp/epic-10-monthly-renewal-settlement.md` (epic-level settlement/renewal story tracking)
+- `MVP_ADMIN_WALLET_OPERATIONS_SPECIFICATION.md` (rewritten alongside this document — admin wallet/escrow operations this settlement flow shares wallet plumbing with)
+- `project-docs/18_Implementation_Coverage_Audit.md` §10.4, §10.5 (the cadence contradiction and the platform-wallet-lookup inconsistency this document also touches)
 
 ---
 
 ## Purpose
 
-This document describes **implementation enhancements** to the settlement processing system that extend beyond the original MVP specifications. These enhancements provide greater transparency, auditability, and compliance with accounting standards.
+This document describes how settlement payouts are actually generated, approved, and recorded in the running system, including the per-vehicle earnings breakdown, and corrects two claims from v1.0 that didn't hold up against the current implementation.
 
 ---
 
-## Summary of Changes
+## 1. Summary of What Actually Runs
 
-### What Was Already Specified
+### 1.1 Confirmed Accurate From v1.0
 
-✅ **Vehicle-Level Earnings Calculation (BR-031A)**
-- Calculate earnings per vehicle based on actual delivery dates
-- Formula: `VehicleEarnings = UnitPricePerDay × ActiveDaysInWindow`
-- Handle partial delivery, late delivery, and early return
+✅ **Vehicle-Level Earnings Calculation**
+- Formula: `VehicleEarnings = UnitAmount (per-day rate) × ActiveDaysInWindow`, computed per `ContractVehicleAssignment` overlapping the settlement window (`CalculateVehicleEarningsForCycle` in `GenerateSettlementCommand.cs`)
+- Handles partial delivery (vehicle delivered mid-cycle), late/early return: the active window is `[max(DeliveredAt, cycleStart), min(effectiveLastDay, cycleEnd)]`, both ends inclusive; same-day delivery+return counts as one billed day
+- A vehicle with no `DeliveredAt` yet contributes zero earnings for that cycle (skipped, not zero-filled as a line item)
 
-✅ **Double-Entry Bookkeeping Concept**
-- DEBIT escrow wallet (gross amount)
-- CREDIT provider wallet (net amount)
-- CREDIT platform commission wallet (commission + tax)
+✅ **Double-Entry Bookkeeping Concept** — real, but the mechanics and *timing* differ from v1.0's pseudocode (§3).
 
-✅ **Transaction Reference**
-- Create `wallet_ledger_transaction` for settlements
-- Store transaction reference
+✅ **Transaction Reference Scheme** — settlement-related references exist and are unique per transaction (exact prefixes corrected in §3).
 
-### What Was Enhanced
+### 1.2 Corrected From v1.0
 
-🆕 **Per-Vehicle Settlement Records**
-- Added `settlement_payout_line_items` table
-- Store individual vehicle earnings within each settlement
-- Track which vehicle earned what amount
+🔧 **Settlement generation and wallet movement are two separate steps, not one.** v1.0's "Step 3: Create Double-Entry Transaction" implied the ledger entries are written as part of generating the settlement. In the real code, `GenerateSettlementCommandHandler` creates `SettlementPayout` (status `PENDING_ADMIN_APPROVAL`) and `SettlementPayoutLineItem` rows **with no wallet transaction at all** — the double-entry writes are explicitly deferred, and the original wallet-transaction code is present in the file only as a large commented-out block with the note *"Wallet transactions are now created during APPROVAL, not during generation... ensures settlements remain PENDING until explicitly approved by admin."* The actual double-entry happens in `ApproveSettlementPayoutCommandHandler`, triggered by `POST /api/finance/settlements/payouts/{payoutId}/approve` (`AdminOnly`). See §4.
 
-🆕 **Complete Transaction Linking**
-- Populate `wallet_transaction_id` in settlement payouts
-- Link every settlement to its wallet transaction
-- Enable complete money flow traceability
+🔧 **`vehicle_plate_number` exists as a column but is never populated.** `GenerateSettlementCommandHandler` builds its per-vehicle detail tuples with a hardcoded `null` for the plate-number field (`contractEarningsDetails.Add((contract.Id, contract.ContractNumber, assignment.VehicleId, null, vehicleEarnings, ...))`) — `VehicleId` is captured and stored correctly, but the plate number is not looked up from the vehicle entity anywhere in this path. Any report or query relying on `settlement_payout_line_items.vehicle_plate_number` will see nulls for every row generated by current code, despite the column and the `SettlementPayoutLineItem.Create(...)` factory both fully supporting it.
 
-🆕 **Enhanced Double-Entry Implementation**
-- Implement actual double-entry with all three ledger entries
-- Automatic wallet creation for platform accounts
-- Balance verification and audit trail
+🔧 **Settlement cadence is a fixed 30-day rolling window per contract, not tier-based** — resolving the open contradiction flagged in `project-docs/18_Implementation_Coverage_Audit.md` §10.4. See §2.
+
+🔧 **A real `TAX`-type platform wallet is used during settlement approval**, crediting withholding tax separately from commission — worth noting because `14_Wallet_Engine_Flow_Specification.md` §2.4/§8 (a different, already-rewritten document) states no code path was found crediting a `TAX`-type wallet directly. That finding was accurate for the *escrow release* code paths it was checking; it does not hold for the *settlement approval* path, which does create/credit a `PLATFORM`/`TAX` wallet (§4). This isn't corrected in that other document per this task's instructions (only these four files are in scope for this rewrite) — noted here so a reader of both documents isn't misled.
 
 ---
 
-## Database Schema Additions
+## 2. Settlement Cadence — Resolved
 
-### New Table: settlement_payout_line_items
+`GenerateSettlementCommand.cs` carries an XML doc comment describing a tier-based cadence:
 
-```sql
-CREATE TABLE wallet.settlement_payout_line_items (
-    id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    settlement_payout_id    uuid NOT NULL REFERENCES wallet.settlement_payouts(id),
-    contract_id             uuid NOT NULL,
-    contract_number         varchar(50) NOT NULL,
-    vehicle_id              uuid,
-    vehicle_plate_number    varchar(50),
-    gross_amount            numeric(18,2) NOT NULL,
-    commission_amount       numeric(18,2) NOT NULL,
-    commission_rate         numeric(5,4) NOT NULL,
-    net_amount              numeric(18,2) NOT NULL,
-    period_start            timestamptz NOT NULL,
-    period_end              timestamptz NOT NULL,
-    days_in_period          int NOT NULL,
-    is_deleted              boolean NOT NULL DEFAULT false,
-    created_at              timestamptz NOT NULL DEFAULT now(),
-    updated_at              timestamptz NOT NULL DEFAULT now()
-);
+```
+Bronze/Silver: Monthly (1st)
+Gold: Bi-weekly (1st, 15th)
+Platinum: Weekly (Monday)
 ```
 
-**Purpose**: Store detailed breakdown of settlement earnings per vehicle.
+**This comment is aspirational and does not match what the schedule-generation code actually does.** The real cadence is produced by `SettlementScheduleService.GenerateSchedule(contractId, contractStartDate, contractEndDate, totalContractValue)`:
 
-**Key Fields**:
-- `vehicle_id` + `vehicle_plate_number`: Identifies the specific vehicle
-- `gross_amount`, `commission_amount`, `net_amount`: Financial breakdown per vehicle
-- `days_in_period`: Number of active days for this vehicle in settlement window
-- `contract_id` + `contract_number`: Links to the contract
+- Every contract, regardless of provider tier, is broken into **fixed 30-day inclusive windows** (`tentativeCycleEnd = currentDate.AddDays(29)`, i.e. day 1 through day 30), anchored from the contract's own `StartDate` — not from a calendar month boundary, not from a weekly/bi-weekly anchor.
+- The final window is capped at the contract's `EndDate` and may be shorter than 30 days.
+- Each window becomes one `MonthlySettlementSchedule` row (`PENDING → LOCKED → SETTLED`, or `CANCELLED`), with `SettlementDate` set to the window's own end date.
+- `GenerateSettlementCommand` accepts a `ProviderTierFilter` parameter that filters *which providers'* already-due cycles get processed in a given admin-triggered run — this is a filter over pre-existing, tier-agnostic schedule rows, not a mechanism that changes how those rows were generated or how often they recur.
 
-### Enhanced Table: settlement_payouts
+**Conclusion for anyone reconciling `epic-08-wallet-escrow.md` and `epic-10-monthly-renewal-settlement.md` per audit §10.4:** the ledger/settlement side is correct — settlement runs on a rolling 30-day cycle per contract. The tier-based-cadence description in the wallet-cluster documentation and in `GenerateSettlementCommand`'s own code comment is stale/aspirational and does not correspond to any code path that actually produces `MonthlySettlementSchedule` rows on a tier-dependent schedule. If tier-based cadence is a desired product behavior, it needs to be built (in `SettlementScheduleService`, which currently takes no tier parameter at all), not just documented.
 
-**Added Column**:
-```sql
-ALTER TABLE wallet.settlement_payouts 
-ADD COLUMN wallet_transaction_id uuid 
-REFERENCES wallet.wallet_ledger_transaction(id);
-```
+**Minimum payout amount:** confirmed at **ETB 100** by default (`GenerateSettlementCommand.MinPayoutAmount ?? 100m`), overridable per admin-triggered call — not ETB 1,000 as an earlier draft of the wallet epic stated (that number described a different, unconfirmed withdrawal-request floor, not this settlement-generation floor).
 
-**Purpose**: Link settlement payout to the wallet transaction that executed the payment.
+**Withholding tax rate:** loaded from a configurable MasterData setting (`WITHHOLDING_TAX_RATE`), falling back to **2%** if unset or unparsable.
+
+**Auto-approval:** a configurable `SETTLEMENT_AUTO_APPROVE_THRESHOLD` setting (default effectively `0` = disabled) lets `GenerateSettlementCommandHandler` immediately auto-approve any newly-created payout whose net amount is at or below the threshold, using a fixed system-user id (`00000000-0000-0000-0000-000000000002`) as the approver of record — this runs the same `ApproveSettlementPayoutCommand` path described in §4, just triggered automatically rather than by a human admin click.
 
 ---
 
-## Implementation Details
+## 3. Database Schema (as implemented)
 
-### 1. Settlement Generation Process
+### 3.1 `wallet.settlement_payout_line_items`
 
-#### Step 1: Calculate Earnings Per Vehicle
+Matches v1.0's schema definition; confirmed via `SettlementPayoutLineItem.cs`:
 
-```typescript
-// For each vehicle assignment in contract
-for (const assignment of contract.vehicleAssignments) {
-    if (!assignment.deliveredAt) continue;
-    
-    const vehicleStart = assignment.deliveredAt;
-    const vehicleEnd = assignment.releasedAt ?? contract.endDate;
-    
-    // Calculate overlap with settlement window
-    const activeDays = calculateActiveDaysInWindow(
-        vehicleStart, vehicleEnd, 
-        settlementStart, settlementEnd
-    );
-    
-    if (activeDays > 0) {
-        const vehicleEarnings = dailyRate * activeDays;
-        
-        // Store vehicle details for line item creation
-        vehicleDetails.push({
-            contractId: contract.id,
-            contractNumber: contract.contractNumber,
-            vehicleId: assignment.vehicleId,
-            vehiclePlateNumber: assignment.vehicle.licensePlate,
-            earnings: vehicleEarnings,
-            days: Math.ceil(activeDays)
-        });
-    }
-}
-```
+| Column | Notes |
+|--------|-------|
+| `settlement_payout_id` | FK to `settlement_payouts` |
+| `contract_id`, `contract_number` | both always populated |
+| `vehicle_id` | populated (nullable in schema, but every code path that creates a line item today supplies it) |
+| `vehicle_plate_number` | **column exists, always `null` in current code** — see §1.2 |
+| `gross_amount`, `commission_amount`, `commission_rate`, `net_amount` | `net_amount = gross_amount - commission_amount` (computed in the factory, not separately stored logic) |
+| `period_start`, `period_end` | set from the **admin-supplied settlement-generation request's** `StartDate`/`EndDate` — not from the vehicle's own active-window dates computed for earnings purposes; for a multi-cycle generation run these can be broader than the specific cycle a given line item's earnings were actually calculated against |
+| `days_in_period` | derived as `Math.Round(vehicleEarnings / lineItem.UnitAmount)`, i.e. back-calculated from the earnings amount, not an independently-counted calendar-day span |
 
-#### Step 2: Create Settlement Payout
+### 3.2 `wallet.settlement_payouts`
 
-```typescript
-const payout = SettlementPayout.Create(
-    cycleId,
-    providerId,
-    providerWalletId,
-    grossAmount,      // Sum of all vehicle earnings
-    commissionAmount, // Calculated from provider tier
-    taxAmount
-);
-```
+Confirmed columns beyond v1.0's description: `wallet_account_id` (provider's MAIN wallet, resolved at generation time), `wallet_transaction_id` (nullable — **only set at approval**, via `payout.MarkCompleted(walletTransactionId)`; `SetWalletTransaction()` exists as a separate setter but generation no longer calls it, per §1.2), `invoice_id` (nullable link to a `ProviderInvoice`, for withholding-tax reclaim), `status` (`PENDING_ADMIN_APPROVAL → COMPLETED | FAILED`).
 
-#### Step 3: Create Double-Entry Transaction
+### 3.3 `wallet.settlement_cycles`
 
-```typescript
-// Create transaction header
-const transaction = WalletLedgerTransaction.Create(
-    "SET-20260219-0001",  // Unique reference
-    "SETTLEMENT",
-    "Settlement payout for cycle CYC-2026-W04",
-    cycleId
-);
+A cycle (`CycleReference`, e.g. `CYC-2026-0101-0130` or with a per-contract suffix when generation is scoped to a single contract) groups payouts generated together. `Status`: `OPEN` (default at creation — v1.0/early code comments elsewhere reference `PROCESSING`/`CLOSED` as intended future values, but `SettlementCycle.Close()` is the only transition method found, and no code path was confirmed calling it in this pass — cycles observed remain `OPEN` in practice).
 
-// Create three ledger entries (double-entry)
-// 1. DEBIT escrow (release funds)
-const debitEntry = WalletLedgerEntry.Create(
-    transaction.id,
-    escrowWallet.id,
-    "DEBIT",
-    grossAmount  // Total gross from all vehicles
-);
+### 3.4 `wallet.monthly_settlement_schedules`
 
-// 2. CREDIT provider (pay provider)
-const creditEntry = WalletLedgerEntry.Create(
-    transaction.id,
-    providerWallet.id,
-    "CREDIT",
-    netAmount  // After commission deduction
-);
-
-// 3. CREDIT platform (collect commission)
-const commissionEntry = WalletLedgerEntry.Create(
-    transaction.id,
-    platformCommissionWallet.id,
-    "CREDIT",
-    commissionAmount + taxAmount
-);
-
-// Update wallet balances
-escrowWallet.Debit(grossAmount);
-providerWallet.Credit(netAmount);
-platformCommissionWallet.Credit(commissionAmount + taxAmount);
-```
-
-#### Step 4: Link Transaction to Payout
-
-```typescript
-payout.SetWalletTransaction(transaction.id);
-```
-
-#### Step 5: Create Line Items for Each Vehicle
-
-```typescript
-for (const detail of vehicleDetails) {
-    const lineItem = SettlementPayoutLineItem.Create(
-        payout.id,
-        detail.contractId,
-        detail.contractNumber,
-        detail.vehicleId,
-        detail.vehiclePlateNumber,
-        detail.earnings,                    // Gross for this vehicle
-        detail.earnings * commissionRate,   // Commission for this vehicle
-        commissionRate,
-        settlementStart,
-        settlementEnd,
-        detail.days
-    );
-    
-    await repository.AddPayoutLineItemAsync(lineItem);
-}
-```
+Not in v1.0 at all, but the actual backbone of cadence and eligibility (§2): `contract_id`, `cycle_number`, `cycle_start_date`, `cycle_end_date`, `settlement_date`, `daily_rate`, `days_in_cycle`, `cycle_amount`, `status` (`PENDING → LOCKED → SETTLED`, or `CANCELLED`), `escrow_lock_id`, `is_final_settlement`. `GET /api/finance/settlements/schedule-states` (`AdminOnly`) exposes these for admin operations.
 
 ---
 
-## Example Scenario
+## 4. Settlement Generation vs. Approval — the Real Two-Step Flow
+
+### Step A: Generation (`POST /api/finance/settlements/generate` or `/generate-current-cycle`, `AdminOnly`)
+
+`GenerateSettlementCommandHandler`:
+1. Finds all `PENDING` `MonthlySettlementSchedule` rows due within the requested window (or, in `CurrentCycleOnly` mode, the single earliest processable cycle per contract — allowing early advancement once a contract reaches `PARTIALLY_RETURNED`/`COMPLETED`)
+2. Groups due cycles by provider (via each cycle's contract)
+3. Optionally filters by provider tier (`ProviderTierFilter` — a run-scope filter, not a cadence mechanism, per §2)
+4. Per provider: sums per-vehicle earnings across all its due cycles/contracts, computes commission per line item's own snapshotted `CommissionRate`, computes withholding tax on `(gross − commission)`, skips the provider entirely if gross earnings are below the minimum payout threshold
+5. Creates one `SettlementPayout` (`PENDING_ADMIN_APPROVAL`) and its `SettlementPayoutLineItem`s per provider — **no wallet debit/credit yet**
+6. Marks the consumed `MonthlySettlementSchedule` rows `LOCKED` (not yet `SETTLED`)
+7. Publishes `SettlementCycleGeneratedEvent`; if an auto-approve threshold is configured, immediately runs Step B for any qualifying payout
+
+### Step B: Approval (`POST /api/finance/settlements/payouts/{payoutId}/approve`, `AdminOnly`, or auto-triggered per §2)
+
+`ApproveSettlementPayoutCommandHandler` — this is where money actually moves, as **two separate wallet transactions per contract involved**:
+
+**Transaction A — `"SETTLEMENT"` (reference `SET-{cycleRef}-{providerIdPrefix}-{payoutIdPrefix}`):**
+- DEBIT each involved contract's business **ESCROW** wallet for that contract's gross-earned share (looked up via the contract's active `EscrowLock`, not a single lump debit against one wallet — a payout spanning several contracts debits each contract's escrow wallet separately, in the same transaction)
+- CREDIT provider **MAIN** wallet: `payout.NetPayoutAmount`
+- CREDIT platform **COMMISSION** wallet (`AccountType == "COMMISSION"`, get-or-create): `payout.CommissionDeducted`
+- CREDIT platform **TAX** wallet (`AccountType == "TAX"`, get-or-create — a genuinely new wallet type actively used here, contrary to what a reader of `14_Wallet_Engine_Flow_Specification.md` §2.4 might assume from that document's narrower escrow-release-only finding): `payout.TaxDeducted`
+
+**Transaction B — `"ESCROW_REFUND"` or next-cycle relock, per contract, run after Transaction A:**
+- For each contract, computes `unusedAmount = escrowLock.Amount − contractGross` (the portion of the lock this settlement didn't consume)
+- If `unusedAmount <= 0`: simply releases the lock, no further movement
+- If this is the contract's **final** settlement cycle (`MonthlySettlementSchedule.IsFinalSettlement`): DEBIT business ESCROW, CREDIT business MAIN for `unusedAmount` (reference `ESC-REFUND-{cycleRef}-{contractIdPrefix}-{payoutIdPrefix}`), release the lock
+- If **not** final: releases the current lock and calls `LockNextCycleEscrowCommand` to roll the unused amount into the **next** cycle's escrow lock (so a long-running contract doesn't refund-then-relock the same money needlessly); if no next cycle exists (contract ending), falls back to the same refund-to-business behavior as the final-cycle case
+
+Finally: `payout.MarkCompleted(settleTxn.Id)` (status → `COMPLETED`, `wallet_transaction_id` set **here**, not at generation), and any `LOCKED` `MonthlySettlementSchedule` rows for the involved contracts are marked `SETTLED`. On any exception, the whole approval transaction rolls back and the payout is marked `FAILED` (not left `PENDING_ADMIN_APPROVAL` — a failed approval attempt must be investigated, not silently retried by re-clicking "approve" against the same payout, since its status has already moved).
+
+A parallel `RejectSettlementPayoutCommand` (`POST /api/finance/settlements/payouts/{payoutId}/reject`, `AdminOnly`, reason required) exists for the admin to reject a generated-but-unapproved payout — not detailed further here as it does not move money, only marks the payout rejected.
+
+---
+
+## 5. Example Scenario (corrected to reflect the two-step flow)
 
 ### Contract Details
-- **Contract**: CNT-2026-001
-- **Line Item**: 5 Minibuses @ 2,500 ETB/day
-- **Settlement Period**: Jan 1 - Jan 30 (30 days)
+- **Contract**: CNT-2026-001, 5 Minibuses, unit rate 2,500 ETB/day, commission rate 10% (snapshotted on the contract's line item)
+- **30-day cycle window**: Jan 1 – Jan 30 (per `SettlementScheduleService`, this is cycle 1 of however many 30-day windows the contract's full duration produces — not "the January settlement" in a calendar-month sense)
 
-### Vehicle Deliveries
-- **Vehicle A (ABC-123)**: Delivered Jan 1 → 30 days active
-- **Vehicle B (ABC-124)**: Delivered Jan 1 → 30 days active
-- **Vehicle C (ABC-125)**: Delivered Jan 2 → 29 days active
-- **Vehicle D (ABC-126)**: Delivered Jan 3 → 28 days active
-- **Vehicle E (ABC-127)**: Delivered Jan 4 → 27 days active
-
-### Settlement Calculation
-
-#### Vehicle Earnings
+### Vehicle Deliveries → Per-Vehicle Earnings (unchanged math from v1.0)
 ```
-Vehicle A: 2,500 × 30 = 75,000 ETB
-Vehicle B: 2,500 × 30 = 75,000 ETB
-Vehicle C: 2,500 × 29 = 72,500 ETB
-Vehicle D: 2,500 × 28 = 70,000 ETB
-Vehicle E: 2,500 × 27 = 67,500 ETB
-─────────────────────────────────
-Total Gross:           360,000 ETB
-Commission (10%):      -36,000 ETB
-Net to Provider:       324,000 ETB
+Vehicle A: delivered Jan 1  → 30 active days → 2,500 × 30 = 75,000 ETB
+Vehicle B: delivered Jan 1  → 30 active days → 75,000 ETB
+Vehicle C: delivered Jan 2  → 29 active days → 72,500 ETB
+Vehicle D: delivered Jan 3  → 28 active days → 70,000 ETB
+Vehicle E: delivered Jan 4  → 27 active days → 67,500 ETB
+────────────────────────────────────────────────────────
+Total Gross:                                   360,000 ETB
+Commission (10%):                              -36,000 ETB
+Net before tax:                                 324,000 ETB
+Withholding tax (2% of net-before-tax):          -6,480 ETB
+Net to Provider:                                317,520 ETB
 ```
+(v1.0's example omitted withholding tax; the actual handler always applies it — see §2.)
 
-#### Database Records Created
+### What Generation Creates (Step A)
+- One `SettlementPayout`: `TotalAmount=360,000`, `CommissionDeducted=36,000`, `TaxDeducted=6,480`, `NetPayoutAmount=317,520`, `Status="PENDING_ADMIN_APPROVAL"`, `WalletTransactionId=null`
+- Five `SettlementPayoutLineItem` rows (one per vehicle), each with `vehicle_id` populated and `vehicle_plate_number = null` (§1.2)
+- **No ledger entries exist yet.** Querying `wallet_ledger_transaction`/`wallet_ledger_entry` for this payout at this point returns nothing.
 
-**1. Settlement Payout**
-```sql
-INSERT INTO wallet.settlement_payouts (
-    settlement_cycle_id,
-    provider_id,
-    wallet_transaction_id,
-    total_amount,
-    commission_deducted,
-    net_payout_amount
-) VALUES (
-    'cycle-uuid',
-    'provider-uuid',
-    'txn-uuid',
-    360000.00,
-    36000.00,
-    324000.00
-);
-```
-
-**2. Wallet Transaction**
-```sql
-INSERT INTO wallet.wallet_ledger_transaction (
-    transaction_reference,
-    transaction_type,
-    description,
-    related_entity_id
-) VALUES (
-    'SET-20260219-0001',
-    'SETTLEMENT',
-    'Settlement payout for cycle CYC-2026-W04',
-    'cycle-uuid'
-);
-```
-
-**3. Ledger Entries (3 records)**
-```sql
--- DEBIT escrow
-INSERT INTO wallet.wallet_ledger_entry (
-    transaction_id, wallet_account_id, direction, amount
-) VALUES ('txn-uuid', 'escrow-wallet-uuid', 'DEBIT', 360000.00);
-
--- CREDIT provider
-INSERT INTO wallet.wallet_ledger_entry (
-    transaction_id, wallet_account_id, direction, amount
-) VALUES ('txn-uuid', 'provider-wallet-uuid', 'CREDIT', 324000.00);
-
--- CREDIT platform
-INSERT INTO wallet.wallet_ledger_entry (
-    transaction_id, wallet_account_id, direction, amount
-) VALUES ('txn-uuid', 'platform-commission-uuid', 'CREDIT', 36000.00);
-```
-
-**4. Payout Line Items (5 records)**
-```sql
--- Vehicle A
-INSERT INTO wallet.settlement_payout_line_items (
-    settlement_payout_id, contract_id, vehicle_id, vehicle_plate_number,
-    gross_amount, commission_amount, net_amount, days_in_period
-) VALUES (
-    'payout-uuid', 'contract-uuid', 'vehicle-a-uuid', 'ABC-123',
-    75000.00, 7500.00, 67500.00, 30
-);
-
--- Vehicle B
-INSERT ... VALUES (..., 'ABC-124', 75000.00, 7500.00, 67500.00, 30);
-
--- Vehicle C (1 day less)
-INSERT ... VALUES (..., 'ABC-125', 72500.00, 7250.00, 65250.00, 29);
-
--- Vehicle D (2 days less)
-INSERT ... VALUES (..., 'ABC-126', 70000.00, 7000.00, 63000.00, 28);
-
--- Vehicle E (3 days less)
-INSERT ... VALUES (..., 'ABC-127', 67500.00, 6750.00, 60750.00, 27);
-```
+### What Approval Creates (Step B)
+- Transaction A (`SETTLEMENT`): DEBIT contract's escrow wallet 360,000 (gross); CREDIT provider MAIN 317,520; CREDIT platform COMMISSION 36,000; CREDIT platform TAX 6,480
+- Transaction B (`ESCROW_REFUND` or relock): whatever portion of the contract's original escrow lock exceeds this cycle's 360,000 gross is either refunded to the business (final cycle) or rolled into the next cycle's lock
+- `SettlementPayout.Status → "COMPLETED"`, `WalletTransactionId` now set to Transaction A's id
 
 ---
 
-## Benefits
+## 6. Queries (updated for the real schema/timing)
 
-### 1. Complete Transparency
-- Providers can see exactly which vehicle earned what amount
-- Each vehicle's contribution is clearly tracked
-- Different delivery dates properly reflected in earnings
-
-### 2. Audit Trail
-- Every settlement linked to wallet transaction
-- Double-entry bookkeeping maintained
-- Can trace money flow from escrow → provider + platform
-
-### 3. Dispute Resolution
-- Vehicle-level breakdown available for verification
-- Can cross-reference with delivery dates and contract terms
-- Clear evidence for any earnings disputes
-
-### 4. Accounting Compliance
-- Proper double-entry bookkeeping
-- Debits always equal credits
-- Complete general ledger records
-
-### 5. Reporting & Analytics
-- Can analyze earnings by vehicle
-- Can track vehicle utilization and profitability
-- Can generate detailed financial reports
-
----
-
-## Queries
-
-### Get Settlement with Vehicle Breakdown
+### Get settlement with vehicle breakdown (plate number will be null — see §1.2)
 
 ```sql
-SELECT 
+SELECT
     sc.cycle_reference,
     sp.provider_id,
-    sp.total_amount as gross,
+    sp.total_amount AS gross,
     sp.commission_deducted,
-    sp.net_payout_amount as net,
-    wlt.transaction_reference,
-    wlt.created_at as payment_date,
+    sp.tax_deducted,
+    sp.net_payout_amount AS net,
+    sp.status,
+    wlt.transaction_reference,   -- NULL until the payout is approved
+    wlt.created_at AS payment_date,
     spli.contract_number,
-    spli.vehicle_plate_number,
-    spli.gross_amount as vehicle_gross,
-    spli.commission_amount as vehicle_commission,
-    spli.net_amount as vehicle_net,
+    spli.vehicle_id,
+    spli.vehicle_plate_number,   -- always NULL today, see §1.2
+    spli.gross_amount AS vehicle_gross,
+    spli.commission_amount AS vehicle_commission,
+    spli.net_amount AS vehicle_net,
     spli.days_in_period
 FROM wallet.settlement_cycles sc
 JOIN wallet.settlement_payouts sp ON sp.settlement_cycle_id = sc.id
-JOIN wallet.wallet_ledger_transaction wlt ON wlt.id = sp.wallet_transaction_id
+LEFT JOIN wallet.wallet_ledger_transaction wlt ON wlt.id = sp.wallet_transaction_id
 JOIN wallet.settlement_payout_line_items spli ON spli.settlement_payout_id = sp.id
 WHERE sp.provider_id = :providerId
-ORDER BY wlt.created_at DESC, spli.vehicle_plate_number;
+ORDER BY sp.created_at DESC, spli.vehicle_id;
 ```
 
-### Verify Double-Entry Balance
+### Verify double-entry balance (only meaningful for `COMPLETED` payouts — `PENDING_ADMIN_APPROVAL` payouts have zero ledger rows by design)
 
 ```sql
-SELECT 
+SELECT
     wlt.transaction_reference,
-    SUM(CASE WHEN wle.direction = 'DEBIT' THEN wle.amount ELSE 0 END) as total_debits,
-    SUM(CASE WHEN wle.direction = 'CREDIT' THEN wle.amount ELSE 0 END) as total_credits,
-    SUM(CASE WHEN wle.direction = 'DEBIT' THEN wle.amount ELSE 0 END) - 
-    SUM(CASE WHEN wle.direction = 'CREDIT' THEN wle.amount ELSE 0 END) as balance
+    SUM(CASE WHEN wle.direction = 'DEBIT' THEN wle.amount ELSE 0 END) AS total_debits,
+    SUM(CASE WHEN wle.direction = 'CREDIT' THEN wle.amount ELSE 0 END) AS total_credits
 FROM wallet.wallet_ledger_transaction wlt
 JOIN wallet.wallet_ledger_entry wle ON wle.transaction_id = wlt.id
-WHERE wlt.transaction_type = 'SETTLEMENT'
+WHERE wlt.transaction_type IN ('SETTLEMENT', 'ESCROW_REFUND')
 GROUP BY wlt.transaction_reference
-HAVING SUM(CASE WHEN wle.direction = 'DEBIT' THEN wle.amount ELSE 0 END) != 
+HAVING SUM(CASE WHEN wle.direction = 'DEBIT' THEN wle.amount ELSE 0 END) !=
        SUM(CASE WHEN wle.direction = 'CREDIT' THEN wle.amount ELSE 0 END);
 ```
 
-Should return 0 rows (all transactions balanced).
-
-### Trace Money Flow
-
-```sql
--- Trace funds from escrow lock to settlement release
-WITH escrow_locks AS (
-    SELECT 
-        el.contract_id,
-        el.amount as locked_amount,
-        wlt.transaction_reference as lock_ref,
-        wlt.created_at as locked_at
-    FROM wallet.escrow_lock el
-    JOIN wallet.wallet_ledger_transaction wlt ON wlt.related_entity_id = el.contract_id
-    WHERE wlt.transaction_type = 'ESCROW_LOCK'
-),
-settlements AS (
-    SELECT 
-        spli.contract_id,
-        SUM(spli.gross_amount) as settled_amount,
-        wlt.transaction_reference as settlement_ref,
-        wlt.created_at as settled_at
-    FROM wallet.settlement_payout_line_items spli
-    JOIN wallet.settlement_payouts sp ON sp.id = spli.settlement_payout_id
-    JOIN wallet.wallet_ledger_transaction wlt ON wlt.id = sp.wallet_transaction_id
-    GROUP BY spli.contract_id, wlt.transaction_reference, wlt.created_at
-)
-SELECT 
-    el.contract_id,
-    el.locked_amount,
-    el.lock_ref,
-    el.locked_at,
-    s.settled_amount,
-    s.settlement_ref,
-    s.settled_at,
-    el.locked_amount - COALESCE(s.settled_amount, 0) as remaining_in_escrow
-FROM escrow_locks el
-LEFT JOIN settlements s ON s.contract_id = el.contract_id
-ORDER BY el.locked_at DESC;
-```
+Should return 0 rows for approved payouts.
 
 ---
 
-## Migration Steps
+## 7. Benefits (unchanged from v1.0, still accurate at a conceptual level)
 
-1. **Run SQL Migration**
-   ```bash
-   psql -U postgres -d marketplace -f \
-     backend/src/Marketplace.API/Modules/Finance/Infrastructure/Migrations/20260219_AddSettlementPayoutLineItems.sql
-   ```
-
-2. **Rebuild Application**
-   ```bash
-   cd backend/src/Marketplace.API
-   dotnet build
-   ```
-
-3. **Verify Migration**
-   ```sql
-   -- Check table exists
-   SELECT table_name FROM information_schema.tables 
-   WHERE table_schema = 'wallet' 
-   AND table_name = 'settlement_payout_line_items';
-   
-   -- Check column exists
-   SELECT column_name FROM information_schema.columns
-   WHERE table_schema = 'wallet' 
-   AND table_name = 'settlement_payouts'
-   AND column_name = 'wallet_transaction_id';
-   ```
+1. **Per-vehicle transparency** for gross/commission/net — real and stored, just missing the plate-number label (§1.2).
+2. **Audit trail** — real, but only from the moment of *approval* onward; a `PENDING_ADMIN_APPROVAL` payout has no ledger trail yet, which is itself useful information (it tells you nothing has been paid).
+3. **Dispute resolution** — vehicle-level breakdown is available via `vehicle_id` (cross-reference against the vehicle record to get plate/make/model, since the denormalized plate column isn't populated).
+4. **Accounting compliance** — double-entry holds for every `COMPLETED` payout's `SETTLEMENT` and `ESCROW_REFUND` transactions; debits equal credits per transaction, verifiable via §6's query.
+5. **Reporting** — per-vehicle earnings analysis is possible via `vehicle_id`, with a join out to the vehicle table required for plate/make/model until §1.2 is fixed in code.
 
 ---
 
-## Related Files
-
-### Backend Implementation
-- `SettlementPayoutLineItem.cs` - Entity for vehicle earnings
-- `SettlementPayout.cs` - Enhanced with transaction linking
-- `GenerateSettlementCommand.cs` - Settlement generation logic
-- `ISettlementCycleRepository.cs` - Repository interface
-- `SettlementCycleRepository.cs` - Repository implementation
-
-### Database
-- `20260219_AddSettlementPayoutLineItems.sql` - Migration script
-
-### Documentation
-- `SETTLEMENT_TRANSACTION_TRACKING_IMPLEMENTATION.md` - Detailed implementation guide
-
----
-
-## Compliance with Business Rules
+## 8. Compliance With Business Rules (BR-031 / BR-031A)
 
 ### BR-031: Settlement Amount Formula
-✅ **Compliant** - Formula correctly applied:
-- Gross Amount = Sum of vehicle earnings
-- Commission = Gross × Commission Rate
-- Net = Gross - Commission - Tax
+✅ **Compliant, with tax now explicit**: `Gross = Σ(vehicle earnings)`, `Commission = Σ(vehicle earnings × line-item commission rate)`, `Tax = (Gross − Commission) × withholding rate`, `Net = Gross − Commission − Tax`.
 
 ### BR-031A: Vehicle-Level Earnings
-✅ **Enhanced** - Not only calculates per vehicle, but also **stores** per vehicle:
-- Each vehicle's earnings calculated from `[DeliveredAt, ReturnedAt)`
-- Handles partial delivery, late delivery, early return
-- Stores individual vehicle contributions for transparency
+✅ **Calculated and stored per vehicle** (`vehicle_id`, `gross_amount`, `commission_amount`, `net_amount`, `days_in_period`) — 🔧 **plate number is not** (§1.2), a partial rather than full compliance with the "identifies the specific vehicle" intent of the original enhancement.
 
 ### Double-Entry Bookkeeping
-✅ **Fully Implemented**:
-- Every settlement creates balanced ledger entries
-- Debits = Credits (verified programmatically)
-- Complete audit trail maintained
+✅ **Implemented, at approval time** — not at generation time as v1.0 implied. Debits equal credits per completed transaction (§6).
 
 ---
 
-## Conclusion
+## 9. Recommended Follow-Ups (not fixed by this documentation pass)
 
-These enhancements provide a robust, transparent, and auditable settlement system that goes beyond the original specifications while maintaining full compliance with documented business rules. The per-vehicle tracking and complete transaction linking enable better transparency, dispute resolution, and financial reporting.
+1. Populate `vehicle_plate_number` in `GenerateSettlementCommandHandler` by looking up each `assignment.VehicleId`'s plate at the time the line-item detail tuple is built (the vehicle entity is already loaded elsewhere in the same handler's contract-loading step — this looks like a straightforward fix, not a design gap).
+2. Reconcile the platform-wallet `AccountType` string used across `ApproveSettlementPayoutCommandHandler` (`"COMMISSION"`/`"TAX"`), `ReleaseEscrowCommandHandler`, and `ProcessEarlyTerminationCommandHandler` (`"PLATFORM_COMMISSION"`) so all three resolve to the same wallet rows (see `MVP_ADMIN_WALLET_OPERATIONS_SPECIFICATION.md` §4.3, `14_Wallet_Engine_Flow_Specification.md` §8).
+3. Decide whether tier-based settlement cadence (Bronze/Silver monthly, Gold bi-weekly, Platinum weekly) is still a desired product behavior; if so, it requires new work in `SettlementScheduleService` (currently tier-agnostic), not a documentation change. If not, remove the stale cadence comment from `GenerateSettlementCommand.cs` so it stops misleading future readers.
+4. Consider whether `SettlementCycle.Status` (`OPEN`/`PROCESSING`/`CLOSED`) should actually transition — `Close()` exists but no confirmed caller was found in this pass, so cycles may accumulate indefinitely in `OPEN` status.
 
+---
 
-
+**END OF SETTLEMENT ENHANCEMENTS ADDENDUM**

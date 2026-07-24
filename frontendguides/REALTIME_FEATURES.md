@@ -1,426 +1,258 @@
 # Realtime Features Guide
 ## Movello Frontend - React Implementation
 
-**Version:** 1.0  
-**Technology:** WebSocket / SignalR  
-**Related:** [LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md](./LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md)
+**Version:** 2.0
+**Last verified against code: 2026-07-23**
+**Technology:** SignalR (`.NET`/`@microsoft/signalr`), cookie-based auth (no bearer token in the hub URL)
+**Primary sources:**
+- `src/core/services/notification-hub.ts` (SignalR client)
+- `src/stores/notification-store.ts` (Zustand store — connection lifecycle + cache invalidation)
+- `src/core/services/notification-service.ts` (REST inbox: list/summary/read/delete)
+- `backlog/mvp/epic-11-notification-system.md` (full backend architecture, rewritten 2026-07-23)
+- `project-docs/18_Implementation_Coverage_Audit.md` §6, §7.2 (scope-undersell findings)
+
+This replaces the v1.0 guide, which described a hand-rolled `signalRClient` class with `accessTokenFactory`, a generic `notification-store.ts` with client-side toast dispatch by `type`, and three invented events (`BidCountUpdated`, `ContractStatusUpdated`, `WalletBalanceUpdated`) that do not exist anywhere in the codebase. The real system is simpler in shape but broader in scope: **two** event types over **one** hub connection, plus a much larger backend (admin-configurable multi-channel providers, mobile push) than the v1.0 doc implied.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-1. [WebSocket Setup](#websocket-setup)
-2. [Notification System](#notification-system)
-3. [Real-time Updates](#real-time-updates)
-4. [Connection Management](#connection-management)
+1. [What's Actually Real vs. What v1.0 Invented](#whats-actually-real-vs-what-v10-invented)
+2. [SignalR Hub Connection](#signalr-hub-connection)
+3. [The Two Real-Time Events](#the-two-real-time-events)
+4. [Notification Store & Cache Invalidation](#notification-store--cache-invalidation)
+5. [REST Inbox Endpoints](#rest-inbox-endpoints)
+6. [Backend Architecture (Reference)](#backend-architecture-reference)
+7. [Mobile Push (Both Flutter Apps)](#mobile-push-both-flutter-apps)
+8. [Known Gaps](#known-gaps)
 
 ---
 
-## 🔌 WebSocket Setup
+## What's Actually Real vs. What v1.0 Invented
 
-### SignalR Client
+| v1.0 claimed | Reality |
+|---|---|
+| `signalRClient` class with `.on()`/`.off()`, `accessTokenFactory: () => token` | `startNotificationHub()`/`stopNotificationHub()` function pair in `notification-hub.ts`; auth is the `mov_access_token` **HttpOnly cookie** via `withCredentials: true` — there is no token passed into the connection builder at all |
+| Generic hub URL `${VITE_WS_URL}/hub` | Fixed relative path `/hubs/notifications` |
+| Events: `NotificationReceived`, `BidCountUpdated`, `ContractStatusUpdated`, `WalletBalanceUpdated` | Real events: `ReceiveNotification` and `EntityStatusChanged`. None of the three per-entity-type events exist; `EntityStatusChanged` is a single generic event carrying `{ entityType, entityId }` that the client switches on |
+| `useNotificationStore` holds an array of `Notification[]` client-side, computes `unreadCount` locally | Real store holds only `unreadCount` + a fetched `summary` object; the notification list itself lives server-side (`GET /api/notifications/my-notifications`, paginated) — the store is not a local cache of all notifications |
+| `NotificationBell` renders from the Zustand array | `NotificationDropdown.tsx` fetches its own list from `notificationService`; the store only tracks the unread badge count and holds the hub connection |
+| Manual `setInterval` polling `connection.state` for a "Reconnecting..." banner | `withAutomaticReconnect([0, 2000, 5000, 10000, 30000])` + an `onreconnected` callback that re-fetches the summary and invalidates queries — no polling anywhere |
 
-**File:** `src/shared/lib/signalr-client.ts`
+---
+
+## SignalR Hub Connection
+
+**File:** `src/core/services/notification-hub.ts`
 
 ```typescript
 import * as signalR from '@microsoft/signalr';
-import { useAuthStore } from '@/stores/auth-store';
 
-class SignalRClient {
-  private connection: signalR.HubConnection | null = null;
+const HUB_URL = '/hubs/notifications';
+let activeConnection: signalR.HubConnection | null = null;
+let startPromise: Promise<signalR.HubConnection> | null = null;
 
-  async connect(): Promise<void> {
-    const token = useAuthStore.getState().accessToken;
-    
-    this.connection = new signalR.HubConnectionBuilder()
-      .withUrl(`${import.meta.env.VITE_WS_URL}/hub`, {
-        accessTokenFactory: () => token || '',
-      })
-      .withAutomaticReconnect()
-      .build();
-
-    this.connection.onreconnecting(() => {
-      console.log('Reconnecting to SignalR...');
-    });
-
-    this.connection.onreconnected(() => {
-      console.log('Reconnected to SignalR');
-    });
-
-    this.connection.onclose(() => {
-      console.log('SignalR connection closed');
-    });
-
-    await this.connection.start();
-  }
-
-  async disconnect(): Promise<void> {
-    if (this.connection) {
-      await this.connection.stop();
-      this.connection = null;
-    }
-  }
-
-  on(event: string, callback: (...args: any[]) => void): void {
-    if (this.connection) {
-      this.connection.on(event, callback);
-    }
-  }
-
-  off(event: string, callback: (...args: any[]) => void): void {
-    if (this.connection) {
-      this.connection.off(event, callback);
-    }
-  }
+function buildNotificationConnection(): signalR.HubConnection {
+  return new signalR.HubConnectionBuilder()
+    .withUrl(HUB_URL, {
+      withCredentials: true, // auth via the mov_access_token HttpOnly cookie — no manual token wiring
+    })
+    .withAutomaticReconnect([0, 2000, 5000, 10000, 30000])
+    .configureLogging(signalR.LogLevel.Warning)
+    .build();
 }
 
-export const signalRClient = new SignalRClient();
+export async function startNotificationHub(
+  onReceive: (notification: RealtimeNotificationDto) => void,
+  onReconnected: () => void,
+  onEntityStatusChanged?: (event: EntityStatusChangedEvent) => void
+): Promise<signalR.HubConnection> {
+  // guards against duplicate connections + concurrent start() calls (module-level singleton)
+  ...
+  connection.on('ReceiveNotification', onReceive);
+  if (onEntityStatusChanged) {
+    connection.on('EntityStatusChanged', onEntityStatusChanged);
+  }
+  // Backend sends 'Connected' on initial connect as a reconnect hint for mobile clients
+  // that suppress background sockets — registered both casings to silence SignalR's
+  // "no client method" warning, the payload itself is unused on web.
+  connection.on('Connected', () => {});
+  connection.on('connected', () => {});
+  connection.onreconnected(onReconnected);
+  ...
+}
+
+export async function stopNotificationHub(connection: signalR.HubConnection): Promise<void> {
+  await connection.stop();
+}
 ```
 
-### Connection Hook
-
-**File:** `src/shared/hooks/useSignalR.ts`
-
-```typescript
-import { useEffect } from 'react';
-import { signalRClient } from '@/shared/lib/signalr-client';
-import { useAuthStore } from '@/stores/auth-store';
-
-export const useSignalR = () => {
-  const { isAuthenticated } = useAuthStore();
-
-  useEffect(() => {
-    if (isAuthenticated) {
-      signalRClient.connect().catch(console.error);
-    }
-
-    return () => {
-      signalRClient.disconnect();
-    };
-  }, [isAuthenticated]);
-};
-```
+Key points that differ from a naive SignalR setup:
+- **No manual token plumbing.** Because auth is an HttpOnly cookie, the client never reads or forwards an access token to the hub — `withCredentials: true` is the entire auth story on web.
+- **Module-level singleton with a start-in-flight guard.** `activeConnection`/`startPromise` prevent two callers (e.g. two mounting components) from racing to open a second connection.
+- **Backoff schedule is explicit, not the SignalR default.** `[0, 2000, 5000, 10000, 30000]` — reconnect immediately once, then 2s/5s/10s/30s.
+- **`Connected`/`connected` no-op handlers exist purely to suppress a console warning**; the actual reconnect-hint logic they support is a mobile-only concern (see backend architecture below).
 
 ---
 
-## 🔔 Notification System
+## The Two Real-Time Events
 
-### Notification Store
+### `ReceiveNotification`
 
-**File:** `src/stores/notification-store.ts`
+Fired once per new in-app notification for the connected user (server pushes to a per-user SignalR group). Payload: `RealtimeNotificationDto` (`id`, `title`, `body`, category, link, etc.).
+
+### `EntityStatusChanged`
+
+A **second, broader** channel beyond notifications — fired whenever an RFQ, Bid, Contract, LineItem, or Verification changes state, regardless of whether a notification was also sent. Payload shape:
 
 ```typescript
-import { create } from 'zustand';
-import { signalRClient } from '@/shared/lib/signalr-client';
-
-interface Notification {
-  id: string;
-  type: 'INFO' | 'SUCCESS' | 'WARNING' | 'ERROR';
-  title: string;
-  message: string;
-  read: boolean;
-  createdAt: string;
-  link?: string;
+interface EntityStatusChangedEvent {
+  entityType: 'RFQ' | 'Bid' | 'Contract' | 'LineItem' | 'Verification';
+  entityId: string;
 }
+```
 
-interface NotificationState {
-  notifications: Notification[];
-  unreadCount: number;
-  addNotification: (notification: Notification) => void;
-  markAsRead: (id: string) => void;
-  markAllAsRead: () => void;
-  clear: () => void;
-}
+This is the mechanism that keeps RFQ/Bid/Contract list and detail screens live without polling — the web app does **not** re-fetch on a timer anywhere; it invalidates the affected React Query cache keys the moment this event arrives.
 
-export const useNotificationStore = create<NotificationState>((set) => ({
-  notifications: [],
+---
+
+## Notification Store & Cache Invalidation
+
+**File:** `src/stores/notification-store.ts` (Zustand)
+
+```typescript
+export const useNotificationStore = create<NotificationState>((set, get) => ({
   unreadCount: 0,
+  summary: null,
+  connection: null,
 
-  addNotification: (notification) => {
-    set((state) => ({
-      notifications: [notification, ...state.notifications],
-      unreadCount: state.unreadCount + 1,
-    }));
-
-    // Show toast
-    toast[notification.type.toLowerCase()](notification.message);
+  fetchSummary: async () => {
+    const summary = await notificationService.getNotificationSummary();
+    set({ summary, unreadCount: summary.unreadCount });
   },
 
-  markAsRead: (id) => {
-    set((state) => ({
-      notifications: state.notifications.map((n) =>
-        n.id === id ? { ...n, read: true } : n
-      ),
-      unreadCount: Math.max(0, state.unreadCount - 1),
-    }));
+  startHub: async (queryClient?: QueryClient) => {
+    if (get().connection) return; // prevent duplicate connections
+
+    const handleReceive = (notification: RealtimeNotificationDto) => {
+      get().incrementUnread();
+      toast(notification.title, { description: notification.body, duration: 5000 });
+    };
+
+    const handleReconnected = () => {
+      get().fetchSummary();
+      queryClient?.invalidateQueries({ queryKey: ['rfqs'] });
+      queryClient?.invalidateQueries({ queryKey: ['bids'] });
+      queryClient?.invalidateQueries({ queryKey: ['contracts'] });
+      queryClient?.invalidateQueries({ queryKey: ['marketplace-rfqs'] });
+      queryClient?.invalidateQueries({ queryKey: ['provider-bids-rfqs'] });
+    };
+
+    const handleEntityStatusChanged = queryClient
+      ? (event: EntityStatusChangedEvent) => {
+          switch (event.entityType) {
+            case 'RFQ':
+              queryClient.invalidateQueries({ queryKey: ['rfqs'] });
+              queryClient.invalidateQueries({ queryKey: ['rfq', event.entityId] });
+              queryClient.invalidateQueries({ queryKey: ['marketplace-rfqs'] });
+              queryClient.invalidateQueries({ queryKey: ['business-dashboard'] });
+              queryClient.invalidateQueries({ queryKey: ['provider-dashboard'] });
+              break;
+            case 'Bid':
+              queryClient.invalidateQueries({ queryKey: ['bids'] });
+              queryClient.invalidateQueries({ queryKey: ['bid', event.entityId] });
+              queryClient.invalidateQueries({ queryKey: ['provider-bids-rfqs'] });
+              queryClient.invalidateQueries({ queryKey: ['provider-dashboard'] });
+              queryClient.invalidateQueries({ queryKey: ['rfq'] }); // parent RFQ's bid count
+              break;
+            case 'Contract':
+              queryClient.invalidateQueries({ queryKey: ['contracts'] });
+              queryClient.invalidateQueries({ queryKey: ['contract', event.entityId] });
+              queryClient.invalidateQueries({ queryKey: ['business-dashboard'] });
+              queryClient.invalidateQueries({ queryKey: ['provider-dashboard'] });
+              break;
+            case 'LineItem':
+              // line items are nested in RFQ detail — invalidate all RFQ query variants
+              queryClient.invalidateQueries({ queryKey: ['rfq'] });
+              queryClient.invalidateQueries({ queryKey: ['rfqs'] });
+              queryClient.invalidateQueries({ queryKey: ['marketplace-rfqs'] });
+              break;
+            case 'Verification':
+              queryClient.invalidateQueries({ queryKey: ['admin-verifications'] });
+              queryClient.invalidateQueries({ queryKey: ['profile'] });
+              queryClient.invalidateQueries({ queryKey: ['business-profile'] });
+              queryClient.invalidateQueries({ queryKey: ['provider-profile'] });
+              queryClient.invalidateQueries({ queryKey: ['provider-fleet'] });
+              break;
+          }
+        }
+      : undefined;
+
+    try {
+      const connection = await startNotificationHub(handleReceive, handleReconnected, handleEntityStatusChanged);
+      set({ connection });
+    } catch {
+      // non-fatal — e.g. user not fully registered yet
+    }
   },
 
-  markAllAsRead: () => {
-    set((state) => ({
-      notifications: state.notifications.map((n) => ({ ...n, read: true })),
-      unreadCount: 0,
-    }));
-  },
-
-  clear: () => {
-    set({ notifications: [], unreadCount: 0 });
-  },
+  stopHub: async () => { /* ... */ },
+  incrementUnread: () => set((s) => ({ unreadCount: s.unreadCount + 1 })),
+  resetUnread: () => set({ unreadCount: 0 }),
 }));
 ```
 
-### Notification Listener
+Notes:
+- The toast on receive is a single `toast(title, { description: body })` call, not a `type`-keyed `toast[type]()` dispatch — there is no `INFO/SUCCESS/WARNING/ERROR` enum on the client model.
+- `startHub` takes an **optional** `QueryClient` — if the caller doesn't pass one, the hub still connects and the badge still updates, it just skips cache invalidation. In practice the app root always passes the real query client.
+- Reconnect handling does double duty: `onreconnected` (SignalR's built-in "connection recovered" callback) triggers a **blanket** re-fetch of five core query keys to recover from anything missed while offline, on top of whatever per-entity invalidation `EntityStatusChanged` events would have done individually.
 
-**File:** `src/features/notifications/hooks/useNotificationListener.ts`
+### Where the hub is started
 
-```typescript
-import { useEffect } from 'react';
-import { signalRClient } from '@/shared/lib/signalr-client';
-import { useNotificationStore } from '@/stores/notification-store';
-
-export const useNotificationListener = () => {
-  const addNotification = useNotificationStore((state) => state.addNotification);
-
-  useEffect(() => {
-    const handleNotification = (data: any) => {
-      addNotification({
-        id: data.id,
-        type: data.type,
-        title: data.title,
-        message: data.message,
-        read: false,
-        createdAt: data.createdAt,
-        link: data.link,
-      });
-    };
-
-    signalRClient.on('NotificationReceived', handleNotification);
-
-    return () => {
-      signalRClient.off('NotificationReceived', handleNotification);
-    };
-  }, [addNotification]);
-};
-```
-
-### Notification Bell Component
-
-**File:** `src/shared/components/layout/NotificationBell.tsx`
-
-```typescript
-export const NotificationBell = () => {
-  const { notifications, unreadCount, markAsRead } = useNotificationStore();
-  const [isOpen, setIsOpen] = useState(false);
-
-  return (
-    <Popover open={isOpen} onOpenChange={setIsOpen}>
-      <PopoverTrigger asChild>
-        <Button variant="ghost" size="icon" className="relative">
-          <Bell className="h-5 w-5" />
-          {unreadCount > 0 && (
-            <span className="absolute top-0 right-0 h-4 w-4 bg-red-500 rounded-full text-xs text-white flex items-center justify-center">
-              {unreadCount > 9 ? '9+' : unreadCount}
-            </span>
-          )}
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent className="w-80">
-        <div className="space-y-2">
-          <div className="flex justify-between items-center">
-            <h4 className="font-semibold">Notifications</h4>
-            {unreadCount > 0 && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => markAllAsRead()}
-              >
-                Mark all read
-              </Button>
-            )}
-          </div>
-          <div className="max-h-96 overflow-y-auto space-y-2">
-            {notifications.length === 0 ? (
-              <p className="text-sm text-gray-500 text-center py-4">
-                No notifications
-              </p>
-            ) : (
-              notifications.map((notification) => (
-                <div
-                  key={notification.id}
-                  className={`p-3 rounded border cursor-pointer hover:bg-gray-50 ${
-                    !notification.read ? 'bg-blue-50' : ''
-                  }`}
-                  onClick={() => {
-                    markAsRead(notification.id);
-                    if (notification.link) {
-                      navigate(notification.link);
-                    }
-                  }}
-                >
-                  <div className="flex justify-between items-start">
-                    <div className="flex-1">
-                      <p className="font-medium text-sm">{notification.title}</p>
-                      <p className="text-xs text-gray-600 mt-1">
-                        {notification.message}
-                      </p>
-                      <p className="text-xs text-gray-400 mt-1">
-                        {formatRelativeTime(notification.createdAt)}
-                      </p>
-                    </div>
-                    {!notification.read && (
-                      <div className="h-2 w-2 bg-blue-600 rounded-full" />
-                    )}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-      </PopoverContent>
-    </Popover>
-  );
-};
-```
+The hub is started once per authenticated session (root layout / auth-gated shell), not per-page — individual pages never call `startNotificationHub` themselves. They only need to be registered under keys the invalidation switch above already covers (`['rfqs']`, `['rfq', id]`, `['bids']`, `['contract', id]`, etc.) to get live updates for free.
 
 ---
 
-## 🔄 Real-time Updates
+## REST Inbox Endpoints
 
-### RFQ Bid Count Updates
+Backing `notification-service.ts` / `NotificationDropdown.tsx` / the full-page `NotificationsPage.tsx` (business and provider each have their own):
 
-```typescript
-// In RFQ Detail Page
-useEffect(() => {
-  const handleBidUpdate = (data: { rfqId: string; bidCount: number }) => {
-    if (data.rfqId === rfqId) {
-      queryClient.setQueryData(['rfq', rfqId], (old: any) => ({
-        ...old,
-        bidCount: data.bidCount,
-      }));
-    }
-  };
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/notifications/my-notifications` | Paginated inbox list (infinite-scroll on the full page) |
+| `GET /api/notifications/my-notifications/summary` | Unread count + recent preview, used for the bell badge and on hub reconnect |
+| `PUT /api/notifications/{id}/read` | Mark one notification read |
+| `PUT /api/notifications/mark-all-read` | Mark all read |
+| `DELETE /api/notifications/{id}` | Delete a notification |
 
-  signalRClient.on('BidCountUpdated', handleBidUpdate);
-
-  return () => {
-    signalRClient.off('BidCountUpdated', handleBidUpdate);
-  };
-}, [rfqId]);
-```
-
-### Contract Status Updates
-
-```typescript
-// In Contract Detail Page
-useEffect(() => {
-  const handleStatusUpdate = (data: {
-    contractId: string;
-    status: string;
-  }) => {
-    if (data.contractId === contractId) {
-      queryClient.setQueryData(['contract', contractId], (old: any) => ({
-        ...old,
-        status: data.status,
-      }));
-    }
-  };
-
-  signalRClient.on('ContractStatusUpdated', handleStatusUpdate);
-
-  return () => {
-    signalRClient.off('ContractStatusUpdated', handleStatusUpdate);
-  };
-}, [contractId]);
-```
-
-### Wallet Balance Updates
-
-```typescript
-// In Wallet Page
-useEffect(() => {
-  const handleBalanceUpdate = (data: {
-    walletId: string;
-    balance: number;
-    lockedBalance: number;
-  }) => {
-    if (data.walletId === walletId) {
-      queryClient.setQueryData(['wallet', walletId], (old: any) => ({
-        ...old,
-        balance: data.balance,
-        lockedBalance: data.lockedBalance,
-        availableBalance: data.balance - data.lockedBalance,
-      }));
-    }
-  };
-
-  signalRClient.on('WalletBalanceUpdated', handleBalanceUpdate);
-
-  return () => {
-    signalRClient.off('WalletBalanceUpdated', handleBalanceUpdate);
-  };
-}, [walletId]);
-```
+Mobile apps hit a parallel, mobile-specific route set (`mobile/notifications/*`, capped at 50/page, rate-limited) against the **same** underlying `InAppNotification` store — not a separate notification system.
 
 ---
 
-## 🔌 Connection Management
+## Backend Architecture (Reference)
 
-### Auto-Reconnect
+Full detail lives in `backlog/mvp/epic-11-notification-system.md` (rewritten 2026-07-23); summary for frontend purposes:
 
-SignalR client automatically handles reconnection with exponential backoff.
-
-### Connection Status Indicator
-
-```typescript
-export const ConnectionStatus = () => {
-  const [isConnected, setIsConnected] = useState(false);
-
-  useEffect(() => {
-    const checkConnection = () => {
-      setIsConnected(signalRClient.connection?.state === signalR.HubConnectionState.Connected);
-    };
-
-    const interval = setInterval(checkConnection, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  if (isConnected) return null;
-
-  return (
-    <div className="fixed bottom-4 right-4 bg-yellow-500 text-white px-4 py-2 rounded shadow-lg">
-      <div className="flex items-center gap-2">
-        <Wifi className="h-4 w-4" />
-        <span>Reconnecting...</span>
-      </div>
-    </div>
-  );
-};
-```
+- **Four channels, not one:** in-app (SignalR, above), email (SMTP), SMS (Afromessage), push (Firebase Cloud Messaging) — each independently admin-configurable from `Email Providers` / `SMS Providers` / `FCM Providers` admin console pages, with credential rotation and live test-send, none of which the v1.0 doc's "WebSocket optional" framing anticipated.
+- **Per-category × per-channel preferences**, not a single on/off switch: 8 categories (RFQ, Bid, Contract, Delivery, Return, Settlement, Wallet, Direct Rental) × 4 channels, stored as JSONB on the business/provider profile. The web Settings → Notifications tab currently exposes **one toggle per category** that sets all 4 channels together — true independent per-channel toggling is supported end-to-end by the data model and every backend event handler, it's just not yet exposed as 4 separate switches in the web UI. Treat this as a UI gap, not a backend limitation, if asked to extend it.
+- **~35 event handlers** (`Modules/Notifications/EventHandlers/`) cover account/OTP, RFQ, bidding, contracts, delivery, returns, settlement, wallet, vehicle assignment, verification, and Direct Rental lifecycle events — each independently preference-gated and individually try/caught so one failing handler never blocks the triggering transaction.
+- **Mobile push token lifecycle** is a real, separate concern from the web hub: `POST mobile/notifications/push/rebind` (on login / FCM token refresh) and `POST mobile/notifications/push/unregister` (on logout, best-effort). `MOBILE_APP_SPEC.md`'s `POST mobile/me/devices` is stale — that endpoint does not exist.
 
 ---
 
-## 📡 Event Types
+## Mobile Push (Both Flutter Apps)
 
-### Business Events
-- `BidReceived` - New bid on RFQ
-- `BidAwarded` - Bid was awarded
-- `ContractCreated` - Contract created
-- `ContractActivated` - Contract activated
-- `SettlementCompleted` - Settlement processed
+Both apps request notification permission, initialize `firebase_messaging` + `flutter_local_notifications`, and handle foreground / background-tapped / terminated-launch delivery. Tapping a push notification deep-links via an `actionUrl` in the payload. On login and on FCM token refresh the app calls `push/rebind`; on logout it calls `push/unregister` (failure there never blocks local logout). Mobile inbox screens (`business_notifications_screen.dart`, `provider_notifications_screen.dart`) consume the same `mobile/notifications/*` REST surface described above.
 
-### Provider Events
-- `RFQPublished` - New RFQ published
-- `BidAwarded` - Bid was awarded
-- `VehicleAssignmentRequired` - Need to assign vehicles
-- `DeliveryOTPGenerated` - OTP generated for delivery
-- `SettlementCompleted` - Settlement processed
-
-### Admin Events
-- `VerificationSubmitted` - New verification pending
-- `TransactionCompleted` - Transaction completed
+The server also sends mobile clients a `Connected` reconnect hint ~55s after connect (ahead of the server's 60s idle timeout) plus an explicit `Ping`/`Pong` keep-alive, specifically to survive OS-level background socket suppression — this is why the web client's no-op `Connected` handler exists even though web doesn't need the hint itself.
 
 ---
 
-**END OF REALTIME FEATURES GUIDE**
+## Known Gaps
 
-*For WebSocket server setup, refer to backend documentation*
+Carried forward from the 2026-07-23 audit — do not assume these exist without checking first:
 
+- **No delivery-status webhook ingestion** for email/SMS providers (outbox tracks Pending/Delivered/Failed, but nothing updates it from provider callbacks) and **no automated outbox retry worker** — a transient SMTP/SMS failure currently goes unretried. In-app/SignalR delivery is unaffected (it's a direct write + push, not outboxed).
+- **No template version history/rollback** for admin-managed notification templates — templates are edited in place.
+- **No hard-coded "critical" category** that a user can't fully silence — a business could theoretically disable every channel for "Settlement" today; there's no backend guard against it.
+- **Retention is free-form**, not a fixed TTL — notifications persist until the user deletes them; there's no cleanup job. Don't cite a specific retention window without checking again first.

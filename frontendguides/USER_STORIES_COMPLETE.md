@@ -1,465 +1,122 @@
-# Complete User Stories Reference
+# User Stories Reference
 ## Movello Frontend - React Implementation
 
-**Version:** 1.0  
-**Source:** [MOVELLO_COMPLETE_USER_STORIES.md](./MOVELLO_COMPLETE_USER_STORIES.md)  
-**Total Stories:** 90+ across 11 Epics
+**Version:** 2.0
+**Last verified against code: 2026-07-23**
+**Source of truth:** [`backlog/README.md`](../../../backlog/README.md) + `backlog/mvp/*.md` + `backlog/post-mvp/*.md` (21 epics, 129 stories, all cross-checked against running code as of 2026-07-23)
+**Reconciliation layer:** [`project-docs/18_Implementation_Coverage_Audit.md`](../../../project-docs/18_Implementation_Coverage_Audit.md) — read this before treating any single epic doc as a literal, unqualified spec
 
 ---
 
-## 📋 Epic Summary
+## This File No Longer Duplicates the Backlog
 
-| Epic | Name | Stories | Points | Priority |
-|------|------|---------|--------|----------|
-| E01 | Authentication & Onboarding | 8 | 45 | Highest |
-| E02 | Business - RFQ Management | 15 | 95 | Highest |
-| E03 | Business - Bidding & Award | 10 | 65 | Highest |
-| E04 | Business - Wallet Management | 8 | 40 | High |
-| E05 | Business - Contract Management | 7 | 50 | High |
-| E06 | Provider - Fleet Management | 12 | 85 | Highest |
-| E07 | Provider - Marketplace & Bidding | 10 | 70 | Highest |
-| E08 | Provider - Delivery & OTP | 8 | 60 | Highest |
-| E09 | Provider - Wallet & Settlements | 7 | 40 | High |
-| E10 | Admin - Verification | 8 | 50 | High |
-| E11 | Admin - Monitoring | 7 | 45 | Medium |
+The v1.0 version of this file was a **second, independent copy** of the product backlog — its own epic list (11 epics, not the real platform's 21), its own numbering scheme (`MOV-101`, `MOV-201`, ...), its own story-point totals (100 stories / 645 points), and its own acceptance criteria, none of which trace back to `backlog/mvp/*.md` or `backlog/post-mvp/*.md`. It had drifted so far from the real backlog that it amounted to a parallel, fictional product plan rather than a frontend-implementation view of the real one.
 
-**Total:** 100 stories | 645 story points
+That approach doesn't survive contact with a 21-epic, actively-audited backlog: maintaining two divergent lists of "the user stories" guarantees they disagree, and whichever one a reader picks first will mislead them about scope. **This file now points to the real backlog instead of re-describing it**, and limits itself to what's actually useful for frontend work that a plain epic list doesn't give you: which epics exist, how they map to the web app's actual page tree, and which specific claims in those epic docs you should double-check against code before building against them.
+
+If you need acceptance criteria or Definition-of-Done checklists for a story, **go to the epic file in `backlog/`** — do not recreate them here.
 
 ---
 
-## 🔐 Epic 1: Authentication & Onboarding
+## Table of Contents
 
-### MOV-101: User Registration with Role Selection ⭐
-- **Priority:** Highest | **Points:** 5
-- **Acceptance Criteria:**
-  - Role selection (Business/Provider)
-  - Dynamic form fields
-  - TIN validation (10 digits, unique)
-  - Email validation (unique)
-  - Password validation (8+ chars, uppercase, number, special)
-  - Email verification sent
-
-### MOV-102: Business Onboarding Wizard ⭐
-- **Priority:** Highest | **Points:** 13
-- **3-Step Wizard:**
-  1. Business Details (Name, Type, TIN)
-  2. Contact & Address
-  3. Document Upload (4 documents)
-
-### MOV-103: Provider Onboarding Wizard ⭐
-- **Priority:** Highest | **Points:** 13
-- **3-Step Wizard:**
-  1. Provider Type Selection
-  2. Contact Information
-  3. Document Upload (varies by type)
-
-### MOV-104: Email Verification
-- **Priority:** High | **Points:** 3
-
-### MOV-105: Login
-- **Priority:** Highest | **Points:** 5
-
-### MOV-106: Password Reset
-- **Priority:** High | **Points:** 5
-
-### MOV-107: Session Management
-- **Priority:** Medium | **Points:** 3
-
-### MOV-108: Multi-Device Session Control
-- **Priority:** Medium | **Points:** 3
+1. [What's Actually Real vs. What v1.0 Invented](#whats-actually-real-vs-what-v10-invented)
+2. [The Real 21-Epic Structure](#the-real-21-epic-structure)
+3. [Epic → Web App Page Tree (Quick Orientation)](#epic--web-app-page-tree-quick-orientation)
+4. [Before You Build Against Any Epic Doc: Known Divergences](#before-you-build-against-any-epic-doc-known-divergences)
+5. [Confirmed Not Built (Don't Design Around These Yet)](#confirmed-not-built-dont-design-around-these-yet)
 
 ---
 
-## 🏢 Epic 2: Business - RFQ Management
+## What's Actually Real vs. What v1.0 Invented
 
-### MOV-201: Create Multi-Line RFQ ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **3-Step Wizard:**
-  1. Basic Information (Title, Dates, Deadline)
-  2. Line Items (Add/Remove, Max 50 vehicles)
-  3. Review & Publish
-
-### MOV-202: View and Filter RFQ List
-- **Priority:** High | **Points:** 5
-
-### MOV-203: View RFQ Details
-- **Priority:** High | **Points:** 3
-
-### MOV-204: Edit Draft RFQ
-- **Priority:** High | **Points:** 5
-
-### MOV-205: Delete Draft RFQ
-- **Priority:** Medium | **Points:** 2
-
-### MOV-206: Clone Existing RFQ
-- **Priority:** Medium | **Points:** 3
-
-### MOV-207: Cancel Published RFQ
-- **Priority:** High | **Points:** 5
-
-### MOV-208: RFQ Status Timeline
-- **Priority:** Medium | **Points:** 3
-
-### MOV-209: RFQ Notifications
-- **Priority:** Medium | **Points:** 3
-
-### MOV-210: RFQ Analytics
-- **Priority:** Low | **Points:** 5
-
-### MOV-211: Save RFQ as Template
-- **Priority:** Low | **Points:** 3
-
-### MOV-212: Bulk RFQ Creation
-- **Priority:** Low | **Points:** 8
-
-### MOV-213: RFQ Export
-- **Priority:** Low | **Points:** 2
-
-### MOV-214: RFQ Search
-- **Priority:** Medium | **Points:** 3
-
-### MOV-215: RFQ Reminders
-- **Priority:** Low | **Points:** 3
+| v1.0 claimed | Reality |
+|---|---|
+| 11 epics, ~100 stories, 645 story points, `MOV-XXX` IDs | 21 epics (12 MVP + 9 post-MVP), 129 stories, `Story X.Y` IDs — see `backlog/README.md`. There is no `MOV-` prefix anywhere in the real backlog |
+| Epics grouped by role × feature (e.g. "E04: Business - Wallet Management", "E09: Provider - Wallet & Settlements" as two separate epics) | Real backlog groups by **feature area across both roles** (e.g. one `epic-08-wallet-escrow.md` covers business and provider wallet together) — the v1.0 per-role split doesn't match how the actual epics, or the actual codebase's module boundaries, are organized |
+| "Direct Rental" not mentioned anywhere | Direct Rental is a full 10-story epic (`epic-21-direct-rental.md`) spanning backend, web, and both mobile apps — it shipped before it had an epic number and was invisible from every index until the 2026-07-23 audit found it; it's now formally epic 21 |
+| Bidding epic DoD implies a working price/trust/condition/response-time ranking algorithm and anti-collusion detection (`MOV-707: Bid Analytics`, etc., presented as buildable/built) | Confirmed **zero code** implementing either the weighted ranking formula or anti-collusion detection, on any surface — see epic-05's own rewritten text and the audit §4 |
+| Contract epic assumes `pending → active → suspended → completed`, manual renewal creates a new contract | Real lifecycle has 17–18 states, no "Suspended" state at all, and "renewal" is contract **extension** of the same contract, not a new one — see epic-06 |
+| Trust score epic (`MOV-903`) frames it as something a provider doesn't see about themselves | Provider mobile app dashboard shows the provider their own live trust score and tier directly — see epic-12 |
 
 ---
 
-## 💰 Epic 3: Business - Bidding & Award
+## The Real 21-Epic Structure
 
-### MOV-301: View Blind Bids ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **Features:**
-  - Grouped by line item
-  - Provider hash display
-  - Sorting (price, quantity, trust score)
-  - Multi-select for award
+**MVP (12 epics, 79 stories)** — `backlog/mvp/`:
 
-### MOV-302: Award Bids with Wallet Validation ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **Critical Features:**
-  - Wallet balance check
-  - Insufficient funds handling
-  - Partial award option
-  - Provider identity revealed after award
+| # | Epic | Stories | Web Coverage (per 2026-07-23 audit) |
+|---|------|:---:|---|
+| 01 | Business Onboarding & KYB | 5 | ✅ |
+| 02 | Provider Onboarding & KYC | 6 | ✅ |
+| 03 | Vehicle & Insurance Management | 6 | ✅ (diverges — Direct Rental fields, expanded vehicle status lifecycle undocumented in epic text) |
+| 04 | RFQ Management | 7 | ✅ (diverges — line-item model, not single-vehicle-type/date-range) |
+| 05 | Bidding Engine | 7 | ✅ (diverges — split awards; ranking algorithm & anti-collusion unbuilt) |
+| 06 | Contract Management | 7 | ✅ (diverges — 17–18 state lifecycle, dual-OTP signing, extension not renewal; most-diverged epic on every surface) |
+| 07 | OTP Delivery Verification | 7 | ✅ (diverges — return-trip OTP + inspection checklist not in original scope) |
+| 08 | Wallet & Escrow | 7 | ✅ (diverges — live payment-gateway webhooks, not "future") |
+| 09 | Daily Ledger & Billing | 7 | 🟡 (diverges — provider-submitted invoice-approval inverts the epic's assumption) |
+| 10 | Monthly Renewal & Settlement | 7 | ✅ (dispute flow story 10.7 unbuilt) |
+| 11 | Notification System | 7 | ✅ (diverges — epic undersells scope by a wide margin, see `REALTIME_FEATURES.md`) |
+| 12 | Risk & Trust Scoring | 7 | 🟡 (diverges — provider-only, visible to provider self, no business risk score, no fraud engine) |
 
-### MOV-303: Bid Comparison Tool
-- **Priority:** High | **Points:** 8
+**Post-MVP (9 epics, 50 stories)** — `backlog/post-mvp/`:
 
-### MOV-304: Award History
-- **Priority:** Medium | **Points:** 3
+| # | Epic | Stories | Status |
+|---|------|:---:|---|
+| 13 | Group Bidding | 5 | ⚪ Not started |
+| 14 | Analytics Dashboard | 5 | 🟡 Partial (dashboard-embedded only) |
+| 15 | Geofence/GPS Integration | 5 | ⚪ Not started |
+| 16 | Mobile Applications | 5 | 🟡 Both apps exist, some DoD items missing (biometric auth, true offline sync, RFQ templates) |
+| 17 | Instant Payouts | 5 | ⚪ Not started |
+| 18 | Provider Loan Facilities | 5 | ⚪ Not started |
+| 19 | Insurance Marketplace | 5 | ⚪ Not started (existing insurance UI is epic-03 document verification, not a marketplace) |
+| 20 | API Integrations & Enterprise | 5 | ⚪ Not started |
+| 21 | Direct Rental | 10 | ✅ Fully shipped, cross-surface — documented retroactively |
 
-### MOV-305: Award Partial Quantities
-- **Priority:** High | **Points:** 8
-
-### MOV-306: Split Awards (Multiple Providers)
-- **Priority:** High | **Points:** 8
-
-### MOV-307: Bid Analytics
-- **Priority:** Low | **Points:** 5
-
-### MOV-308: Auto-Award (Future)
-- **Priority:** Low | **Points:** 8
-
-### MOV-309: Bid Notifications
-- **Priority:** Medium | **Points:** 3
-
-### MOV-310: Award Confirmation Email
-- **Priority:** Medium | **Points:** 2
+**Total: 129 stories.** For the full acceptance criteria and Definition-of-Done checklist per story, open the epic file directly.
 
 ---
 
-## 💳 Epic 4: Business - Wallet Management
+## Epic → Web App Page Tree (Quick Orientation)
 
-### MOV-401: View Wallet Balance
-- **Priority:** High | **Points:** 3
+A frontend-focused index the real backlog doesn't provide directly — where in `src/features/` each epic's web surface actually lives, useful when picking up a story cold:
 
-### MOV-402: Deposit Funds
-- **Priority:** High | **Points:** 8
-- **Payment Methods:** Chapa, Telebirr
-
-### MOV-403: View Transaction History
-- **Priority:** High | **Points:** 5
-
-### MOV-404: Transaction Filters
-- **Priority:** Medium | **Points:** 3
-
-### MOV-405: Transaction Export
-- **Priority:** Low | **Points:** 3
-
-### MOV-406: Wallet Notifications
-- **Priority:** Medium | **Points:** 3
-
-### MOV-407: Payment Method Management
-- **Priority:** Low | **Points:** 5
-
-### MOV-408: Wallet Analytics
-- **Priority:** Low | **Points:** 5
+| Epic | Web feature folder(s) |
+|---|---|
+| 01/02 Onboarding | `src/features/auth/`, admin verification queues under `src/features/admin/pages/verifications/` |
+| 03 Vehicle & Insurance | `src/features/provider/pages/fleet/`, `src/features/admin/pages/verifications/VehicleVerificationListPage.tsx` |
+| 04/05 RFQ & Bidding | `src/features/business/pages/rfq/` (list, detail, create, bids/award), `src/features/provider/marketplace/` |
+| 06 Contracts | `src/features/business/pages/contracts/`, `src/features/provider/.../contracts/`, `src/features/admin/pages/operations/contracts/` |
+| 07 OTP/Delivery | Delivery session screens under provider/business contract detail flows; `src/core/services/delivery-service.ts` |
+| 08 Wallet & Escrow | `src/features/business/pages/wallet/`, `src/features/provider/pages/wallet/` |
+| 09/10 Ledger & Settlement | Billing/settlement tabs within contract and wallet feature areas |
+| 11 Notifications | `src/stores/notification-store.ts`, `src/core/services/notification-hub.ts`, `NotificationDropdown.tsx`, admin `src/features/admin/pages/notifications/` |
+| 12 Trust/Risk | `TrustScoreDisplay.tsx`, `src/features/admin/pages/master-data/TiersPage.tsx` |
+| 14 Analytics | Dashboard-embedded charts on business/provider/admin dashboards (no standalone analytics feature folder) |
+| 21 Direct Rental | `src/features/business/pages/direct-rental/`, `src/features/provider/pages/direct-rental/`, `src/features/admin/pages/direct-rental/`, backed by `direct-rental-service.ts` |
 
 ---
 
-## 📄 Epic 5: Business - Contract Management
+## Before You Build Against Any Epic Doc: Known Divergences
 
-### MOV-501: View Contract List
-- **Priority:** High | **Points:** 5
+All 12 MVP epics and `epic-16`/`epic-21` were fully rewritten against running code on 2026-07-23 and each carries its own "Last verified against code" line — trust those over anything older. The handful of divergences most likely to bite a frontend task:
 
-### MOV-502: View Contract Details
-- **Priority:** High | **Points:** 5
-
-### MOV-503: Request Early Return
-- **Priority:** High | **Points:** 8
-- **Features:**
-  - Penalty calculation
-  - Notice period validation
-  - Refund amount display
-
-### MOV-504: View Delivery Evidence
-- **Priority:** Medium | **Points:** 3
-
-### MOV-505: Download Contract PDF
-- **Priority:** Medium | **Points:** 3
-
-### MOV-506: Contract Notifications
-- **Priority:** Medium | **Points:** 3
-
-### MOV-507: Contract Analytics
-- **Priority:** Low | **Points:** 5
+- **RFQ/Bid data model is header + `RFQLineItem[]`**, not one vehicle-type/quantity/date-range per RFQ. Every award is per-line-item, and can be **split across multiple providers** (`SplitAwardDialog.tsx`).
+- **Contract status is a plain string, not an enforced enum** in practice — the C# `ContractStatus` enum has zero references outside its own file; real statuses are produced ad hoc across the codebase (18 distinct values seen in practice, including a `CANCELLED` the enum doesn't even define). See `MVP_CONTRACT_STATE_MACHINE.md`.
+- **Blind bidding is UI-only.** The bid-list API returns `ProviderName` unconditionally regardless of award status; only the web client's choice not to render it keeps bids blind. See `BUSINESS_LOGIC_IMPLEMENTATION.md`.
+- **Post-award vehicle assignment is a shared three-phase pattern across all four surfaces** (bid at quantity level → award, possibly split → assign specific vehicles) — it's not mobile-only, web hits the identical `GET /rfq/awards/{awardId}/eligible-vehicles` / `POST`/`DELETE /rfq/awards/{awardId}/vehicles` endpoints via `AwardAssignPage.tsx`.
+- **Trust score is real but inert in production** — the formula exists, is unit-tested, and is DI-registered, but nothing calls it; every provider is frozen at its default (50 if verified, 0 if not) until an admin manually assigns a tier.
+- **Settlement cadence is an unresolved internal contradiction** between the wallet epic (tier-based cadence: Bronze/Silver monthly, Gold bi-weekly, Platinum weekly) and the settlement epic (flat rolling 30-day cycle regardless of tier) — don't cite either as settled fact without checking `GenerateSettlementCommand*.cs` first.
 
 ---
 
-## 🚗 Epic 6: Provider - Fleet Management
-
-### MOV-601: Register Vehicle ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **3-Step Wizard:**
-  1. Vehicle Information
-  2. Photo Upload (5 photos)
-  3. Insurance Information
-
-### MOV-602: View Vehicle List
-- **Priority:** High | **Points:** 5
-
-### MOV-603: Edit Vehicle Information
-- **Priority:** High | **Points:** 5
-
-### MOV-604: Upload Vehicle Photos
-- **Priority:** High | **Points:** 5
-
-### MOV-605: Add/Update Insurance
-- **Priority:** High | **Points:** 8
-
-### MOV-606: Mark Vehicle as Maintenance
-- **Priority:** Medium | **Points:** 3
-
-### MOV-607: Delete Vehicle
-- **Priority:** Medium | **Points:** 3
-
-### MOV-608: Vehicle Analytics
-- **Priority:** Low | **Points:** 5
-
-### MOV-609: Bulk Vehicle Upload
-- **Priority:** Low | **Points:** 8
-
-### MOV-610: Vehicle History
-- **Priority:** Medium | **Points:** 3
-
-### MOV-611: Insurance Expiry Alerts
-- **Priority:** Medium | **Points:** 5
-
-### MOV-612: Vehicle Status Dashboard
-- **Priority:** Medium | **Points:** 5
-
----
-
-## 🛒 Epic 7: Provider - Marketplace & Bidding
-
-### MOV-701: Browse Marketplace RFQs ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **Features:**
-  - Filters (Vehicle Type, Duration, Location)
-  - Search by title
-  - Sort options
-  - RFQ cards with bid counts
-
-### MOV-702: Submit Bid ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **Features:**
-  - Per line item bidding
-  - Price validation (market range)
-  - Vehicle availability check
-  - Quantity validation
-
-### MOV-703: View My Bids
-- **Priority:** High | **Points:** 5
-
-### MOV-704: Withdraw Bid
-- **Priority:** High | **Points:** 3
-
-### MOV-705: Bid History
-- **Priority:** Medium | **Points:** 3
-
-### MOV-706: Save RFQ (Bookmark)
-- **Priority:** Low | **Points:** 3
-
-### MOV-707: Bid Analytics
-- **Priority:** Low | **Points:** 5
-
-### MOV-708: RFQ Notifications
-- **Priority:** Medium | **Points:** 3
-
-### MOV-709: Bid Templates
-- **Priority:** Low | **Points:** 5
-
-### MOV-710: Auto-Bid (Future)
-- **Priority:** Low | **Points:** 8
-
----
-
-## 📦 Epic 8: Provider - Delivery & OTP
-
-### MOV-801: Assign Vehicles to Contract ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **Features:**
-  - Select vehicles per line item
-  - Quantity validation
-  - Vehicle availability check
-
-### MOV-802: Generate OTP ⭐⭐⭐
-- **Priority:** Highest | **Points:** 8
-- **Features:**
-  - OTP generation
-  - SMS to business
-  - OTP display for provider
-
-### MOV-803: Verify OTP ⭐⭐⭐
-- **Priority:** Highest | **Points:** 8
-- **Features:**
-  - 6-digit OTP input
-  - 3 attempts limit
-  - Expiry handling
-
-### MOV-804: Upload Handover Evidence ⭐⭐⭐
-- **Priority:** Highest | **Points:** 13
-- **Features:**
-  - 5 photos (front, back, left, right, interior)
-  - Odometer reading
-  - Fuel level
-  - Notes
-
-### MOV-805: View Delivery Sessions
-- **Priority:** Medium | **Points:** 3
-
-### MOV-806: Delivery History
-- **Priority:** Medium | **Points:** 3
-
-### MOV-807: Delivery Notifications
-- **Priority:** Medium | **Points:** 3
-
-### MOV-808: Delivery Analytics
-- **Priority:** Low | **Points:** 5
-
----
-
-## 💰 Epic 9: Provider - Wallet & Settlements
-
-### MOV-901: View Wallet Balance
-- **Priority:** High | **Points:** 3
-
-### MOV-902: View Settlement History
-- **Priority:** High | **Points:** 5
-
-### MOV-903: View Trust Score
-- **Priority:** High | **Points:** 5
-- **Features:**
-  - Circular gauge display
-  - Score breakdown
-  - Historical chart
-
-### MOV-904: View Tier Information
-- **Priority:** Medium | **Points:** 3
-
-### MOV-905: Settlement Details
-- **Priority:** Medium | **Points:** 3
-
-### MOV-906: Withdrawal Request
-- **Priority:** Medium | **Points:** 5
-
-### MOV-907: Wallet Analytics
-- **Priority:** Low | **Points:** 5
-
----
-
-## ✅ Epic 10: Admin - Verification
-
-### MOV-1001: Review Business KYB ⭐⭐
-- **Priority:** Highest | **Points:** 13
-
-### MOV-1002: Review Provider KYC ⭐⭐
-- **Priority:** Highest | **Points:** 13
-
-### MOV-1003: Approve Verification
-- **Priority:** High | **Points:** 5
-
-### MOV-1004: Reject Verification
-- **Priority:** High | **Points:** 5
-
-### MOV-1005: Request Additional Documents
-- **Priority:** Medium | **Points:** 5
-
-### MOV-1006: Verification Queue
-- **Priority:** High | **Points:** 5
-
-### MOV-1007: Verification History
-- **Priority:** Medium | **Points:** 3
-
-### MOV-1008: Bulk Verification
-- **Priority:** Low | **Points:** 8
-
----
-
-## 📊 Epic 11: Admin - Monitoring
-
-### MOV-1101: View Transaction List
-- **Priority:** High | **Points:** 5
-
-### MOV-1102: View User List
-- **Priority:** High | **Points:** 5
-
-### MOV-1103: Suspend User
-- **Priority:** High | **Points:** 3
-
-### MOV-1104: View System Analytics
-- **Priority:** Medium | **Points:** 8
-
-### MOV-1105: Export Reports
-- **Priority:** Medium | **Points:** 5
-
-### MOV-1106: System Settings
-- **Priority:** Medium | **Points:** 8
-
-### MOV-1107: Audit Log
-- **Priority:** Low | **Points:** 5
-
----
-
-## 🎯 Priority Legend
-
-- ⭐⭐⭐ **Highest Priority** - Critical for MVP
-- ⭐⭐ **High Priority** - Important for MVP
-- ⭐ **Medium Priority** - Nice to have
-- No star - **Low Priority** - Future enhancement
-
----
-
-## 📝 Implementation Notes
-
-1. **All stories** have detailed acceptance criteria in source document
-2. **UI/UX tasks** are specified for each story
-3. **Frontend/Backend tasks** are separated
-4. **Story points** indicate complexity (1-13)
-5. **Epic dependencies** should be considered
-
----
-
-**END OF USER STORIES REFERENCE**
-
-*For detailed acceptance criteria, see [MOVELLO_COMPLETE_USER_STORIES.md](./MOVELLO_COMPLETE_USER_STORIES.md)*
-
+## Confirmed Not Built (Don't Design Around These Yet)
+
+Zero code hits across every surface as of 2026-07-23 — if a task references any of these as if they exist, flag it before proceeding:
+
+- Weighted bid-ranking algorithm (price/trust/condition/response-time) and anti-collusion/bid-collusion detection (epic-05)
+- Business-side risk/fraud scoring, a unified dispute-resolution workflow or dispute entity of any kind (epic-12; `Disputed`/`OnHold` exist only as unused contract status values)
+- Group Bidding, Geofence/GPS Integration, Instant Payouts, Provider Loan Facilities, Insurance Marketplace, API Integrations & Enterprise (epics 13, 15, 17, 18, 19, 20)
+- A `renew` endpoint or "new contract from an old one" flow of any kind (contract "renewal" is extension of the same contract — see `BUSINESS_LOGIC_IMPLEMENTATION.md`)
+- Any client-side early-return penalty/refund preview calculator on web (the real UI submits a reason and lets the backend compute everything, with no preview shown)

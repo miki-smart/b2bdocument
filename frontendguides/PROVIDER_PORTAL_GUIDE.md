@@ -1,1242 +1,207 @@
-# Provider Portal Development Guide
-## Movello Frontend - React Implementation
+# Provider Portal — As-Built Reference
 
-**Version:** 1.0  
-**Related:** [LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md](./LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md)
+## Movello Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
 
----
+**Last verified against code: 2026-07-23**
 
-## 📋 Table of Contents
+> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable), with illustrative code for a portal that didn't exist yet. The provider portal has since been built, and diverges from that original assumption in several load-bearing ways — the bidding model, the two-phase vehicle-assignment flow, and an entire fleet-capacity/Direct-Rental layer the original guide never anticipated. This version documents **what actually exists in code today**, verified against `marketplace-project-implementation/movello-marketplace-core/src/features/provider/**` and the route table in `src/App.tsx`.
 
-1. [Dashboard](#dashboard)
-2. [Marketplace & Bidding](#marketplace--bidding)
-3. [Fleet Management](#fleet-management)
-4. [Contract & Delivery](#contract--delivery)
-5. [Wallet & Settlements](#wallet--settlements)
-6. [Profile & Settings](#profile--settings)
+All provider routes live under `/provider` inside `ProviderLayout`, gated by `ProtectedRoute allowedRoles={['provider']}`.
 
----
+| Route | Component |
+|---|---|
+| `/provider/dashboard` | `ProviderDashboard.tsx` |
+| `/provider/marketplace` | `MarketplacePage.tsx` |
+| `/provider/marketplace/:id` | `RFQDetailPage.tsx` |
+| `/provider/marketplace/:id/bid/:lineItemId` | `BidSubmissionPage.tsx` |
+| `/provider/marketplace/:id/bid/:lineItemId/edit/:bidId` | `BidSubmissionPage.tsx` (edit mode) |
+| `/provider/bids` | `MyBidsPage.tsx` |
+| `/provider/bids/:bidId/assign` | `AwardAssignPage.tsx` |
+| `/provider/fleet` | `FleetListPage.tsx` |
+| `/provider/fleet/capacity` | `FleetCapacityOverviewPage.tsx` |
+| `/provider/fleet/add` | `AddVehiclePage.tsx` |
+| `/provider/fleet/:id` | `VehicleDetailPage.tsx` |
+| `/provider/fleet/:id/edit` | `AddVehiclePage.tsx` (edit mode) |
+| `/provider/contracts` | `ProviderContractListPage.tsx` |
+| `/provider/contracts/:id` | `ContractDetailPage.tsx` (shared with business/admin) |
+| `/provider/contracts/:id/terms-preview` | `ContractTermsPreviewPage.tsx` |
+| `/provider/contracts/:id/assign` | `AssignVehiclesPage.tsx` |
+| `/provider/contracts/:id/delivery` | `ProviderDeliveryPage.tsx` |
+| `/provider/direct-rental/requests` | `ProviderRequestsPage.tsx` |
+| `/provider/direct-rental/requests/:id/respond` | `ProviderRequestResponsePage.tsx` |
+| `/provider/wallet` | `ProviderWalletPage.tsx` |
+| `/provider/wallet/settlements` | `ProviderSettlementsPage.tsx` |
+| `/provider/wallet/settlements/:payoutId` | `SettlementDetailPage.tsx` |
+| `/provider/wallet/invoices` | `ProviderInvoicesPage.tsx` |
+| `/provider/wallet/invoices/:id` | `ProviderInvoiceDetailPage.tsx` |
+| `/provider/profile` | `ProfilePage.tsx` |
+| `/provider/settings` | `SettingsPage.tsx` |
+| `/provider/notifications` | `NotificationsPage.tsx` |
 
-## 📊 Dashboard
-
-### Route
-`/provider/dashboard`
-
-### Features
-- **Stat Cards:**
-  - Active Contracts count
-  - Fleet Status (pie chart: Active/Assigned/Maintenance)
-  - Wallet Balance
-  - Trust Score (gauge display)
-- **Quick Actions:**
-  - Browse Marketplace
-  - Manage Fleet
-  - View Earnings
-- **Recent Activity:**
-  - New bids submitted
-  - Contracts awarded
-  - Settlements received
-
----
-
-## 🛒 Marketplace & Bidding
-
-### Marketplace Browse Page
-
-**Route:** `/provider/marketplace`  
-**Component:** `src/features/provider/marketplace/pages/MarketplacePage.tsx`
-
-**CRITICAL FEATURE:** This is the most important screen for providers.
-
-#### Features
-
-**Left Sidebar Filters:**
-- **Vehicle Type** (multi-select checkboxes)
-  - EV_SEDAN, SEDAN, SUV, MINIBUS_12, BUS_30, etc.
-- **Duration** (radio buttons)
-  - Short-term (< 7 days)
-  - Long-term (≥ 30 days)
-  - All
-- **Location** (dropdown)
-  - Cities: Addis Ababa, Dire Dawa, Mekelle, etc.
-- **Search by Title** (text input with debounce)
-
-**Sorting Dropdown:**
-- Posting Date (Newest First) - Default
-- Posting Date (Oldest First)
-- Popularity (Most Bids)
-- Popularity (Least Bids)
-
-**RFQ Cards Grid:**
-- Title
-- Business Name (visible)
-- Date Range (Start - End)
-- Line Items Summary (e.g., "5× EV Sedan, 2× Minibus")
-- Bid Count per Line Item (badges)
-- Bid Deadline (with countdown)
-- "Bid Now" button
-- "Save" icon (bookmark)
-
-**Pagination:**
-- Page numbers or "Load More" button
-
-#### Implementation
-
-```typescript
-import { useState, useMemo } from 'react';
-import { useQuery } from '@tanstack/react-query';
-import { RFQCard } from '../components/RFQCard';
-import { MarketplaceFilters } from '../components/MarketplaceFilters';
-
-export const MarketplacePage = () => {
-  const [filters, setFilters] = useState<MarketplaceFilters>({
-    vehicleTypes: [],
-    duration: 'ALL',
-    location: '',
-    search: '',
-    pageNumber: 1,
-    pageSize: 20,
-  });
-  const [sortBy, setSortBy] = useState<'NEWEST' | 'OLDEST' | 'MOST_BIDS' | 'LEAST_BIDS'>('NEWEST');
-
-  const { data, isLoading } = useQuery({
-    queryKey: ['rfqs', 'open', filters, sortBy],
-    queryFn: () => rfqService.getOpenRFQs({
-      ...filters,
-      sortBy,
-      sortDescending: sortBy === 'NEWEST',
-    }),
-  });
-
-  return (
-    <div className="flex gap-6">
-      {/* Filters Sidebar */}
-      <aside className="w-64 flex-shrink-0">
-        <MarketplaceFilters
-          filters={filters}
-          onFiltersChange={setFilters}
-        />
-      </aside>
-
-      {/* Main Content */}
-      <main className="flex-1">
-        <div className="flex justify-between items-center mb-6">
-          <h1 className="text-2xl font-bold">Browse RFQs</h1>
-          <Select value={sortBy} onValueChange={setSortBy}>
-            <SelectTrigger className="w-48">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="NEWEST">Newest First</SelectItem>
-              <SelectItem value="OLDEST">Oldest First</SelectItem>
-              <SelectItem value="MOST_BIDS">Most Bids</SelectItem>
-              <SelectItem value="LEAST_BIDS">Least Bids</SelectItem>
-            </SelectContent>
-          </Select>
-        </div>
-
-        {isLoading ? (
-          <LoadingState />
-        ) : data?.data.length === 0 ? (
-          <EmptyState
-            title="No RFQs found"
-            description="Try adjusting your filters"
-          />
-        ) : (
-          <>
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {data?.data.map((rfq) => (
-                <RFQCard key={rfq.id} rfq={rfq} />
-              ))}
-            </div>
-            <Pagination
-              currentPage={data?.pagination.page || 1}
-              totalPages={data?.pagination.totalPages || 1}
-              onPageChange={(page) => setFilters({ ...filters, pageNumber: page })}
-            />
-          </>
-        )}
-      </main>
-    </div>
-  );
-};
-```
-
-### RFQ Detail & Bidding Page
-
-**Route:** `/provider/marketplace/rfq/{id}`  
-**Component:** `src/features/provider/marketplace/pages/RFQBiddingPage.tsx`
-
-**CRITICAL:** This page allows providers to submit bids.
-
-#### Layout
-- **Left Panel:** RFQ Details
-- **Right Panel:** Bidding Form
-
-#### Bidding Form
-
-**Per Line Item:**
-- Vehicle Type (read-only)
-- Quantity Required (read-only)
-- Quantity to Offer (input, ≤ quantity required)
-- Unit Price (input, with validation)
-- Notes (optional textarea)
-- Vehicle Selection (dropdown of provider's available vehicles)
-
-**Price Validation:**
-- Floor: 50% of market average
-- Ceiling: 200% of market average
-- Real-time feedback on price
-
-**Eligibility Check:**
-- Provider has enough active vehicles
-- All vehicles have valid insurance
-- Insurance covers contract period
-
-#### Implementation
-
-```typescript
-export const RFQBiddingPage = () => {
-  const { id } = useParams();
-  const { data: rfq } = useRFQ(id!);
-  const { data: vehicles } = useQuery({
-    queryKey: ['vehicles', 'active'],
-    queryFn: () => vehicleService.getActiveVehicles(),
-  });
-  const { data: marketPrices } = useQuery({
-    queryKey: ['market-prices'],
-    queryFn: () => masterDataService.getMarketPrices(),
-  });
-
-  const [lineItemBids, setLineItemBids] = useState<LineItemBid[]>([]);
-  const submitBid = useSubmitBid();
-
-  const handleBidSubmit = async () => {
-    // Validate all line items
-    for (const bid of lineItemBids) {
-      if (!bid.quantityOffered || bid.quantityOffered <= 0) {
-        toast.error(`Please specify quantity for ${bid.vehicleTypeCode}`);
-        return;
-      }
-      if (!bid.unitPrice || bid.unitPrice <= 0) {
-        toast.error(`Please specify price for ${bid.vehicleTypeCode}`);
-        return;
-      }
-
-      // Check price range
-      const priceRange = marketPrices?.[bid.vehicleTypeCode];
-      if (priceRange) {
-        if (bid.unitPrice < priceRange.floor || bid.unitPrice > priceRange.ceiling) {
-          toast.error(`Price must be between ${priceRange.floor} and ${priceRange.ceiling} ETB`);
-          return;
-        }
-      }
-
-      // Check vehicle availability
-      const availableVehicles = vehicles?.filter(v =>
-        v.vehicleTypeCode === bid.vehicleTypeCode &&
-        v.status === 'ACTIVE' &&
-        v.currentContractId === null
-      ) || [];
-      
-      if (availableVehicles.length < bid.quantityOffered) {
-        toast.error(`You only have ${availableVehicles.length} available vehicles of type ${bid.vehicleTypeCode}`);
-        return;
-      }
-    }
-
-    try {
-      await submitBid.mutateAsync({
-        rfqId: id!,
-        lineItemBids: lineItemBids.map(bid => ({
-          lineItemId: bid.lineItemId,
-          quantityOffered: bid.quantityOffered,
-          unitPrice: bid.unitPrice,
-          notes: bid.notes,
-        })),
-      });
-      toast.success('Bid submitted successfully');
-      navigate('/provider/bids');
-    } catch (error) {
-      handleApiError(error);
-    }
-  };
-
-  return (
-    <div className="grid lg:grid-cols-2 gap-6">
-      {/* RFQ Details Panel */}
-      <Card>
-        <CardHeader>
-          <CardTitle>{rfq?.title}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <p className="text-sm text-gray-600">Business</p>
-            <p className="font-medium">{rfq?.businessName}</p>
-          </div>
-          <div>
-            <p className="text-sm text-gray-600">Date Range</p>
-            <p>{formatDate(rfq?.startDate)} - {formatDate(rfq?.endDate)}</p>
-          </div>
-          <div>
-            <p className="text-sm text-gray-600">Bid Deadline</p>
-            <CountdownTimer deadline={rfq?.bidDeadline} />
-          </div>
-          <div>
-            <p className="text-sm text-gray-600">Description</p>
-            <p>{rfq?.description}</p>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Bidding Form Panel */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Submit Bid</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-6">
-            {rfq?.lineItems.map((lineItem) => {
-              const bid = lineItemBids.find(b => b.lineItemId === lineItem.id) || {
-                lineItemId: lineItem.id,
-                quantityOffered: 0,
-                unitPrice: 0,
-                notes: '',
-              };
-              const priceRange = marketPrices?.[lineItem.vehicleTypeCode];
-
-              return (
-                <Card key={lineItem.id} className="p-4">
-                  <h4 className="font-semibold mb-4">
-                    {getVehicleTypeLabel(lineItem.vehicleTypeCode)}
-                  </h4>
-                  
-                  <div className="space-y-4">
-                    <div>
-                      <p className="text-sm text-gray-600">Quantity Required</p>
-                      <p className="font-medium">{lineItem.quantityRequired}</p>
-                    </div>
-
-                    <FormField label="Quantity to Offer" required>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={lineItem.quantityRequired}
-                        value={bid.quantityOffered}
-                        onChange={(e) => {
-                          const value = parseInt(e.target.value) || 0;
-                          setLineItemBids(prev => {
-                            const updated = prev.filter(b => b.lineItemId !== lineItem.id);
-                            updated.push({ ...bid, quantityOffered: value });
-                            return updated;
-                          });
-                        }}
-                      />
-                    </FormField>
-
-                    <FormField label="Unit Price (ETB)" required>
-                      <Input
-                        type="number"
-                        min={priceRange?.floor || 0}
-                        max={priceRange?.ceiling || 100000}
-                        value={bid.unitPrice}
-                        onChange={(e) => {
-                          const value = parseFloat(e.target.value) || 0;
-                          setLineItemBids(prev => {
-                            const updated = prev.filter(b => b.lineItemId !== lineItem.id);
-                            updated.push({ ...bid, unitPrice: value });
-                            return updated;
-                          });
-                        }}
-                      />
-                      {priceRange && (
-                        <p className="text-xs text-gray-500 mt-1">
-                          Market range: {formatCurrency(priceRange.floor)} - {formatCurrency(priceRange.ceiling)} ETB
-                        </p>
-                      )}
-                    </FormField>
-
-                    <FormField label="Notes (Optional)">
-                      <Textarea
-                        value={bid.notes}
-                        onChange={(e) => {
-                          setLineItemBids(prev => {
-                            const updated = prev.filter(b => b.lineItemId !== lineItem.id);
-                            updated.push({ ...bid, notes: e.target.value });
-                            return updated;
-                          });
-                        }}
-                        rows={2}
-                      />
-                    </FormField>
-                  </div>
-                </Card>
-              );
-            })}
-
-            <Button
-              onClick={handleBidSubmit}
-              disabled={submitBid.isPending || lineItemBids.length === 0}
-              className="w-full"
-            >
-              {submitBid.isPending ? 'Submitting...' : 'Submit Bid'}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-    </div>
-  );
-};
-```
-
-### My Bids Page
-
-**Route:** `/provider/bids`  
-**Component:** `src/features/provider/bids/pages/MyBidsPage.tsx`
-
-**Features:**
-- List of all submitted bids
-- **Table Columns:**
-  - RFQ Title
-  - Line Item
-  - Quantity Offered
-  - Unit Price
-  - Total Price
-  - Status (BIDDING, AWARDED, LOST, REJECTED, WITHDRAWN)
-  - Submission Date
-- **Filters:**
-  - Status dropdown
-  - Date range
-- **Actions:**
-  - View RFQ (link)
-  - Withdraw Bid (if status is BIDDING)
+That's more than double the original guide's ~6-page footprint. The two biggest structural corrections: (1) bidding is at the **fleet/quantity level with no vehicle chosen at bid time**, and (2) vehicle assignment is a **two-phase, two-screen process** (assign to the RFQ award, then assign to the contract), both unlike the original guide's single "Vehicle Assignment Page."
 
 ---
 
-## 🚗 Fleet Management
+## Table of Contents
 
-### Vehicle List Page
-
-**Route:** `/provider/vehicles`  
-**Component:** `src/features/provider/fleet/pages/VehicleListPage.tsx`
-
-**Features:**
-- **Filters:**
-  - Status (Active, Assigned, Under Review, Maintenance, Suspended)
-  - Vehicle Type
-  - Insurance Status
-- **View Toggle:**
-  - Table view (desktop)
-  - Card view (mobile)
-- **Vehicle Cards/Table:**
-  - Plate Number
-  - Vehicle Type
-  - Brand & Model
-  - Year
-  - Insurance Status (with expiry date)
-  - Status Badge
-  - Actions: View Details, Edit, Mark as Maintenance
-
-### Vehicle Registration
-
-**Route:** `/provider/vehicles/register`  
-**Component:** `src/features/provider/fleet/pages/RegisterVehiclePage.tsx`
-
-**CRITICAL:** Multi-step form with photo upload and insurance.
-
-#### Step 1: Vehicle Information
-
-**Fields:**
-- Plate Number (required, unique, format: AA-12345)
-- Vehicle Type (dropdown, required)
-- Engine Type (dropdown, required)
-- Brand (required)
-- Model (required)
-- Model Year (required, min 2010)
-- Seat Count (required)
-- Tags (multi-select: luxury, vip, guest, service, family)
-
-#### Step 2: Photo Upload
-
-**Required Photos (5):**
-1. Front View (with visible plate)
-2. Back View
-3. Left Side
-4. Right Side
-5. Interior
-
-**Validation:**
-- Each photo required
-- File type: JPEG, PNG
-- Max size: 5MB per photo
-- Front photo must show plate number clearly
-
-#### Step 3: Insurance Information
-
-**Fields:**
-- Insurance Type (dropdown: Comprehensive, Third Party)
-- Company Name (required)
-- Policy Number (required)
-- Insured Amount (required)
-- Coverage Start Date (date picker)
-- Coverage End Date (date picker, must be > today + 30 days)
-- Certificate Upload (PDF, max 5MB)
-
-**Component:**
-
-```typescript
-export const RegisterVehiclePage = () => {
-  const [step, setStep] = useState(1);
-  const [formData, setFormData] = useState<VehicleFormData>({});
-  const [photos, setPhotos] = useState<Record<string, File>>({});
-  const registerVehicle = useRegisterVehicle();
-
-  const handleSubmit = async () => {
-    try {
-      // Step 1: Create vehicle
-      const vehicle = await vehicleService.createVehicle({
-        ...formData.vehicleInfo,
-        status: 'UNDER_REVIEW',
-      });
-
-      // Step 2: Upload photos
-      await vehicleService.uploadPhotos(vehicle.id, photos);
-
-      // Step 3: Add insurance
-      await vehicleService.addInsurance(vehicle.id, formData.insurance);
-
-      toast.success('Vehicle submitted for review');
-      navigate('/provider/vehicles');
-    } catch (error) {
-      handleApiError(error);
-    }
-  };
-
-  return (
-    <div className="max-w-4xl mx-auto space-y-6">
-      <Stepper currentStep={step} totalSteps={3} />
-      
-      {step === 1 && (
-        <VehicleInfoStep
-          data={formData.vehicleInfo}
-          onNext={(data) => {
-            setFormData({ ...formData, vehicleInfo: data });
-            setStep(2);
-          }}
-        />
-      )}
-      
-      {step === 2 && (
-        <PhotoUploadStep
-          photos={photos}
-          onPhotosChange={setPhotos}
-          onBack={() => setStep(1)}
-          onNext={() => setStep(3)}
-        />
-      )}
-      
-      {step === 3 && (
-        <InsuranceStep
-          data={formData.insurance}
-          onBack={() => setStep(2)}
-          onSubmit={(data) => {
-            setFormData({ ...formData, insurance: data });
-            handleSubmit();
-          }}
-        />
-      )}
-    </div>
-  );
-};
-```
-
-### Vehicle Detail Page
-
-**Route:** `/provider/vehicles/{id}`  
-**Component:** `src/features/provider/fleet/pages/VehicleDetailPage.tsx`
-
-**Sections:**
-1. **Basic Information** - All vehicle details
-2. **Insurance Details** - Policy info, expiry date, certificate
-3. **Photo Gallery** - All 5 photos in lightbox
-4. **Assignment History** - Past and current contracts
-5. **Actions:**
-  - Edit (if not assigned)
-  - Mark as Maintenance
-  - Delete (if not assigned and no history)
+1. [Dashboard](#1-dashboard)
+2. [Marketplace & Bidding — quantity-level, no vehicle chosen at bid time](#2-marketplace--bidding--quantity-level-no-vehicle-chosen-at-bid-time)
+3. [Fleet Management — vehicle lifecycle, not just CRUD](#3-fleet-management--vehicle-lifecycle-not-just-crud)
+4. [Contracts & the Two-Phase Vehicle Assignment](#4-contracts--the-two-phase-vehicle-assignment)
+5. [Delivery & Return](#5-delivery--return)
+6. [Direct Rental (Provider Side)](#6-direct-rental-provider-side)
+7. [Wallet, Settlements & Invoices](#7-wallet-settlements--invoices)
+8. [Profile, Settings, Notifications, Trust Score](#8-profile-settings-notifications-trust-score)
+9. [Divergences From the Original Guide](#9-divergences-from-the-original-guide)
 
 ---
 
-## 📦 Contract & Delivery
+## 1. Dashboard
 
-### Contract List Page
+**Route:** `/provider/dashboard` · **Component:** `src/features/provider/pages/dashboard/ProviderDashboard.tsx`
 
-**Route:** `/provider/contracts`  
-**Component:** `src/features/provider/contracts/pages/ContractListPage.tsx`
-
-**Tabs:**
-- Pending Assignment
-- Active
-- Completed
-
-**Contract Cards:**
-- Contract Number
-- Business Name
-- Line Items Summary
-- Status Badge
-- Actions: Assign Vehicles (if pending), View Details
-
-### Vehicle Assignment Page
-
-**Route:** `/provider/contracts/{id}/assign`  
-**Component:** `src/features/provider/contracts/pages/VehicleAssignmentPage.tsx`
-
-**CRITICAL:** This page allows providers to assign vehicles to contract line items.
-
-#### Layout
-- **Left Panel:** Required Vehicles (from contract)
-  - Table: Vehicle Type, Quantity Needed, Quantity Assigned
-- **Right Panel:** Available Fleet
-  - Filterable by Vehicle Type
-  - Table: Plate Number, Type, Model, Status
-  - Checkbox selection
-
-#### Implementation
-
-```typescript
-export const VehicleAssignmentPage = () => {
-  const { id } = useParams();
-  const { data: contract } = useContract(id!);
-  const { data: vehicles } = useQuery({
-    queryKey: ['vehicles', 'available'],
-    queryFn: () => vehicleService.getAvailableVehicles(),
-  });
-
-  const [assignments, setAssignments] = useState<Map<string, string[]>>(new Map());
-  const assignMutation = useAssignVehicle();
-
-  const handleAssign = async () => {
-    const assignmentRequests: AssignmentRequest[] = [];
-    
-    assignments.forEach((vehicleIds, lineItemId) => {
-      vehicleIds.forEach((vehicleId) => {
-        assignmentRequests.push({
-          contractId: id!,
-          contractLineItemId: lineItemId,
-          vehicleId,
-        });
-      });
-    });
-
-    try {
-      await assignMutation.mutateAsync(assignmentRequests);
-      toast.success('Vehicles assigned successfully');
-      navigate(`/provider/contracts/${id}`);
-    } catch (error) {
-      handleApiError(error);
-    }
-  };
-
-  return (
-    <div className="grid lg:grid-cols-2 gap-6">
-      {/* Required Vehicles */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Required Vehicles</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Vehicle Type</TableHead>
-                <TableHead>Required</TableHead>
-                <TableHead>Assigned</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {contract?.lineItems.map((lineItem) => {
-                const assigned = assignments.get(lineItem.id)?.length || 0;
-                const isComplete = assigned >= lineItem.quantityAwarded;
-                
-                return (
-                  <TableRow key={lineItem.id} className={isComplete ? 'bg-green-50' : ''}>
-                    <TableCell>{getVehicleTypeLabel(lineItem.vehicleTypeCode)}</TableCell>
-                    <TableCell>{lineItem.quantityAwarded}</TableCell>
-                    <TableCell>
-                      <span className={isComplete ? 'text-green-600 font-semibold' : ''}>
-                        {assigned} / {lineItem.quantityAwarded}
-                      </span>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        </CardContent>
-      </Card>
-
-      {/* Available Fleet */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Available Fleet</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-4">
-            {contract?.lineItems.map((lineItem) => {
-              const availableVehicles = vehicles?.filter(v =>
-                v.vehicleTypeCode === lineItem.vehicleTypeCode &&
-                v.status === 'ACTIVE' &&
-                v.currentContractId === null
-              ) || [];
-
-              return (
-                <div key={lineItem.id} className="border rounded p-4">
-                  <h4 className="font-semibold mb-2">
-                    {getVehicleTypeLabel(lineItem.vehicleTypeCode)}
-                  </h4>
-                  <div className="space-y-2">
-                    {availableVehicles.map((vehicle) => {
-                      const isSelected = assignments.get(lineItem.id)?.includes(vehicle.id);
-                      
-                      return (
-                        <label
-                          key={vehicle.id}
-                          className="flex items-center p-2 border rounded cursor-pointer hover:bg-gray-50"
-                        >
-                          <Checkbox
-                            checked={isSelected || false}
-                            onCheckedChange={(checked) => {
-                              setAssignments((prev) => {
-                                const newMap = new Map(prev);
-                                const current = newMap.get(lineItem.id) || [];
-                                if (checked) {
-                                  newMap.set(lineItem.id, [...current, vehicle.id]);
-                                } else {
-                                  newMap.set(lineItem.id, current.filter(id => id !== vehicle.id));
-                                }
-                                return newMap;
-                              });
-                            }}
-                            disabled={
-                              !isSelected &&
-                              (assignments.get(lineItem.id)?.length || 0) >= lineItem.quantityAwarded
-                            }
-                          />
-                          <span className="ml-2">
-                            {vehicle.plateNumber} - {vehicle.brand} {vehicle.model}
-                          </span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </CardContent>
-      </Card>
-
-      <div className="lg:col-span-2 flex justify-end">
-        <Button onClick={handleAssign} disabled={assignMutation.isPending}>
-          Assign Vehicles
-        </Button>
-      </div>
-    </div>
-  );
-};
-```
-
-### Delivery Session Flow
-
-**Route:** `/provider/delivery/{sessionId}`  
-**Component:** `src/features/provider/delivery/pages/DeliverySessionPage.tsx`
-
-**CRITICAL:** Multi-step OTP verification and handover evidence flow.
-
-#### Step 1: Generate OTP
-
-```typescript
-export const DeliveryOTPStep = ({ sessionId, onOTPGenerated }) => {
-  const generateOTP = useMutation({
-    mutationFn: () => deliveryService.generateOTP(sessionId),
-  });
-
-  const handleGenerate = async () => {
-    try {
-      const result = await generateOTP.mutateAsync();
-      toast.success('OTP sent to business contact');
-      onOTPGenerated(result.otp);
-    } catch (error) {
-      handleApiError(error);
-    }
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Generate OTP</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="mb-4">
-          Click the button below to generate and send OTP to the business contact.
-          The OTP will also be displayed here for you to verify.
-        </p>
-        <Button onClick={handleGenerate} disabled={generateOTP.isPending}>
-          {generateOTP.isPending ? 'Generating...' : 'Generate & Send OTP'}
-        </Button>
-      </CardContent>
-    </Card>
-  );
-};
-```
-
-#### Step 2: OTP Verification
-
-```typescript
-export const OTPVerificationStep = ({ sessionId, otp, onVerified }) => {
-  const [otpCode, setOtpCode] = useState(['', '', '', '', '', '']);
-  const verifyOTP = useMutation({
-    mutationFn: (code: string) => deliveryService.verifyOTP(sessionId, code),
-  });
-
-  const handleVerify = async () => {
-    const code = otpCode.join('');
-    if (code.length !== 6) {
-      toast.error('Please enter 6-digit OTP');
-      return;
-    }
-
-    try {
-      await verifyOTP.mutateAsync(code);
-      toast.success('OTP verified successfully');
-      onVerified();
-    } catch (error: any) {
-      if (error.response?.data?.error?.code === 'INVALID_OTP') {
-        toast.error(`Invalid OTP. ${error.response.data.error.details.attemptsRemaining} attempts remaining`);
-      } else {
-        handleApiError(error);
-      }
-    }
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Verify OTP</CardTitle>
-      </CardHeader>
-      <CardContent>
-        <p className="mb-4">
-          Enter the 6-digit OTP that was sent to the business contact.
-          Ask them to share the OTP with you.
-        </p>
-        <div className="flex gap-2 justify-center mb-4">
-          {otpCode.map((digit, index) => (
-            <Input
-              key={index}
-              type="text"
-              maxLength={1}
-              value={digit}
-              onChange={(e) => {
-                const value = e.target.value.replace(/\D/g, '');
-                setOtpCode(prev => {
-                  const updated = [...prev];
-                  updated[index] = value;
-                  return updated;
-                });
-                // Auto-focus next input
-                if (value && index < 5) {
-                  document.getElementById(`otp-${index + 1}`)?.focus();
-                }
-              }}
-              className="w-12 h-12 text-center text-2xl"
-              id={`otp-${index}`}
-            />
-          ))}
-        </div>
-        <Button onClick={handleVerify} className="w-full" disabled={verifyOTP.isPending}>
-          {verifyOTP.isPending ? 'Verifying...' : 'Verify OTP'}
-        </Button>
-      </CardContent>
-    </Card>
-  );
-};
-```
-
-#### Step 3: Handover Evidence Upload
-
-```typescript
-export const HandoverEvidenceStep = ({ sessionId, onComplete }) => {
-  const [photos, setPhotos] = useState<Record<string, File>>({});
-  const [odometerReading, setOdometerReading] = useState('');
-  const [fuelLevel, setFuelLevel] = useState<'EMPTY' | 'QUARTER' | 'HALF' | 'THREE_QUARTERS' | 'FULL'>('FULL');
-  const [notes, setNotes] = useState('');
-  
-  const uploadEvidence = useMutation({
-    mutationFn: (data: HandoverEvidence) => deliveryService.uploadHandoverEvidence(sessionId, data),
-  });
-
-  const handleSubmit = async () => {
-    // Validate all photos uploaded
-    const requiredPhotos = ['front', 'back', 'left', 'right', 'interior'];
-    const missing = requiredPhotos.filter(key => !photos[key]);
-    if (missing.length > 0) {
-      toast.error(`Please upload all required photos: ${missing.join(', ')}`);
-      return;
-    }
-
-    try {
-      await uploadEvidence.mutateAsync({
-        photos,
-        odometerReading: parseInt(odometerReading),
-        fuelLevel,
-        notes,
-      });
-      toast.success('Handover evidence uploaded successfully');
-      onComplete();
-    } catch (error) {
-      handleApiError(error);
-    }
-  };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Upload Handover Evidence</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        <div className="grid md:grid-cols-2 gap-4">
-          {['front', 'back', 'left', 'right', 'interior'].map((position) => (
-            <div key={position}>
-              <label className="block text-sm font-medium mb-2 capitalize">
-                {position} View {position === 'front' && '(with plate visible)'}
-              </label>
-              {photos[position] ? (
-                <div className="relative">
-                  <img
-                    src={URL.createObjectURL(photos[position])}
-                    alt={position}
-                    className="w-full h-32 object-cover rounded"
-                  />
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="absolute top-2 right-2"
-                    onClick={() => {
-                      setPhotos(prev => {
-                        const updated = { ...prev };
-                        delete updated[position];
-                        return updated;
-                      });
-                    }}
-                  >
-                    <X className="h-4 w-4" />
-                  </Button>
-                </div>
-              ) : (
-                <FileUpload
-                  onFileSelect={(file) => setPhotos(prev => ({ ...prev, [position]: file }))}
-                  accept="image/jpeg,image/png"
-                  maxSize={5 * 1024 * 1024}
-                />
-              )}
-            </div>
-          ))}
-        </div>
-
-        <div className="grid md:grid-cols-2 gap-4">
-          <FormField label="Odometer Reading" required>
-            <Input
-              type="number"
-              value={odometerReading}
-              onChange={(e) => setOdometerReading(e.target.value)}
-              placeholder="Enter odometer reading"
-            />
-          </FormField>
-
-          <FormField label="Fuel Level" required>
-            <Select value={fuelLevel} onValueChange={setFuelLevel}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="EMPTY">Empty</SelectItem>
-                <SelectItem value="QUARTER">1/4 Full</SelectItem>
-                <SelectItem value="HALF">1/2 Full</SelectItem>
-                <SelectItem value="THREE_QUARTERS">3/4 Full</SelectItem>
-                <SelectItem value="FULL">Full</SelectItem>
-              </SelectContent>
-            </Select>
-          </FormField>
-        </div>
-
-        <FormField label="Notes (Optional)">
-          <Textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Any damage or condition notes..."
-            rows={3}
-          />
-        </FormField>
-
-        <Button onClick={handleSubmit} className="w-full" disabled={uploadEvidence.isPending}>
-          {uploadEvidence.isPending ? 'Uploading...' : 'Submit Handover Evidence'}
-        </Button>
-      </CardContent>
-    </Card>
-  );
-};
-```
+Stat cards, a recommended-RFQs list, an account-status banner (pending approval / verified / suspended, via `mapAccountStatus`), and a real analytics chart (`recharts` bar chart) driven by a date-range picker (`useProviderDashboardAnalytics`). Two action-item counters are pulled from `providerFleetCapacityService.getActionItems()` and surfaced prominently — **awards needing vehicle assignment** and **Direct Rental requests with a fleet-capacity conflict** — both concepts the original guide never had, because both depend on the fleet-capacity engine described in §3/§4/§6.
 
 ---
 
-## 💰 Wallet & Settlements
+## 2. Marketplace & Bidding — quantity-level, no vehicle chosen at bid time
 
-### Wallet Dashboard
+**This is the single biggest correction to the original guide**, which modeled bidding with a per-line-item **vehicle selection dropdown** at bid time. The real system never asks a provider to pick a specific vehicle when bidding — that happens later, after award (§4).
 
-**Route:** `/provider/wallet`  
-**Component:** `src/features/provider/wallet/pages/WalletPage.tsx`
+### Browse
 
-**Features:**
-- **Summary Cards:**
-  - Total Earnings (lifetime)
-  - Available Balance (withdrawable)
-  - Pending Settlement (in active contracts)
-- **Transaction History Table**
-- **Settlement History Link**
+**Route:** `/provider/marketplace` · **Component:** `MarketplacePage.tsx` (+ `RFQCard.tsx`) — filters by vehicle type, duration, location, free-text search; sort by newest/oldest/most-bids/least-bids; paginated. Broadly matches the original guide's intent.
 
-### Settlement History
+### RFQ Detail & Bid Submission
 
-**Route:** `/provider/wallet/settlements`  
-**Component:** `src/features/provider/wallet/pages/SettlementHistoryPage.tsx`
+**Route:** `/provider/marketplace/:id` → `RFQDetailPage.tsx`, then **`/provider/marketplace/:id/bid/:lineItemId`** → `BidSubmissionPage.tsx` (also reused for editing, at `.../edit/:bidId`).
 
-**Table Columns:**
-- Period (Month/Year)
-- Gross Amount
-- Commission Deducted
-- Penalties
-- Net Payout
-- Status
-- Payout Date
+Real bid form fields (`bidSchema` in `BidSubmissionPage.tsx`): `quantity`, `unitPrice`, optional `notes`, and a required `termsAccepted` checkbox. **There is no vehicle-selection field.** Instead, the page:
+- Counts the provider's **active fleet vehicles matching the line item's vehicle-type + fuel-type segment** (`vehicleMatchesSegment`, normalized via `FuelTypeNormalizer`) and shows that count.
+- Computes `maxBiddableQuantity = min(remainingSlots, activeFleetCount)` — the provider literally cannot offer more than they have matching, unassigned vehicles for.
+- Renders a `SegmentCapacityMeter` and `SegmentChip` (from `src/features/provider/components/`) showing how much of that vehicle-type/fuel segment is already committed to other bids/awards/Direct Rental requests — this is the fleet-capacity engine, shared across RFQ bidding and Direct Rental (see §6), and it is completely absent from the original guide.
+- Requires the provider to be `VERIFIED` (`isProviderVerified`) and have at least one matching active vehicle (`canBid`) before submitting.
 
-**Details Modal:**
-- Breakdown per contract
-- Commission calculation
-- Penalty details
+### My Bids
 
-### Trust Score Display
-
-**Component:** `src/features/provider/profile/components/TrustScoreDisplay.tsx`
-
-**Features:**
-- Circular gauge (0-100)
-- Current Score
-- Tier Badge
-- Score Breakdown:
-  - Completion Rate (30%)
-  - On-Time Delivery (25%)
-  - Reliability (20%)
-  - Quality/Ratings (15%)
-  - Dispute History (10%)
-- Historical Chart (score over time)
+**Route:** `/provider/bids` · **Component:** `MyBidsPage.tsx` — table with status filter (`ALL` plus the real bid-status set), date range, vehicle-type/fuel-type multi-select, search; actions include **View RFQ**, **Edit Bid** (real — providers, not businesses, can edit their own bid's quantity/price/notes while it's still open), and **Withdraw Bid**. The page also cross-references `providerFleetCapacityService.getActionItems()` to badge any bid whose award still needs vehicle assignment (`assignmentByBidId` map) — a direct link into §4's `AwardAssignPage`.
 
 ---
 
-## ⚙️ Profile & Settings
+## 3. Fleet Management — vehicle lifecycle, not just CRUD
 
-### Profile Page
+### List & Add/Edit
 
-**Route:** `/provider/profile`  
-**Component:** `src/features/provider/profile/ProfilePage.tsx`
+**Routes:** `/provider/fleet` (`FleetListPage.tsx`), `/provider/fleet/add` and `/provider/fleet/:id/edit` (both `AddVehiclePage.tsx`), `/provider/fleet/:id` (`VehicleDetailPage.tsx`), `/provider/fleet/capacity` (`FleetCapacityOverviewPage.tsx` — platform-wide view of how the provider's whole fleet is split across RFQ commitments vs. Direct Rental vs. available, entirely absent from the original guide).
 
-**Tabs:**
-1. **Details** - Provider information
-2. **Trust Score** - Score breakdown and history
-3. **Documents** - Uploaded documents
-4. **Settings** - Notification preferences
+`AddVehiclePage.tsx` is a **4-tab flow**, not the original guide's 3-step wizard: **Vehicle Info → Photos → Insurance → Documents**. The Photos/Insurance/Documents tabs are disabled until the vehicle record is first created from the Vehicle Info tab (`disabled={!vehicleCreated}`) — vehicle creation happens incrementally, tab by tab, with a save action per tab, not one final multi-step submit. Real fields:
+- **Vehicle Info:** plate number, make, model, year (≥2000), color, vehicle type, fuel type (Petrol/Diesel/Electric/Hybrid), seat capacity (1–100), optional VIN.
+- **Photos:** 5 required angles — front (plate visible), back, left, right, interior.
+- **Insurance:** policy number, insurance company, coverage type, coverage amount, start date, expiry date (must be future).
+- **Documents:** a distinct tab from Insurance — real document types are `VEHICLE_REGISTRATION` (Libre), `VEHICLE_INSURANCE`, and `BOLO_PLATE` (number-plate certificate), all required. The original guide only had a single "insurance certificate upload" step; the real document set is broader and Ethiopia-specific.
 
-**Tier Display:**
-- Current tier badge (BRONZE, SILVER, GOLD, PLATINUM)
-- Tier benefits listed
-- Progress to next tier
-- Commission rate display
+### Vehicle Detail — direct rental toggle and lifecycle
 
----
+**Route:** `/provider/fleet/:id` · **Component:** `VehicleDetailPage.tsx`. Beyond photos/insurance/assignment-history (which the original guide anticipated), this page also:
+- Lets the provider set a **daily rental rate** and **toggle Direct Rental on/off** for this specific vehicle (`directRentalService.setVehicleRentalRate`/`enableDirectRental`/`disableDirectRental`) — this is Direct Rental Story 21.1, entirely new territory vs. the original guide.
+- Shows a **commitment label** ("On contract" / "On RFQ award" / "Available") computed from `providerFleetCapacityService.getCapacitySnapshot()` — i.e., the UI actively tells the provider whether a vehicle is tied up before they try to enable it for Direct Rental or bid with it elsewhere.
+- Vehicle status values go beyond the original guide's `Active/Assigned/Maintenance`: the real lifecycle (driven from the contract vehicle-card actions, see §4/§5) includes `ASSIGNED`, `DELIVERED`, `RETURNED`, `REPLACED`, and `MAINTENANCE`.
 
-## ✅ User Stories Summary
+### Maintenance, Replace, Remove (contract-scoped vehicle lifecycle)
 
-### Epic 6: Fleet Management (12 stories)
-- MOV-601: Register Vehicle ⭐ Highest Priority
-- MOV-602: View Vehicle List
-- MOV-603: Edit Vehicle Information
-- MOV-604: Upload Vehicle Photos
-- MOV-605: Add/Update Insurance
-- And 7 more...
-
-### Epic 7: Marketplace & Bidding (10 stories)
-- MOV-701: Browse Marketplace RFQs ⭐ Highest Priority
-- MOV-702: Submit Bid ⭐ Highest Priority
-- MOV-703: View My Bids
-- MOV-704: Withdraw Bid
-- And 6 more...
-
-### Epic 8: Delivery & OTP (8 stories)
-- MOV-801: Assign Vehicles to Contract ⭐ Highest Priority
-- MOV-802: Generate OTP ⭐ Highest Priority
-- MOV-803: Verify OTP ⭐ Highest Priority
-- MOV-804: Upload Handover Evidence ⭐ Highest Priority
-- And 4 more...
-
-### Epic 9: Wallet & Settlements (7 stories)
-- MOV-901: View Wallet Balance
-- MOV-902: View Settlement History
-- MOV-903: View Trust Score
-- And 4 more...
+These live as dialogs launched from the **contract detail page's Vehicles tab**, not the fleet pages — a vehicle's lifecycle while it's on an active contract is managed from the contract, not from Fleet:
+- **`MaintenanceDialog.tsx`** — marks a specific contract-vehicle assignment for maintenance with a required reason (`contractService.markVehicleMaintenance`).
+- **`ReplaceVehicleDialog.tsx`** — swaps an assigned vehicle for another of the provider's available vehicles of the same type, with a required reason (`contractService.replaceVehicle({ oldVehicleId, newVehicleId, reason })`).
+- **`ReturnVehicleDialog.tsx`** — initiates an early return (`contractService.initiateReturn`); the response can carry a **`noticeRequired`** flag with an `earliestReturnDate` — a real early-return-notice mechanic (`EarlyReturnNotice` entity on the backend) not in the original guide.
+- **`RemoveVehicleDialog.tsx`** — removes a not-yet-delivered vehicle assignment outright.
 
 ---
 
-## 🔍 Marketplace Filter Implementation
+## 4. Contracts & the Two-Phase Vehicle Assignment
 
-### Filter State Management
+**Routes:** `/provider/contracts` (`ProviderContractListPage.tsx`), `/provider/contracts/:id` (shared `ContractDetailPage.tsx`), `/provider/contracts/:id/assign` (`AssignVehiclesPage.tsx`), `/provider/contracts/:id/terms-preview`, `/provider/contracts/:id/delivery`.
 
-```typescript
-interface MarketplaceFilters {
-  vehicleTypes: string[];      // Multi-select
-  duration: 'SHORT' | 'LONG' | 'ALL';
-  location: string;            // City code
-  search: string;             // Title search
-  pageNumber: number;
-  pageSize: number;
-}
+### List
 
-// Filter component
-export const MarketplaceFilters = ({ filters, onFiltersChange }) => {
-  const handleVehicleTypeToggle = (type: string) => {
-    const updated = filters.vehicleTypes.includes(type)
-      ? filters.vehicleTypes.filter(t => t !== type)
-      : [...filters.vehicleTypes, type];
-    onFiltersChange({ ...filters, vehicleTypes: updated, pageNumber: 1 });
-  };
+Status filter covers the real ~15-value set (`PENDING_ESCROW, PENDING_VEHICLE_ASSIGNMENT` labeled "Needs Action", `PENDING_SIGNING, SIGNED, PENDING_ACTIVATION, PENDING_DELIVERY, PARTIALLY_DELIVERED, PARTIALLY_RETURNED, ACTIVE, ON_HOLD, COMPLETED, TERMINATED, CANCELLED, DISPUTED, TIMEOUT_PENDING`), plus business/vehicle-type/fuel-type/date filters — not the original guide's 3-tab `Pending Assignment/Active/Completed`.
 
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Filters</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div>
-          <h4 className="font-semibold mb-2">Vehicle Type</h4>
-          <div className="space-y-2">
-            {vehicleTypes.map((type) => (
-              <label key={type.code} className="flex items-center">
-                <Checkbox
-                  checked={filters.vehicleTypes.includes(type.code)}
-                  onCheckedChange={() => handleVehicleTypeToggle(type.code)}
-                />
-                <span className="ml-2">{type.label}</span>
-              </label>
-            ))}
-          </div>
-        </div>
+### Phase 1 — assign vehicles to the RFQ award (before a contract vehicle-assignment ever happens)
 
-        <div>
-          <h4 className="font-semibold mb-2">Duration</h4>
-          <RadioGroup value={filters.duration} onValueChange={(value) => 
-            onFiltersChange({ ...filters, duration: value as any, pageNumber: 1 })
-          }>
-            <div className="space-y-2">
-              <label className="flex items-center">
-                <RadioGroupItem value="SHORT" />
-                <span className="ml-2">Short-term (&lt; 7 days)</span>
-              </label>
-              <label className="flex items-center">
-                <RadioGroupItem value="LONG" />
-                <span className="ml-2">Long-term (≥ 30 days)</span>
-              </label>
-              <label className="flex items-center">
-                <RadioGroupItem value="ALL" />
-                <span className="ml-2">All</span>
-              </label>
-            </div>
-          </RadioGroup>
-        </div>
+**Route:** `/provider/bids/:bidId/assign` · **Component:** `AwardAssignPage.tsx` (+ `rfqAwardService`). This is reached from **My Bids**, not from Contracts. Because bidding is quantity-only (§2), once a bid is awarded — possibly split across multiple providers per line item — each provider must link specific fleet units to their award before those units count as committed. The page shows one tab per award needing assignment, an alert with the total remaining-vehicle count across all awards, and per-award vehicle pickers. This step exists specifically so the shared fleet-capacity engine (§2, §6) can track commitments **before** a contract-level vehicle assignment ever happens.
 
-        <FormField label="Location">
-          <Select
-            value={filters.location}
-            onValueChange={(value) => onFiltersChange({ ...filters, location: value, pageNumber: 1 })}
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select city" />
-            </SelectTrigger>
-            <SelectContent>
-              {cities.map((city) => (
-                <SelectItem key={city.code} value={city.code}>
-                  {city.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </FormField>
+### Phase 2 — assign vehicles to the contract itself
 
-        <FormField label="Search">
-          <Input
-            value={filters.search}
-            onChange={(e) => onFiltersChange({ ...filters, search: e.target.value, pageNumber: 1 })}
-            placeholder="Search by title..."
-          />
-        </FormField>
+**Route:** `/provider/contracts/:id/assign` · **Component:** `AssignVehiclesPage.tsx`. This is the step that actually moves a contract out of `PENDING_VEHICLE_ASSIGNMENT` — for each contract line item still needing vehicles, the provider selects from their available fleet (already filtered to exclude anything already assigned in this contract) up to the remaining quantity, then submits a **batch assignment** (`contractService.assignVehicle({ contractId, lineItemId, vehicleIds, driverName, driverPhone })` — driver fields exist in the payload but aren't collected by this screen's UI yet). Once every line item is fully assigned, the contract can proceed to the dual-party OTP e-signature step (`PENDING_SIGNING`) described in `BUSINESS_PORTAL_GUIDE.md` §4.
 
-        <Button
-          variant="outline"
-          onClick={() => onFiltersChange({
-            vehicleTypes: [],
-            duration: 'ALL',
-            location: '',
-            search: '',
-            pageNumber: 1,
-            pageSize: 20,
-          })}
-          className="w-full"
-        >
-          Clear Filters
-        </Button>
-      </CardContent>
-    </Card>
-  );
-};
-```
+**Correction to an earlier reading of this pattern:** this is genuinely a two-step, two-screen flow (award-level assignment, then contract-level assignment) — not a single "Vehicle Assignment Page" as the original guide assumed, and not something the provider can skip by picking vehicles at bid time.
+
+### Contract detail — provider-specific actions
+
+On the shared `ContractDetailPage.tsx`, provider-only affordances include: **Assign Vehicles** (when the contract still needs them), **Reset Vehicle Assignments** (destructive — clears all assignments and returns the contract to `PENDING_VEHICLE_ASSIGNMENT`), and **Request Extension** (currently a stub — `toast.info('Extension request feature coming soon')`; extension is business-initiated only, see `BUSINESS_PORTAL_GUIDE.md` §4). Vehicle cards on the Vehicles tab expose the maintenance/replace/return/remove dialogs from §3, each gated on vehicle status and checklist status.
 
 ---
 
-## 🧪 Testing Scenarios
+## 5. Delivery & Return
 
-### Marketplace
-- ✅ Browse RFQs with filters
-- ✅ Search by title
-- ✅ Sort by different criteria
-- ✅ Save RFQ (bookmark)
-- ✅ Submit bid
-- ✅ Validate price range
-- ✅ Validate vehicle availability
-
-### Vehicle Registration
-- ✅ Register vehicle with all required fields
-- ✅ Upload all 5 photos
-- ✅ Add insurance information
-- ✅ Validate insurance expiry date
-- ✅ Submit for review
-
-### Delivery Flow
-- ✅ Generate OTP
-- ✅ Verify OTP (success)
-- ✅ Verify OTP (invalid, retry)
-- ✅ Upload handover evidence
-- ✅ Complete delivery
+**Route:** `/provider/contracts/:id/delivery` · **Component:** `ProviderDeliveryPage.tsx`. Per assigned vehicle, the provider fills a delivery checklist, then requests a **delivery OTP** (`deliveryService.requestDeliveryConfirmation`/`generateOTP`) which the business must relay back for verification (`verifyOTP`) — this confirms the vehicle as `DELIVERED`. Returns are a **separate, parallel flow**: once a vehicle is `DELIVERED`, either party can initiate a return session; the provider views the return checklist the business submits and, once approved, the OTP exchange repeats for the return leg. Both OTP flows are real, distinct instances of the same mechanism — one for delivery, one for return — not a single "OTP verification" step as the original guide's single-OTP delivery flow assumed. Codes are never returned in any API response body (by design, per a "not exposed for security" comment in the backend) — the provider must always ask the counterparty to read the OTP aloud/type it in, exactly as the original guide's UX assumed, just with two independent occurrences instead of one.
 
 ---
 
-**END OF PROVIDER PORTAL GUIDE**
+## 6. Direct Rental (Provider Side)
 
-*For Business Portal, see [BUSINESS_PORTAL_GUIDE.md](./BUSINESS_PORTAL_GUIDE.md)*  
-*For API details, see [API_INTEGRATION_SPEC.md](./API_INTEGRATION_SPEC.md)*
+**Entirely absent from the original guide.** A fixed-price, non-bidding booking channel parallel to RFQ bidding (see `BUSINESS_PORTAL_GUIDE.md` §6 and `backlog/post-mvp/epic-21-direct-rental.md` for the full picture).
 
+| Route | Component |
+|---|---|
+| `/provider/direct-rental/requests` | `ProviderRequestsPage.tsx` |
+| `/provider/direct-rental/requests/:id/respond` | `ProviderRequestResponsePage.tsx` |
+
+`ProviderRequestResponsePage.tsx` is the real vehicle-level accept/reject screen: for every vehicle in the request, the provider picks accept/reject (defaulting to accept) with a required rejection reason (≥5 chars) per rejected vehicle, or a request-level reason (≥10 chars) if rejecting everything. If the request is `isAllOrNone`, accepting any vehicle commits to accepting all.
+
+**Fleet-capacity conflict checking is real and visible here, not just in the backend:** before the provider submits their response, the page calls `directRentalService.getAcceptPreview(id)` (debounced 400ms after each response change) and renders **`FleetCapacityConflictSheet.tsx`** with conflict codes per vehicle — `DR_ACCEPT_AWARD_NOT_FULLY_ASSIGNED`, `DR_ACCEPT_VEHICLE_ON_AWARD`, `DR_ACCEPT_BID_CAPACITY` — sourced from the same `IProviderFleetCapacityService` the RFQ bidding flow uses (§2). This preview is advisory; the real gate is re-enforced server-side at submit time, so a false "safe to accept" is possible if the preview and submit-time checks ever drift (a risk called out explicitly in the epic doc).
+
+Accepted/partially-accepted requests auto-create a contract (`Contract.SourceType = DIRECT_RENTAL`) with vehicle assignments **pre-created from the accepted vehicles** — unlike the RFQ path, Direct Rental contracts skip the two-phase vehicle-assignment dance in §4 entirely, because the specific vehicles were already chosen at accept time.
+
+---
+
+## 7. Wallet, Settlements & Invoices
+
+| Route | Component |
+|---|---|
+| `/provider/wallet` | `ProviderWalletPage.tsx` |
+| `/provider/wallet/settlements` | `ProviderSettlementsPage.tsx` |
+| `/provider/wallet/settlements/:payoutId` | `SettlementDetailPage.tsx` |
+| `/provider/wallet/invoices` | `ProviderInvoicesPage.tsx` |
+| `/provider/wallet/invoices/:id` | `ProviderInvoiceDetailPage.tsx` |
+
+`ProviderWalletPage.tsx` balance cards: **Available Balance**, **Pending Withdrawal**, **Total Earned (This Month)** — withdrawal-only (no deposit action; providers don't fund a wallet the way businesses do), transaction types `SETTLEMENT, WITHDRAWAL, FEE`. Settlement history is its **own dedicated route with a detail page per payout**, not just a modal breakdown as the original guide sketched. **Invoices are a wholly separate, real feature the original guide never mentioned**: the platform's invoice model is **provider-submitted, admin-reviewed** (inverting the assumption that the system just auto-generates an invoice for the provider to view) — `ProviderInvoicesPage.tsx`/`ProviderInvoiceDetailPage.tsx` are where a provider submits and tracks these, and `ADMIN_PORTAL_GUIDE.md` §10 is where they get approved.
+
+Settlement cadence: be aware the coverage audit found **two backend code paths disagreeing** on whether settlement cadence is tier-based (Bronze/Silver monthly, Gold bi-weekly, Platinum weekly) or a flat rolling 30-day cycle per contract — this was not reconciled as of the audit date, so don't treat either description as fully authoritative without checking `GenerateSettlementCommand*.cs` directly.
+
+---
+
+## 8. Profile, Settings, Notifications, Trust Score
+
+**Routes:** `/provider/profile` (`ProfilePage.tsx`), `/provider/settings` (`SettingsPage.tsx`), `/provider/notifications` (`NotificationsPage.tsx`).
+
+`ProfilePage.tsx` has the same **seven-tab shape** as the business portal (§ProfilePage in `BUSINESS_PORTAL_GUIDE.md`): **Basic Info, Contact Person, Documents, Bank Account, Preferences, Security, Sessions** — not the original guide's four tabs (Details/Trust Score/Documents/Settings). Bank-account management on the provider side uses **dual-OTP** (email + phone) per the coverage audit, a detail the original guide didn't anticipate.
+
+**Trust score is real, formula-based, and visible to the provider on their own dashboard/profile** — directly contradicting the original guide's (and the epic backlog's) assumption that trust score is admin/business-facing only. The formula (`TrustScoreCalculator.cs`, backend): `Base(50 if verified / 0 if not) + CompletionRate×20 + OnTimeRate×20 − NoShowRate×30 + RejectionPenalty`, mapped to a tier (Bronze/Silver/Gold/Platinum) that drives commission rate. **Important caveat found in the coverage audit's rewrite pass:** this formula has **zero production call sites** — no event handler anywhere calls it, so in practice every provider's trust score is frozen at its registration-time default (50) unless an admin manually reassigns a tier. Don't assume the score shown in the UI is live-updating from contract performance; today it is not wired up end-to-end, even though the UI component that renders it is fully built.
+
+Seeded commission rates by tier: Bronze 10%, Silver 8%, Gold 6%, Platinum 5% — there is no "Red Zone" tier in code, despite that appearing in some business-overview material; treat the tier/commission numbers in this doc as the ones to trust.
+
+---
+
+## 9. Divergences From the Original Guide
+
+- **Bidding is quantity + price only — no vehicle selection at bid time.** Vehicle assignment happens in two later phases (award-assign, then contract-assign). See §2, §4.
+- **A shared fleet-capacity engine** (`SegmentCapacityMeter`, `FleetCapacityConflictSheet`, `providerFleetCapacityService`) cross-checks RFQ bids/awards against Direct Rental commitments by vehicle-type+fuel segment — entirely new territory, touching the marketplace, fleet, contracts, and Direct Rental areas alike.
+- **Vehicle registration is a 4-tab incremental flow** (Vehicle Info → Photos → Insurance → Documents, each gated on the previous being saved), not a single 3-step wizard submitted once at the end.
+- **Vehicle lifecycle actions (maintenance/replace/return/remove) live on the contract detail page**, not on the Fleet pages, and include a real early-return-notice mechanic.
+- **Two distinct OTP flows exist** — delivery and return — not one.
+- **Direct Rental (§6)** is a whole parallel acquisition channel with its own fleet-capacity-aware accept/reject screen.
+- **Invoices are provider-submitted, not system-generated** — a real, separate feature from Settlements.
+- **Trust score is provider-visible** but **not actually wired to live events** — the UI is real, the backend recalculation is not, per the coverage audit.
+- **Profile has 7 tabs including Bank Account (dual-OTP) and Sessions**, not 4.
+
+For the epic-level status of every area above, see `project-docs/18_Implementation_Coverage_Audit.md`, particularly §4 (RFQ/Bidding), §5 (Trust/Risk Scoring), §7.1 (Direct Rental), and §10.2/§10.3 (trust-score wiring and post-award-assignment corrections from the rewrite pass).

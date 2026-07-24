@@ -1,1593 +1,203 @@
 # Movello MVP - Settlement Processing Specification
-## Complete Settlement Triggers, Calculations & Workflows - Version 1.0
+## Settlement Triggers, Calculations & Workflows — As Implemented
 
-**Document Status:** AUTHORITATIVE  
-**Date:** December 22, 2025  
-**Related Documents:** 
-- MVP_AUTHORITATIVE_BUSINESS_RULES.md
-- MVP_EVENT_CATALOG_AND_HANDLERS.md
-- MVP_MODULE_INTEGRATION_SPECIFICATION.md
-- MVP_CONTRACT_STATE_MACHINE.md  
-**Review Status:** ✅ Approved by Business Owner
+**Version:** 2.0 (rewritten against running code)
+**Last verified against code: 2026-07-23**
+**Original version:** 1.0, dated December 22, 2025 — described a monthly-calendar cron job, a generic `Settlement`/`Debt` schema, grace-period/debt-escalation mechanics, and a three-tier (AUTO/MANAGER/ADMIN) approval ladder, none of which match the running system. Preserved only in git history.
+**Ground truth files:** `Controllers/Finance/SettlementController.cs`, `Modules/Finance/Application/Settlement/Commands/{GenerateSettlementCommand,GenerateSettlementScheduleCommand,ApproveSettlementPayoutCommand,RejectSettlementPayoutCommand}*.cs`, `Modules/Finance/Domain/Entities/{SettlementCycle,SettlementPayout,SettlementPayoutLineItem,MonthlySettlementSchedule,SettlementStatusHistory}.cs`, `Modules/Finance/Application/Services/SettlementScheduleService.cs`
+**Related documents:** [`project-docs/18_Implementation_Coverage_Audit.md`](../../../../project-docs/18_Implementation_Coverage_Audit.md) §2 (row 10), §6, §10.4; [`backlog/mvp/epic-10-monthly-renewal-settlement.md`](../../../../backlog/mvp/epic-10-monthly-renewal-settlement.md) (companion epic, rewritten the same date — this document expands on its Stories 10.2–10.6); [`backlog/mvp/epic-09-daily-ledger-billing.md`](../../../../backlog/mvp/epic-09-daily-ledger-billing.md) (provider-invoice/tax-reclaim flow this document's §7 depends on); [`backlog/mvp/epic-06-contract-management.md`](../../../../backlog/mvp/epic-06-contract-management.md) (delivery-driven settlement-schedule anchor point); [`MVP_MODULE_INTEGRATION_SPECIFICATION.md`](./MVP_MODULE_INTEGRATION_SPECIFICATION.md) §2.2 (Contracts↔Finance escrow integration); [`MVP_DISPUTE_RESOLUTION_WORKFLOW.md`](./MVP_DISPUTE_RESOLUTION_WORKFLOW.md) (confirms no settlement-dispute path exists); [`SETTLEMENT_ENHANCEMENTS_ADDENDUM.md`](./SETTLEMENT_ENHANCEMENTS_ADDENDUM.md) (should itself be re-verified against this rewrite before being trusted — not re-verified as part of this pass)
 
 ---
 
-## Document Purpose
+## 0. What changed in this rewrite
 
-This document defines the complete settlement processing system for the Movello MVP platform, including:
-- All settlement trigger events and timing rules
-- Settlement calculation formulas (pro-rata, commissions, taxes)
-- Approval workflows and thresholds
-- Payment processing flows
-- Grace period settlements
-- Debt tracking and recovery
-- Settlement reconciliation
+Version 1.0 described a settlement system that does not exist in the codebase. The corrections that matter most:
 
----
-
-## TABLE OF CONTENTS
-
-1. [Settlement Overview](#1-settlement-overview)
-2. [Settlement Types & Triggers](#2-settlement-types--triggers)
-3. [Settlement Calculations](#3-settlement-calculations)
-4. [Monthly Settlement Processing](#4-monthly-settlement-processing)
-5. [Final Settlement Processing](#5-final-settlement-processing)
-6. [Early Return Settlement](#6-early-return-settlement)
-7. [Grace Period Settlement](#7-grace-period-settlement)
-8. [Approval Workflows](#8-approval-workflows)
-9. [Commission & Tax Processing](#9-commission--tax-processing)
-10. [Debt Tracking & Recovery](#10-debt-tracking--recovery)
-11. [Settlement Reconciliation](#11-settlement-reconciliation)
+- **No calendar-month cron job.** v1.0's `@Cron('0 0 * * *')` "is it the last day of the month" daily check does not exist. The real system generates settlement schedules **per contract**, anchored to that contract's **first vehicle delivery date**, as fixed **30-day rolling windows** — not calendar months. There is no scheduled background job that auto-generates or auto-processes settlements at all; generation is **admin-triggered** via two endpoints (`POST /api/finance/settlements/generate` and `.../generate-current-cycle`).
+- **No tier-based cadence.** A code comment inside `GenerateSettlementCommand.cs` itself claims tier-based cadence (Bronze/Silver monthly, Gold bi-weekly, Platinum weekly) — this is **not implemented anywhere**; it is a stale/aspirational comment inside the real codebase, not just a stale external doc. Cadence is uniformly a fixed 30-day rolling window per contract regardless of provider tier. **This is an unresolved contradiction with a companion document** — `backlog/mvp/epic-08-wallet-escrow.md`'s rewrite states the tier-based cadence *is* real; this document and `epic-10-monthly-renewal-settlement.md` state it is *not*. Per the 2026-07-23 audit §10.4, this was **not reconciled before publishing** — treat the 30-day-rolling-window behavior in this document as ground truth for the Finance settlement-generation code path specifically, and flag the wallet-escrow doc's claim for a human to resolve, don't silently pick a side.
+- **No generic `Settlement`/`Debt` entities.** The real entities are `SettlementCycle` (global, cross-provider, `OPEN`/`PROCESSING`/`CLOSED`), `SettlementPayout` (per provider per cycle, `PENDING_ADMIN_APPROVAL`/`COMPLETED`/`FAILED`/rejected), `SettlementPayoutLineItem` (per contract/vehicle), and `MonthlySettlementSchedule` (per-contract cycle window, `PENDING`/`LOCKED`/`SETTLED`/`CANCELLED`). **There is no `Debt` entity anywhere in the codebase.**
+- **No grace-period, late-fee, or debt-escalation mechanics of any kind.** v1.0's Sections 2.4–2.5, 7, and 10 (grace-period settlement, business-account suspension on unpaid debt, 5% late fee, debt-escalates-to-dispute-after-30-days job) describe functionality that was **never built**. There is no `ON_HOLD`-driven grace-period flow, no `suspendBusinessAccount` call tied to a settlement default, and no debt-repository anywhere in `Modules/Finance`.
+- **No three-tier AUTO/MANAGER/ADMIN approval ladder.** The real system has exactly one approval gate: every generated payout starts `PENDING_ADMIN_APPROVAL`, and a single admin approve/reject action resolves it. There is an optional **auto-approve-below-threshold** setting (`SETTLEMENT_AUTO_APPROVE_THRESHOLD`, MasterData, disabled by default) — not a manager tier, and not the specific `50,000 / 200,000` ETB numbers v1.0 hardcoded.
+- **No PDF generation, CSV export, or a dedicated monthly reconciliation report job.** None of v1.0's §11 (daily reconciliation cron, monthly PDF/CSV report generation) exists on any surface, confirmed against web `finance-service.ts` and both mobile wallet services.
+- **No dispute integration.** v1.0's debt-escalation flow called into a `disputeService.create(...)` that assumed a working Disputes module. No such module, service, or entity exists — see `MVP_DISPUTE_RESOLUTION_WORKFLOW.md` for the full accounting.
+- **Withholding tax mechanics are real and confirmed** (unlike some of the audit's earlier "unconfirmed" flags) — this is one part of v1.0's shape that survives close to intact, detailed in §7 below.
 
 ---
 
-## 1. SETTLEMENT OVERVIEW
+## 1. SETTLEMENT OVERVIEW (as implemented)
 
-### 1.1 Settlement Categories
+### 1.1 What triggers a settlement cycle
 
-**By Timing:**
-- **Monthly Settlement:** For contracts ≥30 days (processed at month-end)
-- **Final Settlement:** Contract completion or early termination
-- **Grace Period Settlement:** Additional payment when grace period used
-- **Immediate Settlement:** For contracts <30 days (processed at completion)
+There is exactly one real trigger shape: a **per-contract, rolling 30-day window**, generated by `SettlementScheduleService.GenerateSchedule` (invoked via `GenerateSettlementScheduleCommand`) at the moment of the contract's **first vehicle delivery** (`DeliveryConfirmedEvent` → `Modules/Contracts/Application/EventHandlers/DeliveryConfirmedEventHandler.cs`, see `MVP_MODULE_INTEGRATION_SPECIFICATION.md` §2.3), not at contract creation and not on a calendar-month boundary.
 
-**By Trigger:**
-- **Automatic:** System-triggered based on time/events
-- **Manual:** Admin-initiated for special cases
-- **Event-Driven:** Triggered by specific contract events
+- Each `MonthlySettlementSchedule` row is a fixed, **inclusive** 30-day window (`CycleStartDate`/`CycleEndDate` both inclusive) anchored to the contract's first-delivery date, repeated until the contract's end date.
+- A contract shorter than 30 days gets a **single** cycle automatically.
+- The **last** generated cycle for a contract is flagged `IsFinalSettlement = true`.
+- Contract **extension** (Epic 06 Story 6.11 — not "renewal"; there is no renewal concept anywhere) regenerates the schedule: the previous final cycle is unmarked, new cycles are generated for the extension window, and the new last one is marked final.
+- There is no monthly calendar-boundary check anywhere in this flow — a contract whose first delivery lands on, say, the 17th of a month settles on 30-day boundaries from the 17th, not at each subsequent month-end.
+
+### 1.2 Settlement types that actually exist
+
+Unlike v1.0's five named types (Monthly/Final/Immediate/Grace Period/Termination-with-Debt), the real system has exactly two operationally distinct settlement *shapes*, both processed through the same `SettlementCycle`/`SettlementPayout` machinery:
+
+- **A non-final cycle** — settles a 30-day window mid-contract; on approval, the unused escrow for that window is rolled forward into the next cycle's lock rather than refunded.
+- **The final cycle** (`IsFinalSettlement = true`) — the last cycle for that contract, whether reached by natural contract-end, a completed extension, or early termination/completion; on approval, any unused escrow (`lockedAmount − contractGross`) is refunded to the business `MAIN` wallet instead of rolled forward.
+
+There is no separate "immediate" settlement type for short contracts distinct from the above — a contract shorter than 30 days simply gets one cycle, which is both the first and the final cycle, processed through the identical approval/posting flow.
+
+### 1.3 Vehicle-Level Earnings Within a Cycle (real, confirmed)
+
+This part of the original design is accurate to the real implementation: settlement windows are defined at the **contract** level, but actual earnings are computed from **individual vehicle activity** within each window, via `ContractVehicleAssignment.DeliveredAt`/`ReleasedAt` overlap against the cycle's `CycleStartDate`/`CycleEndDate`.
+
+```
+For each ContractVehicleAssignment on the contract:
+  if not yet DeliveredAt: contributes 0 to this cycle (undelivered vehicle earns nothing)
+  activeStart = DeliveredAt
+  activeEnd   = ReleasedAt ?? contract end date
+  activeDaysInWindow = overlap(activeStart, activeEnd, CycleStartDate, CycleEndDate)
+  vehicleEarnings = activeDaysInWindow × ContractLineItem.UnitAmount
+Sum across all assignments on the contract → contract's gross contribution to the cycle
+```
+
+This correctly handles partial delivery (a vehicle only earns from its real delivery date), late delivery (zero contribution until delivered), and early return (a vehicle stops earning at its actual return date) — all driven by real `ContractVehicleAssignment` timestamps, not the estimated/pro-rata daily-rate arithmetic v1.0's early-return and grace-period sections used.
 
 ---
 
-### 1.2 Settlement Timing Rules (BR-033)
+## 2. SETTLEMENT CYCLE GENERATION (real endpoints and mechanics)
 
-```typescript
-function determineSettlementTiming(contract: Contract): SettlementRule {
-  const durationDays = contract.totalDays;
-  
-  if (durationDays < 30) {
-    return {
-      type: 'IMMEDIATE',
-      trigger: 'CONTRACT_COMPLETED',
-      timing: 'At contract completion',
-      frequency: 'ONCE'
-    };
-  } else {
-    return {
-      type: 'DURATION_BASED',
-      monthlySettlements: true,
-      trigger: 'MONTH_END',
-      timing: 'Last day of each month',
-      finalSettlement: true,
-      finalTrigger: 'CONTRACT_COMPLETED'
-    };
-  }
-}
-```
+### 2.1 Admin-triggered generation — the only trigger that exists
 
-**Examples:**
-```
-Contract Duration: 15 days
-  → Settlement: Single payment at completion
-  
-Contract Duration: 45 days
-  → Month 1 (Day 30): Monthly settlement for 30 days
-  → Contract end (Day 45): Final settlement for 15 days
-  
-Contract Duration: 90 days
-  → Month 1 (Day 30): Monthly settlement for 30 days
-  → Month 2 (Day 60): Monthly settlement for 30 days
-  → Month 3 (Day 90): Final settlement for 30 days
-```
+There is no automatic/scheduled generation. Two admin-only endpoints on `Controllers/Finance/SettlementController.cs` (route `api/finance/settlements`) drive all cycle generation:
+
+- **`POST /api/finance/settlements/generate`** (`[Authorize(Policy = "AdminOnly")]`) — generates/updates a settlement cycle for an explicit `StartDate`/`EndDate` range, across all contracts with a due `PENDING` schedule (`SettlementDate <= EndDate`), optionally scoped to a single `ContractId`.
+- **`POST /api/finance/settlements/generate-current-cycle`** (`[Authorize(Policy = "AdminOnly")]`) — generates settlement only for each contract's single "processable" cycle: the earliest `PENDING` schedule whose `SettlementDate` has already passed (or, for a contract that reached `PARTIALLY_RETURNED`/`COMPLETED` via early return, the next sequential pending cycle regardless of date), with no earlier unresolved cycle blocking it. This is the practical, everyday generation action — it defaults `StartDate`/`EndDate` to "today" internally and relies on the `CurrentCycleOnly` flag rather than requiring the caller to compute a date range.
+
+Both routes to the same underlying `GenerateSettlementCommand`/handler, differing only in the `CurrentCycleOnly` flag.
+
+### 2.2 What generation actually does
+
+For each due cycle, per provider:
+
+1. Aggregate per-vehicle earnings (§1.3) into one `SettlementCycle` (global, cross-provider — a single cycle row can span many providers/contracts processed together) containing one `SettlementPayout` per provider.
+2. Each `SettlementPayout` gets one `SettlementPayoutLineItem` per contract/vehicle, carrying gross, commission, commission rate, net, and days-in-period.
+3. A payout is **skipped entirely** if the provider's gross earnings for the window fall below the configurable minimum-payout threshold (MasterData setting, default **100 ETB** if unset — not the 1,000 ETB figure that appears in an unrelated code comment on `GetSettlementReportQuery`, which describes a different, unimplemented threshold value; don't confuse the two).
+4. Every new payout starts in status **`PENDING_ADMIN_APPROVAL`** — **no wallet movement happens at generation time**; all double-entry posting is deferred to the approval step (§4).
+5. If the optional `SETTLEMENT_AUTO_APPROVE_THRESHOLD` MasterData setting is enabled and the payout's amount is at or below it, the payout is **automatically approved immediately after generation** (i.e., it still goes through the full approval posting logic in §4, just triggered by the system instead of an admin click). This setting is **disabled by default**.
+
+### 2.3 Cycle/schedule state visibility
+
+- **`GET /api/finance/settlements/schedule-states`** (admin) — surfaces each contract's schedules with a derived state: **Current** (the one processable cycle) or **Dormant** (`PENDING` but not yet processable), alongside the underlying raw statuses `PENDING`/`LOCKED`/`SETTLED`/`CANCELLED`. There is **no separate exposed "Locked" derived state** distinct from the raw status field, despite the schedule-states naming implying one.
+- **`SettlementCycle`** itself has a simple `OPEN`/`PROCESSING`/`CLOSED` status, plus a full `SettlementStatusHistory` audit trail supporting trigger vocabulary `SYSTEM_CREATE`/`SYSTEM_CLOSE`/`USER_CLOSE`/`USER_REOPEN`/`USER_CANCEL`/`USER_APPROVE`/`USER_LOCK`/`USER_UNLOCK` — but **`SettlementController` exposes no endpoint to trigger `USER_CLOSE`/`USER_REOPEN`/`USER_CANCEL`/`USER_LOCK`/`USER_UNLOCK`** today. Only cycle generation and payout approve/reject are reachable via API; most of that trigger vocabulary is currently unreachable in practice. Do not build UI or automation assuming these actions are callable until the corresponding endpoints exist.
+- **`GET /api/finance/settlements/cycles`** (admin) and **`GET /api/finance/settlements/cycles/{cycleId}/status-history`** (admin) — list cycles and their status-history rows.
 
 ---
 
-### 1.3 Settlement Schedule Generation (BR-031A) - UPDATED
+## 3. SETTLEMENT PAYOUT ADMIN APPROVAL (real endpoints)
 
-**When Generated:** Settlement schedules are generated on **first vehicle delivery**, NOT at contract creation.
+There is exactly one approval gate, not a three-tier ladder:
 
-**Anchor Point:** Schedules are anchored from the first delivery date (fixed 30-day cycles).
+- **`GET /api/finance/settlements/payouts`** (admin, all providers, filterable by status/cycle) and **`GET /api/finance/settlements/payouts/{payoutId}`** / **`GET /api/finance/settlements/{payoutId}/details`** — surface payouts pending review with cycle/provider/line-item context. (Providers get their own scoped view via `GET /api/finance/settlements/my-settlements`, restricted server-side to their own `providerId`.)
+- **`POST /api/finance/settlements/payouts/{payoutId}/approve`** — requires `payout.Status == PENDING_ADMIN_APPROVAL`; performs the full double-entry posting described in §4, then marks the payout `COMPLETED` and any `LOCKED` `MonthlySettlementSchedule`s tied to the underlying contracts as `SETTLED`. Body: optional `Notes`.
+- **`POST /api/finance/settlements/payouts/{payoutId}/reject`** — requires a non-empty `Reason` (400 if blank); sets the payout's rejected status. There is **no automatic recalculation/reprocessing pipeline** — a rejected payout is not itself resubmitted; a fresh settlement-generation run over the same date range would be needed to produce a new payout for that window.
+- Both actions resolve the acting admin via `IUserContextService.GetCurrentUserAccountAsync`, recorded on the payout/entity itself — there is **no separate "approval audit log" table**; the audit trail is the payout's own status plus `SettlementStatusHistory` rows tied to the parent cycle.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│           SETTLEMENT SCHEDULE GENERATION                 │
-└─────────────────────────────────────────────────────────┘
-
-DeliveryConfirmedEvent (first vehicle)
-    ↓
-Check if settlement schedule exists
-    ↓ (if not exists)
-Generate fixed 30-day settlement windows
-    - CycleStart = FirstDeliveryDate
-    - CycleEnd = CycleStart + 30 days
-    - Repeat until contract end
-    ↓
-Schedule windows stored (contract-level)
-    ↓
-At each cycle end: Calculate vehicle-level earnings
-```
-
-**Why This Change:**
-- Schedules based on actual delivery date, not contract creation
-- Handles partial delivery naturally (vehicles earn from their delivery date)
-- Avoids schedule inaccuracies when deliveries are delayed
+This entirely replaces v1.0's `AUTO_APPROVE` (<50,000 ETB) / `MANAGER_APPROVE` (50k–200k) / `ADMIN_APPROVE` (>200k) ladder — there is no manager-approval concept and no hardcoded 50k/200k thresholds anywhere in the real code; the only configurable threshold is the single optional auto-approve setting in §2.2.
 
 ---
 
-### 1.4 Vehicle-Level Earnings Calculation (BR-031A) - NEW
+## 4. SETTLEMENT PAYOUT DOUBLE-ENTRY POSTING (real, `ApproveSettlementPayoutCommand`)
 
-**Rule: Contract-Level Schedule, Vehicle-Level Earnings**
+This is the one part of the settlement flow that actually moves money, and it happens **only** on admin (or auto-approve-threshold) approval — never at generation time.
 
-Settlement windows are defined at the contract level, but actual earnings are calculated from individual vehicle activity within each window.
+**Transaction A ("SETTLEMENT"), per contract touched by the payout:**
+- DEBIT the business's **ESCROW** wallet for that contract's gross earned amount (via the contract's active `EscrowLock`).
+- CREDIT the provider's **MAIN** wallet for the payout's net amount (once, for the whole payout).
+- CREDIT the platform **COMMISSION** wallet for the commission deducted.
+- CREDIT the platform **TAX** wallet for the tax withheld (see §7).
 
-```typescript
-function calculateVehicleEarnings(
-  contract: Contract,
-  windowStart: DateTime,
-  windowEnd: DateTime
-): decimal {
-  let totalEarnings = 0;
-  
-  for (const assignment of contract.vehicleAssignments) {
-    if (!assignment.deliveredAt) continue; // Not delivered yet
-    
-    const vehicleStart = assignment.deliveredAt;
-    const vehicleEnd = assignment.releasedAt ?? contract.endDate;
-    
-    // Calculate overlap with settlement window
-    const activeDays = calculateActiveDaysInWindow(
-      vehicleStart, vehicleEnd, windowStart, windowEnd
-    );
-    
-    if (activeDays <= 0) continue;
-    
-    const dailyRate = assignment.lineItem.unitAmount;
-    totalEarnings += dailyRate * activeDays;
-  }
-  
-  return totalEarnings;
-}
-```
+**Transaction B ("ESCROW_REFUND" or next-cycle relock), per contract:**
+- If this is the contract's **final** settlement cycle (§1.2): refund any unused escrow (`lockedAmount − contractGross`) from the business ESCROW wallet back to the business MAIN wallet, and release the escrow lock.
+- If **not** final: release the current escrow lock and immediately lock the unused amount toward the **next** cycle via `LockNextCycleEscrowCommand`; if no next cycle exists (e.g., the contract ended early), falls back to refunding the unused amount to the business MAIN wallet.
 
-**Handles:**
-- **Partial delivery:** Vehicle earns only from its actual delivery date
-- **Late delivery:** Vehicle contributes 0 until delivered
-- **Early return:** Vehicle stops earning at return date
-- **Undelivered vehicles:** 0 contribution, escrow refunded
+**On success:** payout → `COMPLETED`; any `LOCKED` `MonthlySettlementSchedule`s for the involved contracts → `SETTLED`; `SettlementPayoutApprovedEvent` and `WalletCreditedEvent` (source `SettlementPayout`) are published as in-process MediatR notifications, fanning out to Notifications (see `MVP_MODULE_INTEGRATION_SPECIFICATION.md` §2.4).
+
+**On any failure mid-transaction:** full rollback, payout marked `FAILED`, exception surfaced to the admin caller. **There is no automatic retry** of a failed approval — an admin must re-attempt manually. All monetary movements are backed by immutable `WalletLedgerTransaction`/`WalletLedgerEntry` rows, independently verifiable by summing debits vs. credits per transaction (documented and demonstrated in `markdown-documentations/SETTLEMENT_TRANSACTION_TRACKING_IMPLEMENTATION.md`).
+
+This entirely replaces v1.0's §4–§6 (generic `walletService.transfer` calls, separate early-return/grace-period settlement functions with their own ad hoc calculations) — early termination/completion settlements are **not** a distinct code path; they simply reach the existing final-cycle branch of the same `ApproveSettlementPayoutCommand` logic above, using the real `ContractVehicleAssignment.ReleasedAt` timestamps to bound each vehicle's actual earning window (§1.3), not v1.0's separate `calculateEarlyReturnSettlement`/penalty-rate/notice-period formulas — none of which exist in code.
 
 ---
 
-### 1.5 Settlement Flow Overview
+## 5. COMMISSION CALCULATION (real)
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                  SETTLEMENT PROCESS                      │
-└─────────────────────────────────────────────────────────┘
+Commission rate is **not** recomputed per settlement — it is resolved **once, at contract-creation time**, from the provider's tier (`ProviderTierAssignment` → `CommissionStrategy`, MasterData, defaulting to 5% if nothing resolves — see Epic 06 Story 6.1) and stored on the `Contract`/`ContractLineItem`. Settlement simply applies that already-resolved rate to the window's gross earnings; it does not re-query the provider's *current* tier at settlement time, so a mid-contract tier change does not retroactively change commission on that contract.
 
-1. TRIGGER EVENT (Month-end or Contract completion)
-   ↓
-2. CALCULATE AMOUNTS (Vehicle-level activity - BR-031A)
-   - For each vehicle: ActiveDays × DailyRate
-   - Gross amount = Sum of vehicle earnings
-   - Platform commission
-   - Tax withholding
-   - Net to provider
-   ↓
-3. APPROVAL CHECK
-   - Auto-approve if < threshold
-   - Manual approval if ≥ threshold
-   ↓
-4. PROCESS PAYMENT
-   - Create wallet transaction
-   - Transfer to provider
-   - Record settlement
-   ↓
-5. NOTIFICATIONS
-   - Provider: Payment received
-   - Business: Settlement processed
-   - Admin: Settlement report
-   ↓
-6. RECONCILIATION
-   - Update contract records
-   - Update provider balance
-   - Log audit trail
-```
+Seeded commission rates by tier (MasterData `ProviderTier`, admin-configurable in principle, though the admin web UI's edit action is currently a stub — "Update functionality coming soon," per `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` §1.3):
+
+| Tier | Commission rate |
+|---|---|
+| Bronze | 10% |
+| Silver | 8% |
+| Gold | 6% |
+| Platinum | 5% |
+
+There is **no fifth "Red Zone"/blacklist tier** anywhere in code. This table matches `epic-06-contract-management.md`/the trust-engine spec; if project memory (`movello_business_overview.md`) states different numbers, that memory file — not this document — is what needs reconciling against code, per the 2026-07-23 audit §10.2.
 
 ---
 
-## 2. SETTLEMENT TYPES & TRIGGERS
+## 6. FOUR SETTLEMENT-RELATED SURFACES: HISTORY & REPORTING (real, no PDF/CSV)
 
-### 2.1 Monthly Settlement
-
-**Trigger Event:** `MonthEndSettlementEvent`
-
-**When Triggered:**
-- Contracts with duration ≥30 days
-- Processed on the last day of each month
-- For all ACTIVE contracts that span month-end
-
-**Cron Job:**
-```typescript
-@Cron('0 0 * * *') // Daily at midnight
-async function checkMonthlySettlements() {
-  const today = new Date();
-  const isLastDayOfMonth = isLastDay(today);
-  
-  if (!isLastDayOfMonth) return;
-  
-  // Get all active contracts that need monthly settlement
-  const contracts = await this.contractRepository.find({
-    status: 'ACTIVE',
-    durationDays: GreaterThanOrEqual(30),
-    // Either: Never settled OR last settlement was last month
-    OR: [
-      { lastSettlementDate: IsNull() },
-      { lastSettlementDate: LessThan(startOfMonth(today)) }
-    ]
-  });
-  
-  for (const contract of contracts) {
-    await this.processMonthlySettlement(contract);
-  }
-}
-```
-
-**Calculation (BR-031A: Vehicle-Level Earnings):**
-```typescript
-async function processMonthlySettlement(contract: Contract) {
-  const today = new Date();
-  const settlementPeriodStart = contract.lastSettlementDate 
-    ? addDays(contract.lastSettlementDate, 1) 
-    : contract.firstDeliveryDate; // Anchored from first delivery
-  const settlementPeriodEnd = today;
-  
-  // Calculate gross amount using vehicle-level activity (BR-031A)
-  // Each vehicle earns based on [DeliveredAt, ReturnedAt) overlap with window
-  let grossAmount = 0;
-  for (const assignment of contract.vehicleAssignments) {
-    if (!assignment.deliveredAt) continue;
-    
-    const activeDays = calculateActiveDaysInWindow(
-      assignment.deliveredAt,
-      assignment.releasedAt ?? contract.endDate,
-      settlementPeriodStart,
-      settlementPeriodEnd
-    );
-    
-    const dailyRate = assignment.lineItem.unitAmount;
-    grossAmount += dailyRate * activeDays;
-  }
-  
-  // Calculate deductions
-  const commission = await calculateCommission(contract, grossAmount);
-  const tax = await calculateTax(grossAmount);
-  const netAmount = grossAmount - commission - tax;
-  
-  await this.createSettlement({
-    contractId: contract.id,
-    type: 'MONTHLY',
-    periodStart: settlementPeriodStart,
-    periodEnd: settlementPeriodEnd,
-    daysInPeriod,
-    grossAmount,
-    commission,
-    tax,
-    netAmount,
-    status: 'PENDING_APPROVAL'
-  });
-}
-```
+- **Provider:** `GET /api/finance/settlements/my-settlements` (filterable by status/cycle, paginated); payout detail includes gross/commission/tax/net plus per-contract/per-vehicle line items.
+- **Web:** `ProviderSettlementsPage.tsx` / `SettlementDetailPage.tsx` (provider); `AdminSettlementManagementPage.tsx` / `AdminSettlementDetailPage.tsx` / `SettlementPayoutsPage.tsx` / `SettlementPoliciesPage.tsx` (admin).
+- **Provider mobile app:** `provider_settlements_screen.dart`, `provider_settlement_detail_screen.dart`, `provider_upcoming_settlements_screen.dart`.
+- **Business mobile app:** `contract_settlement_schedule_screen.dart` (per-contract schedule/cycle visibility via `mobile/contracts/{id}/settlement-schedule`), `contract_transactions_screen.dart` (per-contract wallet-ledger view).
+- **No PDF report generation or PDF viewer exists for settlements on any surface.** v1.0's "PDF download endpoint"/"PDF viewer" concept was never built; all settlement data is presented as structured tables/screens.
+- **No CSV export exists for settlement history on any surface** (checked web `finance-service.ts` and both mobile wallet services).
+- **No month/year filter presets** — only generic status/cycle filters exist; no dedicated month/year picker was confirmed on any surface.
+- **No daily/monthly reconciliation job** (v1.0 §11) exists — there is no scheduled process that sums yesterday's settlements, checks debit/credit balance, or emails a discrepancy report. Reconciliation today is a manual, on-demand exercise against the immutable ledger rows, not an automated one.
 
 ---
 
-### 2.2 Final Settlement
+## 7. WITHHOLDING TAX DEDUCTION & RECLAIM (real, confirmed)
 
-**Trigger Event:** `ContractCompletedEvent`
+Unlike most of v1.0, the withholding-tax mechanics survive this rewrite close to intact — they are real and confirmed, not aspirational:
 
-**When Triggered:**
-- Contract reaches end date and vehicles returned
-- All contracts (short and long-term) get final settlement
-
-**For Short-Term Contracts (<30 days):**
-```typescript
-// Single settlement for entire duration
-const totalDays = contract.totalDays;
-const grossAmount = contract.totalAmount;
-const netAmount = grossAmount - commission - tax;
-```
-
-**For Long-Term Contracts (≥30 days):**
-```typescript
-// Final settlement for remaining period after last monthly settlement
-const remainingDays = differenceInDays(
-  contract.actualEndDate,
-  contract.lastSettlementDate
-);
-const dailyRate = contract.totalAmount / contract.totalDays;
-const grossAmount = dailyRate * remainingDays;
-const netAmount = grossAmount - commission - tax;
-```
-
-**Example:**
-```
-90-day contract completed:
-- Month 1 settlement: 30 days × 1,000 = 30,000 ETB (already paid)
-- Month 2 settlement: 30 days × 1,000 = 30,000 ETB (already paid)
-- Final settlement: 30 days × 1,000 = 30,000 ETB (paid at completion)
-- Total paid to provider: 90,000 ETB
-```
+- The withholding rate is a **MasterData setting** (`WITHHOLDING_TAX_RATE`), defaulting to **2%** if unset — admin-editable through general MasterData settings, not a Finance-specific "tax rate" screen.
+- Tax is deducted from every payout's **post-commission net** (`netBeforeTax × withholdingRate`, rounded to 2 decimal places) **at settlement-generation time** (§2.2, not at approval time) and stored on `SettlementPayout.TaxDeducted`; `NetPayoutAmount = TotalAmount − CommissionDeducted − TaxDeducted`.
+- On payout **approval**, the tax amount is credited to a **dedicated platform TAX wallet** — separate from the platform COMMISSION wallet — as part of Transaction A (§4).
+- **Reclaim mechanism:** a VAT-registered provider submits an invoice referencing completed payouts (Epic 09 Story 9.5, the provider-invoice flow); on admin approval of that invoice, `Σ payouts.TaxDeducted` for the referenced payouts is released from the platform TAX wallet to the provider's MAIN wallet via a `WITHHOLDING_RELEASE` transaction. This is the **only** real reclaim path — there is no separate "tax dispute" or automatic periodic release.
+- **Admin-facing report:** `GET /api/finance/admin/wallets/tax-report` (`WithholdingTaxPage.tsx` on web) — filterable by provider/contract/date/entry-type (`ALL`/`WITHHELD`/`RELEASED`), returning per-payout rows (tax deducted, tax released, net owed, linked invoice number/status) and running totals (withheld/released/outstanding). This is a **live, on-demand query**, not a generated/stored monthly artifact — there is no scheduled "tax report generation" job.
+- **Provider-facing visibility:** the settlement detail view/screen shows `TaxDeducted` alongside gross/commission/net per payout; the reclaim status itself (linked invoice, released/outstanding) lives on the provider invoice pages/screen (Epic 09), not duplicated into the settlement screens.
 
 ---
 
-### 2.3 Early Return Settlement
+## 8. WHAT DOES NOT EXIST — EXPLICIT NEGATIVE-SPACE LIST
 
-**Trigger Event:** `EarlyReturnApprovedEvent`
+To prevent this document from being read as implying partial support for things that were only ever proposed in v1.0:
 
-**When Triggered:**
-- Both business and provider approve early return
-- Vehicles returned before contract end date
-
-**Calculation Logic:**
-```typescript
-async function processEarlyReturnSettlement(contract: Contract, earlyReturnDate: Date) {
-  // 1. Calculate days used
-  const daysUsed = differenceInDays(earlyReturnDate, contract.actualStartDate);
-  const totalDays = contract.totalDays;
-  const remainingDays = totalDays - daysUsed;
-  
-  // 2. Calculate amounts
-  const dailyRate = contract.totalAmount / totalDays;
-  const amountForDaysUsed = dailyRate * daysUsed;
-  const remainingAmount = dailyRate * remainingDays;
-  
-  // 3. Calculate penalty based on notice period
-  const noticePeriodDays = differenceInDays(
-    earlyReturnDate, 
-    contract.earlyReturnRequestedDate
-  );
-  const penaltyRate = getPenaltyRate(noticePeriodDays); // See BR-019
-  const penaltyAmount = remainingAmount * penaltyRate;
-  
-  // 4. Calculate payments
-  const refundToBusiness = remainingAmount - penaltyAmount;
-  const additionalToProvider = penaltyAmount;
-  
-  // 5. Calculate already paid amount
-  const monthlySettlementsPaid = contract.totalSettlementsPaid;
-  const alreadyPaidAmount = monthlySettlementsPaid * 30000; // assuming 30k per month
-  
-  // 6. Calculate net settlement
-  const totalProviderAmount = amountForDaysUsed + additionalToProvider;
-  const providerFinalPayment = totalProviderAmount - alreadyPaidAmount;
-  
-  return {
-    daysUsed,
-    remainingDays,
-    noticePeriodDays,
-    penaltyRate,
-    grossAmountUsed: amountForDaysUsed,
-    remainingAmount,
-    penaltyAmount,
-    refundToBusiness,
-    alreadyPaidToProvider: alreadyPaidAmount,
-    additionalToProvider: providerFinalPayment,
-    totalProviderReceives: totalProviderAmount
-  };
-}
-
-function getPenaltyRate(noticePeriodDays: number): number {
-  if (noticePeriodDays >= 7) return 0.00;      // 0% penalty
-  if (noticePeriodDays >= 3) return 0.02;      // 2% penalty
-  return 0.15;                                  // 15% penalty
-}
-```
-
-**Example Scenario:**
-```
-Contract: 90 days, 90,000 ETB (1,000 ETB/day)
-Early return requested: Day 50 (7 days notice)
-Early return date: Day 57
-
-Calculation:
-- Days used: 57 days
-- Remaining days: 33 days
-- Already paid (Month 1): 30,000 ETB
-- Already paid (prorated Month 2): 0 ETB (not yet month-end)
-
-Settlement:
-- Amount for days used: 57,000 ETB
-- Remaining amount: 33,000 ETB
-- Penalty (7 days notice): 0%
-- Penalty amount: 0 ETB
-- Refund to business: 33,000 ETB
-- Provider total: 57,000 ETB
-- Provider already received: 30,000 ETB
-- Provider final payment: 27,000 ETB
-```
+- **No `Debt` entity, table, or repository** anywhere in `Modules/Finance` or elsewhere in the backend.
+- **No grace-period mechanic.** No `gracePeriodGranted`/`gracePeriodDays` field on `Contract`, no `ON_HOLD`-driven reactivation flow, no "grace period settlement" code path. (`ON_HOLD` is a reserved, never-set `Contract.Status` value — see `MVP_DISPUTE_RESOLUTION_WORKFLOW.md` §1 and `MVP_CONTRACT_STATE_MACHINE.md`.)
+- **No late-fee calculation** (v1.0's flat 5% late fee) anywhere in Finance.
+- **No business-account suspension tied to a settlement/payment default.** No `suspendBusinessAccount`-equivalent call exists in this flow.
+- **No debt-escalation cron job, no 7/14/30-day overdue-notice cadence, and no automatic "escalate to dispute" action** — there is no dispute system to escalate into in the first place (see `MVP_DISPUTE_RESOLUTION_WORKFLOW.md`).
+- **No settlement-dispute endpoint of any kind.** `SettlementController` has no `POST /settlements/{id}/dispute` or equivalent. Confirmed definitively — not merely "unconfirmed" — by `epic-10-monthly-renewal-settlement.md` Story 10.7 and this rewrite: repo-wide search inside `Modules/Finance` for "dispute" returns only the unrelated `EscrowLock` `DISPUTED`-adjacent status value used by early-termination/freeze/partial-release commands, which is not a workflow.
+- **No manager-approval tier**, and no hardcoded 50,000/200,000 ETB threshold constants — the real system has one admin approval gate plus one optional configurable auto-approve threshold (§2.2, §3).
+- **No PDF generation library, no MinIO/S3 dependency, no CSV export, no scheduled reconciliation job** anywhere in this epic's real scope (§6).
+- **`SettlementCycle`'s modeled `USER_CLOSE`/`USER_REOPEN`/`USER_CANCEL`/`USER_LOCK`/`USER_UNLOCK` triggers have no controller endpoints** — don't build against them as if they were reachable today (§2.3).
 
 ---
 
-### 2.4 Grace Period Settlement
+## 9. UNRESOLVED CONTRADICTION — SETTLEMENT CADENCE (flagged, not resolved here)
 
-**Trigger Event:** Business deposits during grace period
-
-**When Triggered:**
-- Provider granted grace period
-- Business makes payment within grace period
-- Contract reactivated
-
-**Calculation:**
-```typescript
-async function processGracePeriodSettlement(
-  contract: Contract,
-  gracePeriodDays: number
-) {
-  const dailyRate = contract.totalAmount / contract.totalDays;
-  
-  // 1. Grace period charges
-  const gracePeriodAmount = dailyRate * gracePeriodDays;
-  
-  // 2. Late payment fee (5%)
-  const lateFeeRate = 0.05;
-  const lateFee = gracePeriodAmount * lateFeeRate;
-  
-  // 3. Next month escrow
-  const nextMonthEscrow = dailyRate * 30;
-  
-  // 4. Total business must pay
-  const totalDue = gracePeriodAmount + lateFee + nextMonthEscrow;
-  
-  // 5. Provider receives immediately
-  const providerPayment = gracePeriodAmount + lateFee;
-  
-  // 6. Platform commission and tax
-  const commission = await calculateCommission(contract, gracePeriodAmount);
-  const tax = await calculateTax(gracePeriodAmount);
-  const providerNet = gracePeriodAmount - commission - tax + lateFee;
-  
-  return {
-    gracePeriodDays,
-    gracePeriodAmount,
-    lateFee,
-    nextMonthEscrow,
-    totalDue,
-    providerGross: providerPayment,
-    commission,
-    tax,
-    providerNet,
-    platformRevenue: commission
-  };
-}
-```
-
-**Example:**
-```
-Contract: 1,000 ETB/day
-Grace period: 2 days
-Provider granted grace period
-
-Business Payment:
-- Grace period (2 days): 2,000 ETB
-- Late fee (5%): 100 ETB
-- Next month escrow (30 days): 30,000 ETB
-- Total business pays: 32,100 ETB
-
-Provider Receives:
-- Grace period amount: 2,000 ETB
-- Late fee: 100 ETB (goes to provider as compensation)
-- Commission (10%): -200 ETB
-- Tax (2%): -40 ETB
-- Net to provider: 1,860 ETB (paid immediately)
-
-Next month escrow (30,000 ETB) held in escrow for Month 2
-```
+Per the 2026-07-23 audit §10.4: the wallet-cluster rewrite (`backlog/mvp/epic-08-wallet-escrow.md`) states settlement cadence is real and **tier-based** (Bronze/Silver monthly, Gold bi-weekly, Platinum weekly, citing `GenerateSettlementCommand`). This document, following the ledger/settlement-cluster rewrite (`epic-10-monthly-renewal-settlement.md`), states the opposite: settlement runs on a **uniform rolling 30-day cycle per contract regardless of tier**, and that the tier-based-cadence comment inside `GenerateSettlementCommand.cs` is itself stale/aspirational, not implemented logic. **This was not reconciled before either document was published.** Whoever next touches `Modules/Finance/Application/Settlement/Commands/GenerateSettlementCommand*.cs` should resolve which is true by reading the actual branching logic (or lack thereof) in `SettlementScheduleService`/the schedule-generation query, and correct both `epic-08-wallet-escrow.md` and `epic-10-monthly-renewal-settlement.md` (and, if needed, this document) accordingly. This document's own read of the code (§1.1, §0) found **no tier-branching logic anywhere in the schedule-generation path** — but is explicitly not presented as the final word given the standing disagreement between the two rewrite passes.
 
 ---
 
-### 2.5 Termination Settlement (Payment Default)
-
-**Trigger Event:** Contract terminated due to payment default
-
-**Scenarios:**
-
-#### Scenario A: Provider Denied Grace Period
-```typescript
-// Contract terminated immediately at payment default
-// No grace period, clean termination
-
-Settlement:
-- Provider paid for all completed periods (from escrow)
-- No additional amounts owed
-- No debt created
-- Contract terminated cleanly
-```
-
-#### Scenario B: Grace Period Expired Without Payment
-```typescript
-async function processDefaultTerminationSettlement(
-  contract: Contract,
-  gracePeriodDays: number
-) {
-  const dailyRate = contract.totalAmount / contract.totalDays;
-  
-  // 1. Grace period charges (unpaid)
-  const gracePeriodAmount = dailyRate * gracePeriodDays;
-  const lateFee = gracePeriodAmount * 0.05;
-  const totalOwed = gracePeriodAmount + lateFee;
-  
-  // 2. Create debt record
-  const debt = {
-    contractId: contract.id,
-    businessId: contract.businessId,
-    providerId: contract.providerId,
-    amount: totalOwed,
-    breakdown: {
-      gracePeriodDays,
-      gracePeriodAmount,
-      lateFee
-    },
-    status: 'OUTSTANDING',
-    createdAt: new Date(),
-    dueDate: addDays(new Date(), 30)
-  };
-  
-  // 3. Business account suspended
-  await this.suspendBusinessAccount(contract.businessId, {
-    reason: 'UNPAID_DEBT',
-    debtAmount: totalOwed,
-    contractId: contract.id
-  });
-  
-  return {
-    settlementType: 'TERMINATION_WITH_DEBT',
-    providerPaidFromEscrow: contract.totalSettlementsPaid * 30000,
-    debtCreated: totalOwed,
-    businessAccountStatus: 'SUSPENDED',
-    providerAction: 'COLLECT_VEHICLES'
-  };
-}
-```
-
----
-
-## 3. SETTLEMENT CALCULATIONS
-
-### 3.1 Base Calculation Formula
-
-```typescript
-interface SettlementCalculation {
-  // Period details
-  periodStart: Date;
-  periodEnd: Date;
-  daysInPeriod: number;
-  
-  // Amounts
-  dailyRate: number;
-  grossAmount: number;
-  
-  // Deductions
-  platformCommission: number;
-  taxWithholding: number;
-  
-  // Net to provider
-  netAmount: number;
-  
-  // Additional
-  lateFee?: number;
-  penalty?: number;
-  refund?: number;
-}
-
-function calculateSettlement(
-  contract: Contract,
-  periodStart: Date,
-  periodEnd: Date,
-  additionalCharges?: AdditionalCharges
-): SettlementCalculation {
-  
-  // 1. Calculate period
-  const daysInPeriod = differenceInDays(periodEnd, periodStart);
-  const dailyRate = contract.totalAmount / contract.totalDays;
-  
-  // 2. Calculate gross amount
-  let grossAmount = dailyRate * daysInPeriod;
-  
-  // 3. Add additional charges
-  if (additionalCharges?.lateFee) {
-    grossAmount += additionalCharges.lateFee;
-  }
-  
-  // 4. Calculate commission
-  const commissionRate = await getCommissionRate(contract.providerId);
-  const platformCommission = grossAmount * commissionRate;
-  
-  // 5. Calculate tax
-  const taxRate = await getTaxRate();
-  const taxWithholding = grossAmount * taxRate;
-  
-  // 6. Calculate net
-  const netAmount = grossAmount - platformCommission - taxWithholding;
-  
-  return {
-    periodStart,
-    periodEnd,
-    daysInPeriod,
-    dailyRate,
-    grossAmount,
-    platformCommission,
-    taxWithholding,
-    netAmount,
-    lateFee: additionalCharges?.lateFee,
-    penalty: additionalCharges?.penalty,
-    refund: additionalCharges?.refund
-  };
-}
-```
-
----
-
-### 3.2 Pro-Rata Calculation Examples
-
-#### Example 1: Contract Started Mid-Month
-```
-Contract: 90 days starting Day 15 of January
-Daily rate: 1,000 ETB/day
-
-Month 1 Settlement (January 31):
-- Start: January 15
-- End: January 31
-- Days: 17 days
-- Gross: 17,000 ETB
-
-Month 2 Settlement (February 28):
-- Start: February 1
-- End: February 28
-- Days: 28 days
-- Gross: 28,000 ETB
-
-Month 3 Settlement (March 31):
-- Start: March 1
-- End: March 31
-- Days: 31 days
-- Gross: 31,000 ETB
-
-Final Settlement (April 14):
-- Start: April 1
-- End: April 14
-- Days: 14 days
-- Gross: 14,000 ETB
-
-Total: 17 + 28 + 31 + 14 = 90 days ✓
-```
-
-#### Example 2: Early Termination After Grace Period
-```
-Contract: 90 days, 90,000 ETB (1,000 ETB/day)
-Month 1: 30,000 ETB paid (escrow)
-Day 31: Payment default
-Day 32: Provider grants 3 days grace period
-Day 34: Business still hasn't paid
-Day 34: Contract terminated
-
-Settlement:
-- Month 1 (Days 1-30): 30,000 ETB (already paid from escrow)
-- Grace period (Days 31-34): 4,000 ETB (debt created)
-- Late fee (5%): 200 ETB
-- Total debt: 4,200 ETB
-- Business account: SUSPENDED
-- Provider: Collects vehicles + 4,200 ETB debt recorded
-```
-
----
-
-## 4. MONTHLY SETTLEMENT PROCESSING
-
-### 4.1 Monthly Settlement Workflow
-
-```typescript
-async function monthlySettlementWorkflow() {
-  // 1. Identify contracts for settlement
-  const contracts = await getContractsForMonthlySettlement();
-  
-  for (const contract of contracts) {
-    try {
-      // 2. Calculate settlement
-      const settlement = await calculateMonthlySettlement(contract);
-      
-      // 3. Check approval threshold
-      const requiresApproval = settlement.grossAmount >= APPROVAL_THRESHOLD;
-      
-      if (requiresApproval) {
-        // 4a. Create pending settlement for admin approval
-        await createPendingSettlement(settlement, 'PENDING_APPROVAL');
-        await notifyAdminForApproval(settlement);
-      } else {
-        // 4b. Auto-approve and process
-        await processSettlement(settlement, 'AUTO_APPROVED');
-      }
-      
-    } catch (error) {
-      await handleSettlementError(contract, error);
-    }
-  }
-}
-```
-
-### 4.2 Monthly Settlement Cron Job
-
-```typescript
-@Cron('0 0 * * *') // Every day at midnight
-async function dailySettlementCheck() {
-  const today = new Date();
-  
-  // Check if it's the last day of the month
-  const isLastDay = isLastDayOfMonth(today);
-  
-  if (isLastDay) {
-    await processMonthlySettlements();
-  }
-}
-
-async function processMonthlySettlements() {
-  console.log(`Processing monthly settlements for ${format(new Date(), 'MMMM yyyy')}`);
-  
-  // Get all active long-term contracts
-  const contracts = await this.contractRepository.find({
-    status: 'ACTIVE',
-    totalDays: GreaterThanOrEqual(30)
-  });
-  
-  const results = {
-    total: contracts.length,
-    processed: 0,
-    failed: 0,
-    pendingApproval: 0
-  };
-  
-  for (const contract of contracts) {
-    try {
-      const settlement = await this.processMonthlySettlement(contract);
-      
-      if (settlement.status === 'PENDING_APPROVAL') {
-        results.pendingApproval++;
-      } else {
-        results.processed++;
-      }
-      
-    } catch (error) {
-      results.failed++;
-      await this.logSettlementError(contract.id, error);
-    }
-  }
-  
-  // Send summary report to admin
-  await this.sendSettlementReport(results);
-  
-  return results;
-}
-```
-
----
-
-## 5. FINAL SETTLEMENT PROCESSING
-
-### 5.1 Final Settlement Trigger
-
-```typescript
-// Event handler for contract completion
-@EventHandler('ContractCompletedEvent')
-async function handleContractCompleted(event: ContractCompletedEvent) {
-  const contract = await this.contractRepository.findById(event.payload.contractId);
-  
-  // Process final settlement
-  await this.processFinalSettlement(contract);
-}
-
-async function processFinalSettlement(contract: Contract) {
-  // 1. Calculate remaining period
-  const lastSettlementDate = contract.lastSettlementDate || contract.actualStartDate;
-  const finalDate = contract.actualEndDate;
-  const remainingDays = differenceInDays(finalDate, lastSettlementDate);
-  
-  // 2. Calculate amounts
-  const dailyRate = contract.totalAmount / contract.totalDays;
-  const grossAmount = dailyRate * remainingDays;
-  
-  // 3. Calculate deductions
-  const commission = await calculateCommission(contract, grossAmount);
-  const tax = await calculateTax(grossAmount);
-  const netAmount = grossAmount - commission - tax;
-  
-  // 4. Create settlement record
-  const settlement = await this.settlementRepository.create({
-    contractId: contract.id,
-    type: 'FINAL',
-    periodStart: addDays(lastSettlementDate, 1),
-    periodEnd: finalDate,
-    daysInPeriod: remainingDays,
-    grossAmount,
-    commission,
-    tax,
-    netAmount,
-    status: 'PENDING_APPROVAL'
-  });
-  
-  // 5. Auto-approve if below threshold
-  if (grossAmount < APPROVAL_THRESHOLD) {
-    await this.approveAndProcessSettlement(settlement);
-  } else {
-    await this.notifyAdminForApproval(settlement);
-  }
-  
-  // 6. Update contract
-  await this.contractRepository.update(contract.id, {
-    finalSettlementProcessed: true,
-    finalSettlementAmount: netAmount,
-    finalSettlementId: settlement.id
-  });
-}
-```
-
----
-
-## 6. EARLY RETURN SETTLEMENT
-
-### 6.1 Early Return Settlement Handler
-
-```typescript
-@EventHandler('EarlyReturnApprovedEvent')
-async function handleEarlyReturnApproved(event: EarlyReturnApprovedEvent) {
-  const { contractId, earlyReturnDate, noticePeriodDays, businessId, providerId } = event.payload;
-  
-  const contract = await this.contractRepository.findById(contractId);
-  
-  // Calculate early return settlement
-  const settlement = await this.calculateEarlyReturnSettlement(
-    contract,
-    earlyReturnDate,
-    noticePeriodDays
-  );
-  
-  // Process dual settlements: refund + provider payment
-  await this.processEarlyReturnDualSettlement(settlement);
-}
-
-async function calculateEarlyReturnSettlement(
-  contract: Contract,
-  earlyReturnDate: Date,
-  noticePeriodDays: number
-): Promise<EarlyReturnSettlement> {
-  
-  const dailyRate = contract.totalAmount / contract.totalDays;
-  
-  // 1. Calculate usage
-  const daysUsed = differenceInDays(earlyReturnDate, contract.actualStartDate);
-  const remainingDays = contract.totalDays - daysUsed;
-  
-  // 2. Calculate amounts
-  const usedAmount = dailyRate * daysUsed;
-  const remainingAmount = dailyRate * remainingDays;
-  
-  // 3. Calculate penalty
-  const penaltyRate = this.getPenaltyRate(noticePeriodDays);
-  const penaltyAmount = remainingAmount * penaltyRate;
-  
-  // 4. Calculate business refund
-  const refundToBusiness = remainingAmount - penaltyAmount;
-  
-  // 5. Calculate provider payment
-  const alreadyPaid = contract.totalSettlementsPaid * (dailyRate * 30);
-  const totalProviderAmount = usedAmount + penaltyAmount;
-  const providerFinalPayment = totalProviderAmount - alreadyPaid;
-  
-  // 6. Apply commission and tax to final payment only
-  const commission = await calculateCommission(contract, providerFinalPayment);
-  const tax = await calculateTax(providerFinalPayment);
-  const providerNet = providerFinalPayment - commission - tax;
-  
-  return {
-    type: 'EARLY_RETURN',
-    contractId: contract.id,
-    earlyReturnDate,
-    daysUsed,
-    remainingDays,
-    noticePeriodDays,
-    penaltyRate,
-    dailyRate,
-    usedAmount,
-    remainingAmount,
-    penaltyAmount,
-    refundToBusiness,
-    alreadyPaidToProvider: alreadyPaid,
-    providerFinalPaymentGross: providerFinalPayment,
-    commission,
-    tax,
-    providerFinalPaymentNet: providerNet
-  };
-}
-```
-
----
-
-## 7. GRACE PERIOD SETTLEMENT
-
-### 7.1 Grace Period Payment Handler
-
-```typescript
-async function handleGracePeriodPayment(
-  contractId: string,
-  paymentAmount: number
-) {
-  const contract = await this.contractRepository.findById(contractId);
-  
-  // Validate contract is in grace period
-  if (contract.status !== 'ON_HOLD' || !contract.gracePeriodGranted) {
-    throw new Error('Contract not in grace period');
-  }
-  
-  // Calculate expected amount
-  const expected = await this.calculateGracePeriodAmount(contract);
-  
-  // Validate payment amount
-  if (paymentAmount < expected.totalDue) {
-    throw new Error(`Insufficient payment. Expected: ${expected.totalDue}, Received: ${paymentAmount}`);
-  }
-  
-  // Process settlement
-  await this.processGracePeriodSettlement(contract, expected);
-}
-
-async function processGracePeriodSettlement(
-  contract: Contract,
-  calculation: GracePeriodCalculation
-) {
-  // 1. Create settlement record
-  const settlement = await this.settlementRepository.create({
-    contractId: contract.id,
-    type: 'GRACE_PERIOD',
-    periodStart: contract.gracePeriodStartDate,
-    periodEnd: new Date(),
-    daysInPeriod: contract.gracePeriodDays,
-    grossAmount: calculation.gracePeriodAmount,
-    lateFee: calculation.lateFee,
-    commission: calculation.commission,
-    tax: calculation.tax,
-    netAmount: calculation.providerNet,
-    status: 'APPROVED'
-  });
-  
-  // 2. Transfer to provider immediately
-  await this.walletService.transfer({
-    from: contract.businessId,
-    to: contract.providerId,
-    amount: calculation.providerNet,
-    type: 'GRACE_PERIOD_SETTLEMENT',
-    settlementId: settlement.id
-  });
-  
-  // 3. Lock next month escrow
-  await this.escrowService.lockEscrow({
-    contractId: contract.id,
-    businessId: contract.businessId,
-    amount: calculation.nextMonthEscrow,
-    type: 'MONTHLY_ESCROW'
-  });
-  
-  // 4. Reactivate contract
-  await this.contractStateMachine.transitionTo(
-    contract.id,
-    'ACTIVE',
-    'GRACE_PERIOD_PAYMENT_RECEIVED'
-  );
-  
-  // 5. Send notifications
-  await this.notifyGracePeriodResolved(contract, settlement);
-}
-```
-
----
-
-## 8. APPROVAL WORKFLOWS
-
-### 8.1 Approval Threshold Configuration (BR-032)
-
-```typescript
-const APPROVAL_THRESHOLDS = {
-  AUTO_APPROVE: 50000,      // ETB - Auto-approve settlements < 50,000
-  MANAGER_APPROVE: 200000,  // ETB - Manager approval for 50k-200k
-  ADMIN_APPROVE: Infinity   // ETB - Admin approval for > 200k
-};
-
-function getApprovalLevel(amount: number): ApprovalLevel {
-  if (amount < APPROVAL_THRESHOLDS.AUTO_APPROVE) {
-    return 'AUTO';
-  } else if (amount < APPROVAL_THRESHOLDS.MANAGER_APPROVE) {
-    return 'MANAGER';
-  } else {
-    return 'ADMIN';
-  }
-}
-```
-
-### 8.2 Approval Workflow
-
-```typescript
-async function processSettlementApproval(settlement: Settlement) {
-  const approvalLevel = getApprovalLevel(settlement.grossAmount);
-  
-  switch (approvalLevel) {
-    case 'AUTO':
-      // Auto-approve immediately
-      await this.approveSettlement(settlement, {
-        approvedBy: 'SYSTEM',
-        approvalLevel: 'AUTO',
-        approvedAt: new Date()
-      });
-      await this.executeSettlementPayment(settlement);
-      break;
-      
-    case 'MANAGER':
-      // Require manager approval
-      await this.requestManagerApproval(settlement);
-      break;
-      
-    case 'ADMIN':
-      // Require admin approval
-      await this.requestAdminApproval(settlement);
-      break;
-  }
-}
-
-async function requestManagerApproval(settlement: Settlement) {
-  // Update settlement status
-  await this.settlementRepository.update(settlement.id, {
-    status: 'PENDING_MANAGER_APPROVAL',
-    approvalRequestedAt: new Date()
-  });
-  
-  // Notify manager
-  await this.notificationService.send({
-    to: 'ROLE:MANAGER',
-    type: 'SETTLEMENT_APPROVAL_REQUIRED',
-    priority: 'HIGH',
-    data: {
-      settlementId: settlement.id,
-      contractId: settlement.contractId,
-      amount: settlement.grossAmount,
-      provider: await this.getProviderDetails(settlement.providerId),
-      approvalDeadline: addHours(new Date(), 24)
-    }
-  });
-}
-```
-
-### 8.3 Manual Approval Actions
-
-```typescript
-async function approveSettlement(
-  settlementId: string,
-  approverId: string,
-  notes?: string
-) {
-  const settlement = await this.settlementRepository.findById(settlementId);
-  
-  // Update settlement
-  await this.settlementRepository.update(settlementId, {
-    status: 'APPROVED',
-    approvedBy: approverId,
-    approvedAt: new Date(),
-    approvalNotes: notes
-  });
-  
-  // Execute payment
-  await this.executeSettlementPayment(settlement);
-  
-  // Notify parties
-  await this.notifySettlementApproved(settlement);
-}
-
-async function rejectSettlement(
-  settlementId: string,
-  approverId: string,
-  reason: string
-) {
-  const settlement = await this.settlementRepository.findById(settlementId);
-  
-  // Update settlement
-  await this.settlementRepository.update(settlementId, {
-    status: 'REJECTED',
-    rejectedBy: approverId,
-    rejectedAt: new Date(),
-    rejectionReason: reason
-  });
-  
-  // Notify parties
-  await this.notifySettlementRejected(settlement, reason);
-  
-  // Create investigation case
-  await this.createInvestigationCase(settlement, reason);
-}
-```
-
----
-
-## 9. COMMISSION & TAX PROCESSING
-
-### 9.1 Commission Calculation
-
-```typescript
-async function calculateCommission(
-  contract: Contract,
-  grossAmount: number
-): Promise<number> {
-  // Get provider's current tier and commission rate
-  // Note: Provider tier is calculated using hybrid model (BR-042)
-  // combining trust score + active fleet size
-  const provider = await this.providerRepository.findById(contract.providerId);
-  
-  // Tier is recalculated automatically on contract events
-  // See MVP_AUTHORITATIVE_BUSINESS_RULES.md Section 9 for tier calculation logic
-  const commissionRate = await this.getCommissionRateForTier(provider.tier);
-  
-  // Calculate commission
-  const commission = grossAmount * commissionRate;
-  
-  return commission;
-}
-
-// Commission rates by provider tier (from MasterData)
-// These rates are configurable via masterdata.commission_strategy_rule
-const DEFAULT_COMMISSION_RATES = {
-  BRONZE: 0.10,      // 10%
-  SILVER: 0.08,      // 8%
-  GOLD: 0.06,        // 6%
-  PLATINUM: 0.05     // 5%
-};
-
-async function getCommissionRateForTier(tier: string): Promise<number> {
-  // Query masterdata.commission_strategy_rule for active strategy
-  const strategy = await this.masterDataService.getActiveCommissionStrategy();
-  const rule = strategy.rules.find(r => r.providerTierCode === tier);
-  
-  if (!rule) {
-    // Fallback to default
-    return DEFAULT_COMMISSION_RATES[tier] || 0.10;
-  }
-  
-  return rule.ratePercentage;
-}
-```
-
-### 9.2 Tax Withholding Calculation
-
-```typescript
-async function calculateTax(grossAmount: number): Promise<number> {
-  // Get tax rate from MasterData (configurable)
-  const taxRate = await this.getTaxRate();
-  
-  // Calculate tax withholding
-  const tax = grossAmount * taxRate;
-  
-  return tax;
-}
-
-async function getTaxRate(): Promise<number> {
-  const config = await this.masterDataService.get('tax.withholding.rate');
-  return config?.value || 0.02; // Default 2%
-}
-```
-
-### 9.3 Complete Settlement Calculation Example
-
-```typescript
-// Monthly settlement for 30 days
-const dailyRate = 1000;        // ETB per day
-const days = 30;
-const grossAmount = 30000;     // ETB
-
-// Provider tier: SILVER (8% commission)
-const commission = 30000 * 0.08 = 2400;   // ETB
-const tax = 30000 * 0.02 = 600;           // ETB
-const netAmount = 30000 - 2400 - 600 = 27000; // ETB
-
-Settlement Breakdown:
-- Gross amount: 30,000 ETB
-- Platform commission (8%): -2,400 ETB
-- Tax withholding (2%): -600 ETB
-- Net to provider: 27,000 ETB
-```
-
----
-
-## 10. DEBT TRACKING & RECOVERY
-
-### 10.1 Debt Creation
-
-```typescript
-async function createDebt(
-  contractId: string,
-  businessId: string,
-  providerId: string,
-  amount: number,
-  reason: string
-) {
-  const debt = await this.debtRepository.create({
-    id: generateUUID(),
-    contractId,
-    businessId,
-    providerId,
-    amount,
-    reason,
-    status: 'OUTSTANDING',
-    createdAt: new Date(),
-    dueDate: addDays(new Date(), 30),
-    paymentAttempts: 0
-  });
-  
-  // Suspend business account
-  await this.businessRepository.update(businessId, {
-    accountStatus: 'SUSPENDED',
-    suspensionReason: 'UNPAID_DEBT',
-    outstandingDebt: amount
-  });
-  
-  // Notify both parties
-  await this.notifyDebtCreated(debt);
-  
-  return debt;
-}
-```
-
-### 10.2 Debt Payment Processing
-
-```typescript
-async function processDebtPayment(
-  debtId: string,
-  paymentAmount: number
-) {
-  const debt = await this.debtRepository.findById(debtId);
-  
-  // Validate amount
-  if (paymentAmount < debt.amount) {
-    throw new Error('Partial debt payment not allowed in MVP');
-  }
-  
-  // Process payment
-  await this.walletService.transfer({
-    from: debt.businessId,
-    to: debt.providerId,
-    amount: paymentAmount,
-    type: 'DEBT_PAYMENT',
-    debtId: debt.id
-  });
-  
-  // Update debt status
-  await this.debtRepository.update(debtId, {
-    status: 'PAID',
-    paidAt: new Date(),
-    paidAmount: paymentAmount
-  });
-  
-  // Reactivate business account
-  await this.businessRepository.update(debt.businessId, {
-    accountStatus: 'ACTIVE',
-    suspensionReason: null,
-    outstandingDebt: 0
-  });
-  
-  // Notify parties
-  await this.notifyDebtPaid(debt);
-}
-```
-
-### 10.3 Debt Escalation
-
-```typescript
-@Cron('0 0 * * *') // Daily check
-async function checkOverdueDebts() {
-  const overdueDebts = await this.debtRepository.find({
-    status: 'OUTSTANDING',
-    dueDate: LessThan(new Date())
-  });
-  
-  for (const debt of overdueDebts) {
-    const daysOverdue = differenceInDays(new Date(), debt.dueDate);
-    
-    if (daysOverdue === 7) {
-      // 7 days overdue - send warning
-      await this.sendDebtWarning(debt);
-    } else if (daysOverdue === 14) {
-      // 14 days overdue - send final notice
-      await this.sendDebtFinalNotice(debt);
-    } else if (daysOverdue === 30) {
-      // 30 days overdue - escalate to dispute
-      await this.escalateDebtToDispute(debt);
-    }
-  }
-}
-
-async function escalateDebtToDispute(debt: Debt) {
-  // Create dispute on behalf of provider
-  const dispute = await this.disputeService.create({
-    contractId: debt.contractId,
-    createdBy: 'SYSTEM',
-    onBehalfOf: debt.providerId,
-    category: 'NON_PAYMENT',
-    description: `Automated dispute for unpaid debt of ${debt.amount} ETB. Debt overdue by 30 days.`,
-    evidenceAttached: [{
-      type: 'DEBT_RECORD',
-      debtId: debt.id,
-      amount: debt.amount,
-      createdAt: debt.createdAt,
-      dueDate: debt.dueDate
-    }]
-  });
-  
-  // Update debt with dispute reference
-  await this.debtRepository.update(debt.id, {
-    status: 'IN_DISPUTE',
-    disputeId: dispute.id
-  });
-  
-  // Notify both parties
-  await this.notifyDebtEscalated(debt, dispute);
-}
-```
-
----
-
-## 11. SETTLEMENT RECONCILIATION
-
-### 11.1 Daily Reconciliation
-
-```typescript
-@Cron('0 1 * * *') // Daily at 1 AM
-async function dailySettlementReconciliation() {
-  const yesterday = subDays(new Date(), 1);
-  
-  // Get all settlements processed yesterday
-  const settlements = await this.settlementRepository.find({
-    status: 'COMPLETED',
-    processedAt: Between(startOfDay(yesterday), endOfDay(yesterday))
-  });
-  
-  // Reconciliation checks
-  const reconciliation = {
-    date: yesterday,
-    totalSettlements: settlements.length,
-    totalGrossAmount: 0,
-    totalCommission: 0,
-    totalTax: 0,
-    totalNetPaid: 0,
-    discrepancies: []
-  };
-  
-  for (const settlement of settlements) {
-    // Sum amounts
-    reconciliation.totalGrossAmount += settlement.grossAmount;
-    reconciliation.totalCommission += settlement.commission;
-    reconciliation.totalTax += settlement.tax;
-    reconciliation.totalNetPaid += settlement.netAmount;
-    
-    // Check for discrepancies
-    const calculated = settlement.grossAmount - settlement.commission - settlement.tax;
-    if (Math.abs(calculated - settlement.netAmount) > 0.01) {
-      reconciliation.discrepancies.push({
-        settlementId: settlement.id,
-        expected: calculated,
-        actual: settlement.netAmount,
-        difference: calculated - settlement.netAmount
-      });
-    }
-    
-    // Verify wallet transaction exists
-    const walletTx = await this.walletService.findTransaction({
-      settlementId: settlement.id,
-      amount: settlement.netAmount
-    });
-    
-    if (!walletTx) {
-      reconciliation.discrepancies.push({
-        settlementId: settlement.id,
-        issue: 'MISSING_WALLET_TRANSACTION',
-        amount: settlement.netAmount
-      });
-    }
-  }
-  
-  // Send reconciliation report
-  await this.sendReconciliationReport(reconciliation);
-  
-  // Alert if discrepancies found
-  if (reconciliation.discrepancies.length > 0) {
-    await this.alertFinanceTeam(reconciliation);
-  }
-}
-```
-
-### 11.2 Monthly Settlement Report
-
-```typescript
-async function generateMonthlySettlementReport(year: number, month: number) {
-  const startDate = new Date(year, month - 1, 1);
-  const endDate = endOfMonth(startDate);
-  
-  // Get all settlements for the month
-  const settlements = await this.settlementRepository.find({
-    processedAt: Between(startDate, endDate),
-    status: 'COMPLETED'
-  });
-  
-  // Aggregate by type
-  const byType = {
-    MONTHLY: { count: 0, grossAmount: 0, commission: 0, netAmount: 0 },
-    FINAL: { count: 0, grossAmount: 0, commission: 0, netAmount: 0 },
-    EARLY_RETURN: { count: 0, grossAmount: 0, commission: 0, netAmount: 0 },
-    GRACE_PERIOD: { count: 0, grossAmount: 0, commission: 0, netAmount: 0 }
-  };
-  
-  for (const settlement of settlements) {
-    const type = settlement.type;
-    byType[type].count++;
-    byType[type].grossAmount += settlement.grossAmount;
-    byType[type].commission += settlement.commission;
-    byType[type].netAmount += settlement.netAmount;
-  }
-  
-  // Calculate totals
-  const totals = {
-    settlements: settlements.length,
-    grossAmount: settlements.reduce((sum, s) => sum + s.grossAmount, 0),
-    commission: settlements.reduce((sum, s) => sum + s.commission, 0),
-    tax: settlements.reduce((sum, s) => sum + s.tax, 0),
-    netAmount: settlements.reduce((sum, s) => sum + s.netAmount, 0)
-  };
-  
-  // Generate report
-  const report = {
-    period: `${year}-${String(month).padStart(2, '0')}`,
-    startDate,
-    endDate,
-    byType,
-    totals,
-    platformRevenue: totals.commission + totals.tax,
-    averageSettlementAmount: totals.grossAmount / totals.settlements
-  };
-  
-  // Save report
-  await this.reportRepository.create(report);
-  
-  // Send to stakeholders
-  await this.sendMonthlyReport(report);
-  
-  return report;
-}
-```
-
----
-
-## APPENDIX A: Settlement Database Schema
-
-```sql
-CREATE TABLE finance_schema.settlements (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  contract_id UUID NOT NULL REFERENCES contracts_schema.contracts(id),
-  business_id UUID NOT NULL,
-  provider_id UUID NOT NULL,
-  
-  -- Type and status
-  type VARCHAR(50) NOT NULL, -- MONTHLY, FINAL, EARLY_RETURN, GRACE_PERIOD
-  status VARCHAR(50) NOT NULL, -- PENDING_APPROVAL, APPROVED, REJECTED, COMPLETED
-  
-  -- Period
-  period_start DATE NOT NULL,
-  period_end DATE NOT NULL,
-  days_in_period INTEGER NOT NULL,
-  
-  -- Amounts
-  daily_rate DECIMAL(15,2) NOT NULL,
-  gross_amount DECIMAL(15,2) NOT NULL,
-  platform_commission DECIMAL(15,2) NOT NULL,
-  tax_withholding DECIMAL(15,2) NOT NULL,
-  net_amount DECIMAL(15,2) NOT NULL,
-  
-  -- Additional charges
-  late_fee DECIMAL(15,2) DEFAULT 0,
-  penalty DECIMAL(15,2) DEFAULT 0,
-  refund DECIMAL(15,2) DEFAULT 0,
-  
-  -- Approval
-  approval_level VARCHAR(20), -- AUTO, MANAGER, ADMIN
-  requires_approval BOOLEAN DEFAULT false,
-  approved_by UUID,
-  approved_at TIMESTAMP,
-  approval_notes TEXT,
-  rejected_by UUID,
-  rejected_at TIMESTAMP,
-  rejection_reason TEXT,
-  
-  -- Processing
-  processed_at TIMESTAMP,
-  wallet_transaction_id UUID,
-  
-  -- Timestamps
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE finance_schema.debts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  contract_id UUID NOT NULL,
-  business_id UUID NOT NULL,
-  provider_id UUID NOT NULL,
-  
-  -- Debt details
-  amount DECIMAL(15,2) NOT NULL,
-  reason VARCHAR(255) NOT NULL,
-  status VARCHAR(50) NOT NULL, -- OUTSTANDING, PAID, IN_DISPUTE, WRITTEN_OFF
-  
-  -- Dates
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  due_date DATE NOT NULL,
-  paid_at TIMESTAMP,
-  paid_amount DECIMAL(15,2),
-  
-  -- Dispute
-  dispute_id UUID,
-  
-  -- Payment attempts
-  payment_attempts INTEGER DEFAULT 0,
-  last_payment_attempt_at TIMESTAMP
-);
-
--- Indexes
-CREATE INDEX idx_settlements_contract ON finance_schema.settlements(contract_id);
-CREATE INDEX idx_settlements_provider ON finance_schema.settlements(provider_id);
-CREATE INDEX idx_settlements_status ON finance_schema.settlements(status);
-CREATE INDEX idx_settlements_type_status ON finance_schema.settlements(type, status);
-CREATE INDEX idx_settlements_period ON finance_schema.settlements(period_start, period_end);
-
-CREATE INDEX idx_debts_business ON finance_schema.debts(business_id);
-CREATE INDEX idx_debts_provider ON finance_schema.debts(provider_id);
-CREATE INDEX idx_debts_status ON finance_schema.debts(status);
-CREATE INDEX idx_debts_due_date ON finance_schema.debts(due_date) WHERE status = 'OUTSTANDING';
-```
-
----
-
-**END OF SETTLEMENT PROCESSING SPECIFICATION**
-
----
-
-**For Implementation:** Use this document as reference for:
-1. Settlement calculation formulas
-2. Trigger events and timing
-3. Approval workflow implementation
-4. Commission and tax calculations
-5. Debt tracking system
-
-**For Testing:** Verify:
-1. All settlement types calculate correctly
-2. Monthly settlements process on schedule
-3. Approval thresholds work as expected
-4. Commission and tax applied correctly
-5. Debt creation and tracking functions properly
+**For Implementation:** treat this document, not v1.0, as the reference for how settlement actually works. The controller/command/entity names above (`SettlementController`, `GenerateSettlementCommand`, `ApproveSettlementPayoutCommand`, `SettlementCycle`/`SettlementPayout(LineItem)`/`MonthlySettlementSchedule`/`SettlementStatusHistory`) are the real, current API surface — verify against them directly, not against v1.0's `finance_schema.settlements`/`finance_schema.debts` schema, which was never built.
+
+**For Testing:** verify against real behavior, not v1.0's assumptions:
+1. Settlement schedules generate as 30-day rolling windows from first delivery, not calendar-month boundaries.
+2. Generation requires an explicit admin action (`generate` or `generate-current-cycle`) — nothing runs automatically on a timer.
+3. Every payout starts `PENDING_ADMIN_APPROVAL`; no wallet movement occurs before approval (or auto-approve-threshold trigger).
+4. Commission is the rate resolved at contract creation, not recalculated from the provider's current tier at settlement time.
+5. Withholding tax (2% default, MasterData-configurable) is deducted at generation time and only reclaimed via the Epic 09 provider-invoice flow — there is no other release path.
+6. No grace-period, debt, or dispute code path exists to test — confirm their absence rather than assuming partial coverage.

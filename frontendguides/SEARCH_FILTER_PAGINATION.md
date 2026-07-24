@@ -1,732 +1,256 @@
 # Search, Filter & Pagination Guide
 ## Movello Frontend - React Implementation
 
-**Version:** 1.0  
-**Related:** [LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md](./LOVABLE_FRONTEND_DEVELOPMENT_GUIDE.md)
+**Version:** 2.0
+**Last verified against code: 2026-07-23**
+**Primary sources:**
+- `src/features/business/pages/rfq/list/RFQListPage.tsx` (RFQ list — status/date/vehicle-type filters, URL-partial-sync pagination)
+- `src/features/business/pages/rfq/bids/BidReviewPage.tsx` (bid `sortBy` on the review screen, not a list page)
+- `src/features/provider/pages/fleet/pages/FleetListPage.tsx` (fleet filters, `VehicleFilters` shape)
+- `src/features/admin/pages/verifications/BusinessVerificationListPage.tsx` (admin list convention: debounced search, status tabs, `sortBy`/`sortDescending`)
+- `src/shared/components/data/DataPagination.tsx` (the one real pagination component)
+- `src/core/services/rfq-service.ts` (real query-param names sent to the backend)
+- `src/shared/types/api.ts` (`PaginatedResponse<T>`, `PaginationParams`)
+
+This replaces the v1.0 guide, which invented a generic `useURLFilters` hook, a `useDebounce` hook, a `SearchBar` component, and a `FilterChips` component — none of which exist anywhere in the codebase (`grep` across `src/` for all four returns zero hits). The real app does not have a single shared filter/pagination abstraction; each list page hand-rolls its own filter state, and URL-sync is applied selectively (some filters sync to the URL, most don't), not through a generic hook.
 
 ---
 
-## 📋 Table of Contents
+## Table of Contents
 
-1. [Search Implementation](#search-implementation)
-2. [Filter Patterns](#filter-patterns)
-3. [Pagination Implementation](#pagination-implementation)
-4. [URL Query Sync](#url-query-sync)
-5. [State Management](#state-management)
-
----
-
-## 🔍 Search Implementation
-
-### Search Bar Component
-
-**File:** `src/shared/components/data/search-bar.tsx`
-
-```typescript
-import { useState, useEffect } from 'react';
-import { useDebounce } from '@/shared/hooks/useDebounce';
-import { Search } from 'lucide-react';
-
-interface SearchBarProps {
-  placeholder?: string;
-  onSearch: (query: string) => void;
-  debounceMs?: number;
-}
-
-export const SearchBar: FC<SearchBarProps> = ({
-  placeholder = 'Search...',
-  onSearch,
-  debounceMs = 300,
-}) => {
-  const [query, setQuery] = useState('');
-  const debouncedQuery = useDebounce(query, debounceMs);
-
-  useEffect(() => {
-    onSearch(debouncedQuery);
-  }, [debouncedQuery, onSearch]);
-
-  return (
-    <div className="relative">
-      <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-      <Input
-        type="text"
-        placeholder={placeholder}
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        className="pl-10"
-      />
-    </div>
-  );
-};
-```
-
-### Debounce Hook
-
-**File:** `src/shared/hooks/useDebounce.ts`
-
-```typescript
-import { useState, useEffect } from 'react';
-
-export const useDebounce = <T,>(value: T, delay: number): T => {
-  const [debouncedValue, setDebouncedValue] = useState<T>(value);
-
-  useEffect(() => {
-    const handler = setTimeout(() => {
-      setDebouncedValue(value);
-    }, delay);
-
-    return () => {
-      clearTimeout(handler);
-    };
-  }, [value, delay]);
-
-  return debouncedValue;
-};
-```
+1. [What's Actually Real vs. What v1.0 Invented](#whats-actually-real-vs-what-v10-invented)
+2. [The Real Pagination Contract](#the-real-pagination-contract)
+3. [DataPagination Component](#datapagination-component)
+4. [RFQ List: Filters + Partial URL Sync](#rfq-list-filters--partial-url-sync)
+5. [Bid Review: Client-Side Sort (Not a List Page)](#bid-review-client-side-sort-not-a-list-page)
+6. [Fleet List: Multi-Field Filter State](#fleet-list-multi-field-filter-state)
+7. [Admin Lists: Debounced Search + Status Tabs](#admin-lists-debounced-search--status-tabs)
+8. [Conventions to Follow When Adding a New List Page](#conventions-to-follow-when-adding-a-new-list-page)
 
 ---
 
-## 🔎 Filter Patterns
+## What's Actually Real vs. What v1.0 Invented
 
-### Marketplace Filters (Provider)
+| v1.0 claimed | Reality |
+|---|---|
+| Shared `useDebounce<T>` hook, `SearchBar` component used everywhere | No shared debounce hook or search-bar component exists. `RFQListPage` uses an explicit search button + Enter-key handler (no debounce at all); `FleetListPage`/admin list pages roll their own `setTimeout`-based debounce inline per page |
+| Shared generic `useURLFilters<T>` hook syncing an arbitrary filter object to the URL | No such hook exists. `RFQListPage` manually reads/writes specific `URLSearchParams` keys (`statuses`, `page`, `pageSize`) for **some** filters only — search text, vehicle type, and date range are **not** synced to the URL and are lost on refresh |
+| Shared `FilterChips` component | Does not exist. `hasActiveFilters` is a plain boolean used to show/hide a single "Clear" button — there's no per-filter removable chip UI anywhere in the list pages surveyed |
+| Backend query params named generically (`pageNumber`, `pageSize`, `status`, `search`, ...) | Real names are page-specific and not fully consistent across services — see [The Real Pagination Contract](#the-real-pagination-contract) below |
+| Generic `Pagination` component reading `currentPage`/`totalPages` props only | Real component is `DataPagination` — same idea, but also owns a page-size `<Select>` and computes "Showing X-Y of Z" itself; it renders `null` if `totalPages <= 1` **and** no `onPageSizeChange` was passed |
 
-**Component:** `src/features/provider/marketplace/components/MarketplaceFilters.tsx`
+---
 
-**Filter Criteria:**
-- **Vehicle Types:** Multi-select checkboxes
-- **Duration:** Radio buttons (Short-term, Long-term, All)
-- **Location:** Dropdown (Cities)
-- **Search:** Text input (debounced)
+## The Real Pagination Contract
 
-**Implementation:**
+**Response shape** (`src/shared/types/api.ts`):
 
 ```typescript
-interface MarketplaceFilters {
-  vehicleTypes: string[];
-  duration: 'SHORT' | 'LONG' | 'ALL';
-  location: string;
-  search: string;
-  pageNumber: number;
-  pageSize: number;
-}
-
-export const MarketplaceFilters = ({
-  filters,
-  onFiltersChange,
-}) => {
-  const { data: vehicleTypes } = useQuery({
-    queryKey: ['vehicle-types'],
-    queryFn: () => masterDataService.getVehicleTypes(),
-  });
-
-  const handleVehicleTypeToggle = (type: string) => {
-    const updated = filters.vehicleTypes.includes(type)
-      ? filters.vehicleTypes.filter(t => t !== type)
-      : [...filters.vehicleTypes, type];
-    onFiltersChange({ ...filters, vehicleTypes: updated, pageNumber: 1 });
+export interface PaginatedResponse<T> {
+  data: T[];
+  pagination: {
+    page: number;
+    pageSize: number;
+    totalPages: number;
+    totalItems: number;
+    hasNext: boolean;
+    hasPrevious: boolean;
   };
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Filters</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {/* Vehicle Types */}
-        <div>
-          <h4 className="font-semibold mb-2">Vehicle Type</h4>
-          <div className="space-y-2 max-h-64 overflow-y-auto">
-            {vehicleTypes?.map((type) => (
-              <label key={type.code} className="flex items-center">
-                <Checkbox
-                  checked={filters.vehicleTypes.includes(type.code)}
-                  onCheckedChange={() => handleVehicleTypeToggle(type.code)}
-                />
-                <span className="ml-2 text-sm">{type.label}</span>
-              </label>
-            ))}
-          </div>
-        </div>
-
-        {/* Duration */}
-        <div>
-          <h4 className="font-semibold mb-2">Duration</h4>
-          <RadioGroup
-            value={filters.duration}
-            onValueChange={(value) =>
-              onFiltersChange({ ...filters, duration: value as any, pageNumber: 1 })
-            }
-          >
-            <div className="space-y-2">
-              <label className="flex items-center">
-                <RadioGroupItem value="SHORT" />
-                <span className="ml-2 text-sm">Short-term (&lt; 7 days)</span>
-              </label>
-              <label className="flex items-center">
-                <RadioGroupItem value="LONG" />
-                <span className="ml-2 text-sm">Long-term (≥ 30 days)</span>
-              </label>
-              <label className="flex items-center">
-                <RadioGroupItem value="ALL" />
-                <span className="ml-2 text-sm">All</span>
-              </label>
-            </div>
-          </RadioGroup>
-        </div>
-
-        {/* Location */}
-        <div>
-          <h4 className="font-semibold mb-2">Location</h4>
-          <Select
-            value={filters.location}
-            onValueChange={(value) =>
-              onFiltersChange({ ...filters, location: value, pageNumber: 1 })
-            }
-          >
-            <SelectTrigger>
-              <SelectValue placeholder="Select city" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="">All Cities</SelectItem>
-              {cities.map((city) => (
-                <SelectItem key={city.code} value={city.code}>
-                  {city.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-
-        {/* Search */}
-        <div>
-          <h4 className="font-semibold mb-2">Search</h4>
-          <SearchBar
-            placeholder="Search by title..."
-            onSearch={(query) =>
-              onFiltersChange({ ...filters, search: query, pageNumber: 1 })
-            }
-          />
-        </div>
-
-        {/* Clear Filters */}
-        <Button
-          variant="outline"
-          onClick={() =>
-            onFiltersChange({
-              vehicleTypes: [],
-              duration: 'ALL',
-              location: '',
-              search: '',
-              pageNumber: 1,
-              pageSize: 20,
-            })
-          }
-          className="w-full"
-        >
-          Clear All Filters
-        </Button>
-      </CardContent>
-    </Card>
-  );
-};
+}
 ```
 
-### RFQ List Filters (Business)
-
-**Filter Criteria:**
-- **Status:** Dropdown (Draft, Published, Bidding Closed, Awarded)
-- **Date Range:** Date picker (from/to)
-- **Vehicle Type:** Dropdown
-- **Search:** Text input
-
-**Implementation:**
+**Request shape** — this is the part that's easy to get wrong. Frontend-side filter objects use `page`/`pageSize` (e.g. `RFQFilters.page`), but the service layer translates that to the backend's actual query-string parameter names, which are **not** always the same word:
 
 ```typescript
-interface RFQFilters {
-  status?: string;
-  startDateFrom?: string;
-  startDateTo?: string;
-  vehicleTypeCode?: string;
-  search?: string;
-  pageNumber: number;
-  pageSize: number;
-  sortBy?: string;
-  sortDescending?: boolean;
+// src/core/services/rfq-service.ts — listRfqs()
+// Query params actually sent: pageNumber, pageSize, status(es), search,
+// vehicleType, fuelType, dateFrom, dateTo, sortBy, businessId
+if (filters.page) params.append('pageNumber', String(filters.page));      // page -> pageNumber
+if (filters.pageSize) params.append('pageSize', String(filters.pageSize));
+// status can be a single value ('status') OR a repeated multi-select ('statuses')
+if (Array.isArray(filters.status)) {
+  filters.status.forEach((s) => params.append('statuses', s));
+} else if (filters.status) {
+  params.append('status', filters.status);
 }
-
-export const RFQFilters = ({ filters, onFiltersChange }) => {
-  return (
-    <div className="flex flex-wrap gap-4 items-end">
-      <FormField label="Status">
-        <Select
-          value={filters.status || 'all'}
-          onValueChange={(value) =>
-            onFiltersChange({ ...filters, status: value === 'all' ? undefined : value, pageNumber: 1 })
-          }
-        >
-          <SelectTrigger className="w-48">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Status</SelectItem>
-            <SelectItem value="DRAFT">Draft</SelectItem>
-            <SelectItem value="PUBLISHED">Published</SelectItem>
-            <SelectItem value="BIDDING_CLOSED">Bidding Closed</SelectItem>
-            <SelectItem value="AWARDED">Awarded</SelectItem>
-          </SelectContent>
-        </Select>
-      </FormField>
-
-      <FormField label="From Date">
-        <DatePicker
-          value={filters.startDateFrom ? new Date(filters.startDateFrom) : undefined}
-          onChange={(date) =>
-            onFiltersChange({
-              ...filters,
-              startDateFrom: date ? formatISO(date) : undefined,
-              pageNumber: 1,
-            })
-          }
-        />
-      </FormField>
-
-      <FormField label="To Date">
-        <DatePicker
-          value={filters.startDateTo ? new Date(filters.startDateTo) : undefined}
-          onChange={(date) =>
-            onFiltersChange({
-              ...filters,
-              startDateTo: date ? formatISO(date) : undefined,
-              pageNumber: 1,
-            })
-          }
-        />
-      </FormField>
-
-      <FormField label="Vehicle Type">
-        <Select
-          value={filters.vehicleTypeCode || 'all'}
-          onValueChange={(value) =>
-            onFiltersChange({
-              ...filters,
-              vehicleTypeCode: value === 'all' ? undefined : value,
-              pageNumber: 1,
-            })
-          }
-        >
-          <SelectTrigger className="w-48">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">All Types</SelectItem>
-            {vehicleTypes?.map((type) => (
-              <SelectItem key={type.code} value={type.code}>
-                {type.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </FormField>
-
-      <div className="flex-1 min-w-[200px]">
-        <SearchBar
-          placeholder="Search RFQs..."
-          onSearch={(query) =>
-            onFiltersChange({ ...filters, search: query, pageNumber: 1 })
-          }
-        />
-      </div>
-    </div>
-  );
-};
+if (filters.search) params.append('search', filters.search);
+if (filters.vehicleType) params.append('vehicleType', filters.vehicleType);
+if (filters.dateFrom) params.append('dateFrom', filters.dateFrom);
+if (filters.dateTo) params.append('dateTo', filters.dateTo);
+if (filters.sortBy) params.append('sortBy', filters.sortBy);
 ```
 
-### Contract Filters
-
-**Filter Criteria:**
-- **Status:** Dropdown
-- **Date Range:** Date pickers
-- **Provider:** Search/Select
-- **Contract Number:** Search
-
-### Vehicle Filters (Provider)
-
-**Filter Criteria:**
-- **Status:** Dropdown (Active, Assigned, Under Review, Maintenance, Suspended)
-- **Vehicle Type:** Dropdown
-- **Insurance Status:** Dropdown (Active, Expired, Pending)
-- **Tags:** Multi-select
+Admin list services (e.g. `adminVerificationService.getBusinesses`) instead pass `pageNumber`/`pageSize`/`sortBy`/`sortDescending` directly as named fields (matching `PaginationParams` in `api.ts`) rather than building a `URLSearchParams` object by hand — **two slightly different conventions coexist** (manual `URLSearchParams` building in `rfq-service.ts` vs. typed param objects elsewhere). When adding a new list, check the sibling service file for the module you're extending rather than assuming one global convention.
 
 ---
 
-## 📄 Pagination Implementation
+## DataPagination Component
 
-### Pagination Component
-
-**File:** `src/shared/components/data/pagination.tsx`
+**File:** `src/shared/components/data/DataPagination.tsx`
 
 ```typescript
-import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight } from 'lucide-react';
-
-interface PaginationProps {
+interface DataPaginationProps {
   currentPage: number;
   totalPages: number;
+  pageSize: number;
+  totalItems: number;
   onPageChange: (page: number) => void;
-  pageSize?: number;
-  totalItems?: number;
+  onPageSizeChange?: (size: number) => void;
+  pageSizeOptions?: number[]; // default [10, 20, 50, 100]
+  compact?: boolean;          // hides first/last-page buttons, shows fewer page numbers
+  className?: string;
 }
+```
 
-export const Pagination: FC<PaginationProps> = ({
-  currentPage,
-  totalPages,
-  onPageChange,
-  pageSize,
-  totalItems,
-}) => {
-  const getPageNumbers = () => {
-    const pages: (number | string)[] = [];
-    const maxVisible = 7;
+Renders `null` when `totalPages <= 1` **and** no `onPageSizeChange` is supplied — a list with a page-size selector always renders the control even with one page, but a list without one hides the whole footer once there's nothing to page through. Shows a mobile-only "`currentPage / totalPages`" indicator below the `sm:` breakpoint instead of numbered buttons.
 
-    if (totalPages <= maxVisible) {
-      // Show all pages
-      for (let i = 1; i <= totalPages; i++) {
-        pages.push(i);
-      }
-    } else {
-      // Show first, last, and pages around current
-      pages.push(1);
-      
-      if (currentPage > 3) {
-        pages.push('...');
-      }
+Usage:
 
-      const start = Math.max(2, currentPage - 1);
-      const end = Math.min(totalPages - 1, currentPage + 1);
+```typescript
+{data && data.pagination.totalPages > 1 && (
+  <DataPagination
+    currentPage={data.pagination.page}
+    totalPages={data.pagination.totalPages}
+    totalItems={data.pagination.totalItems}
+    pageSize={pageSize}
+    onPageChange={handlePageChange}
+    onPageSizeChange={handlePageSizeChange}
+  />
+)}
+```
 
-      for (let i = start; i <= end; i++) {
-        pages.push(i);
-      }
+---
 
-      if (currentPage < totalPages - 2) {
-        pages.push('...');
-      }
+## RFQ List: Filters + Partial URL Sync
 
-      pages.push(totalPages);
+**File:** `src/features/business/pages/rfq/list/RFQListPage.tsx`
+
+Real filter state and behavior:
+
+```typescript
+const [searchInput, setSearchInput] = useState(searchParams.get('search') || '');
+const [searchQuery, setSearchQuery] = useState(searchParams.get('search') || '');
+const [dateRange, setDateRange] = useState<DateRange | undefined>();       // NOT synced to URL
+const [vehicleTypeFilter, setVehicleTypeFilter] = useState(searchParams.get('vehicleType') || '');
+const [currentPage, setCurrentPage] = useState(Number(searchParams.get('page')) || 1);
+const [pageSize, setPageSize] = useState(Number(searchParams.get('pageSize')) || 10);
+const [selectedStatuses, setSelectedStatuses] = useState<RFQStatus[]>(/* read from 'statuses' repeated param, or legacy single 'status' */);
+```
+
+Key real-world details:
+- **Search is explicit, not debounced.** There's a separate `searchInput` (what's typed) and `searchQuery` (what's actually queried); the query only updates on a search-icon click or Enter keypress (`handleSearch`), and a separate X button clears both and resets to page 1.
+- **Only status, page, and pageSize are written back to the URL** (`newParams` built from `searchParams` + the changed key(s), then `setSearchParams(newParams)`). Search text, vehicle-type filter, and date range are component state only — refreshing the page loses them, and a shared/bookmarked link does not reproduce a search or date filter, only the status filter and pagination position.
+- **Status is a multi-select** (`DropdownMenuCheckboxItem` per status), stored as repeated `?statuses=X&statuses=Y` URL params, with backward-compat reading of a legacy singular `?status=X` param into the same array.
+- **`hasActiveFilters`** is a plain OR of `searchQuery || dateRange || vehicleTypeFilter || selectedStatuses.length > 0`, driving a single "Clear" button — there is no per-filter chip/pill UI.
+- **Every filter change resets `currentPage` to 1** (status toggle, search, date range, vehicle type, clear-all) — this convention should be preserved in any new filter added to this page.
+- The query itself: `useQuery({ queryKey: ['rfqs', filters], queryFn: () => rfqService.listRfqs(filters) })` — the whole `filters` object is the cache key, so React Query naturally re-fetches on any filter change and caches per unique filter combination. There is no `keepPreviousData`/`placeholderData` configured on this query — the grid shows its skeleton loader on every filter change rather than the previous page's data.
+
+---
+
+## Bid Review: Client-Side Sort (Not a List Page)
+
+**File:** `src/features/business/pages/rfq/bids/BidReviewPage.tsx`
+
+This page is commonly mis-described as having "filters" — it doesn't. It fetches **all** bids for one RFQ in a single call (`bidService.getRFQBids(rfqId)`, no pagination params) and applies a **client-side sort only**:
+
+```typescript
+type SortOption = 'price_asc' | 'price_desc' | 'quantity' | 'trust_score' | 'time';
+const [sortBy, setSortBy] = useState<SortOption>('price_asc');
+
+const sortBids = useCallback((bids: Bid[]): Bid[] => {
+  return [...bids].sort((a, b) => {
+    switch (sortBy) {
+      case 'price_asc': return a.unitPrice - b.unitPrice;
+      case 'price_desc': return b.unitPrice - a.unitPrice;
+      case 'quantity': return b.quantityOffered - a.quantityOffered;
+      case 'trust_score': return (b.trustScore || 0) - (a.trustScore || 0);
+      case 'time': return new Date(a.submittedAt).getTime() - new Date(b.submittedAt).getTime();
+      default: return 0;
     }
-
-    return pages;
-  };
-
-  return (
-    <div className="flex items-center justify-between">
-      <div className="text-sm text-gray-600">
-        {totalItems && (
-          <span>
-            Showing {(currentPage - 1) * (pageSize || 20) + 1} to{' '}
-            {Math.min(currentPage * (pageSize || 20), totalItems)} of {totalItems} results
-          </span>
-        )}
-      </div>
-
-      <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => onPageChange(1)}
-          disabled={currentPage === 1}
-        >
-          <ChevronsLeft className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => onPageChange(currentPage - 1)}
-          disabled={currentPage === 1}
-        >
-          <ChevronLeft className="h-4 w-4" />
-        </Button>
-
-        <div className="flex gap-1">
-          {getPageNumbers().map((page, index) => {
-            if (page === '...') {
-              return (
-                <span key={`ellipsis-${index}`} className="px-2">
-                  ...
-                </span>
-              );
-            }
-
-            const pageNum = page as number;
-            return (
-              <Button
-                key={pageNum}
-                variant={currentPage === pageNum ? 'default' : 'outline'}
-                size="sm"
-                onClick={() => onPageChange(pageNum)}
-              >
-                {pageNum}
-              </Button>
-            );
-          })}
-        </div>
-
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => onPageChange(currentPage + 1)}
-          disabled={currentPage === totalPages}
-        >
-          <ChevronRight className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => onPageChange(totalPages)}
-          disabled={currentPage === totalPages}
-        >
-          <ChevronsRight className="h-4 w-4" />
-        </Button>
-      </div>
-    </div>
-  );
-};
+  });
+}, [sortBy]);
 ```
 
-### Usage Example
-
-```typescript
-const { data } = useQuery({
-  queryKey: ['rfqs', filters],
-  queryFn: () => rfqService.getRFQs(filters),
-});
-
-return (
-  <>
-    {/* List content */}
-    <Pagination
-      currentPage={data?.pagination.page || 1}
-      totalPages={data?.pagination.totalPages || 1}
-      pageSize={data?.pagination.pageSize}
-      totalItems={data?.pagination.totalItems}
-      onPageChange={(page) => setFilters({ ...filters, pageNumber: page })}
-    />
-  </>
-);
-```
+Bids are grouped into per-line-item tabs (`Tabs`/`TabsList`/`TabsTrigger`, one tab per `RFQLineItem`), and the sort is applied independently within whichever tab is active (`sortBids(lineItem.bids)`), not globally across line items. There is no server-side sort endpoint involved here — sorting a few dozen bids for one RFQ client-side is a deliberate, reasonable simplification, not a gap.
 
 ---
 
-## 🔗 URL Query Sync
+## Fleet List: Multi-Field Filter State
 
-### Sync Filters with URL
-
-**Hook:** `src/shared/hooks/useURLFilters.ts`
+**File:** `src/features/provider/pages/fleet/pages/FleetListPage.tsx`
 
 ```typescript
-import { useSearchParams } from 'react-router-dom';
-import { useMemo } from 'react';
-
-export const useURLFilters = <T extends Record<string, any>>(
-  defaultFilters: T
-): [T, (filters: T) => void] => {
-  const [searchParams, setSearchParams] = useSearchParams();
-
-  const filters = useMemo(() => {
-    const params: T = { ...defaultFilters };
-    
-    searchParams.forEach((value, key) => {
-      if (key in defaultFilters) {
-        // Handle different types
-        if (typeof defaultFilters[key] === 'number') {
-          params[key as keyof T] = Number(value) as T[keyof T];
-        } else if (typeof defaultFilters[key] === 'boolean') {
-          params[key as keyof T] = (value === 'true') as T[keyof T];
-        } else if (Array.isArray(defaultFilters[key])) {
-          params[key as keyof T] = value.split(',') as T[keyof T];
-        } else {
-          params[key as keyof T] = value as T[keyof T];
-        }
-      }
-    });
-
-    return params;
-  }, [searchParams, defaultFilters]);
-
-  const updateFilters = (newFilters: T) => {
-    const newParams = new URLSearchParams();
-    
-    Object.entries(newFilters).forEach(([key, value]) => {
-      if (value !== undefined && value !== null && value !== '') {
-        if (Array.isArray(value)) {
-          if (value.length > 0) {
-            newParams.set(key, value.join(','));
-          }
-        } else {
-          newParams.set(key, String(value));
-        }
-      }
-    });
-
-    setSearchParams(newParams, { replace: true });
-  };
-
-  return [filters, updateFilters];
-};
-```
-
-### Usage
-
-```typescript
-const [filters, setFilters] = useURLFilters<RFQFilters>({
-  pageNumber: 1,
-  pageSize: 20,
-  status: undefined,
-  search: '',
+const [filters, setFilters] = useState<VehicleFilters>({
+  status: 'ALL',
+  vehicleType: 'ALL',
+  directRentalAvailability: 'ALL',   // undocumented in older specs — see Direct Rental (epic-21)
+  sortBy: 'createdAt',
+  sortDescending: true,
+  page: 1,
+  pageSize: 12,
 });
-
-// Filters automatically sync with URL
-// Changing filters updates URL
-// Refreshing page preserves filters
+const [searchInput, setSearchInput] = useState('');
+const [plateNumberInput, setPlateNumberInput] = useState('');
+const [makeInput, setMakeInput] = useState('');
+const [modelInput, setModelInput] = useState('');
 ```
+
+Notable real behavior:
+- Search/plate/make/model are **separate text inputs**, all held in component state, and only merged into `filters` (triggering the actual query) when `handleSearch()` fires — same "explicit apply, not live-debounced" pattern as `RFQListPage`.
+- `vehicleType` options are **not hardcoded** — they come from `lookupService.getVehicleTypes()` (a master-data lookup query, `staleTime: 1000 * 60 * 30`), not a fixed `VEHICLE_TYPE_OPTIONS` array. Any new page listing vehicle types should query the lookup service, not hardcode a list.
+- A second, independent query (`provider-fleet-capacity` via `providerFleetCapacityService.getCapacitySnapshot()`) cross-references which vehicles are already committed to a Direct Rental cart/RFQ award (`inactiveVehicleIds`) and is merged into the row display (`getCommitmentLabel`) — this fleet-capacity cross-check between RFQ bidding and Direct Rental is a real, undocumented-in-older-docs feature (see `project-docs/18_Implementation_Coverage_Audit.md` §7.2).
+- View mode (`grid`/`list`) is local UI state, unrelated to filtering, and not persisted or URL-synced.
 
 ---
 
-## 🔄 State Management
+## Admin Lists: Debounced Search + Status Tabs
 
-### Filter State Pattern
+**File:** `src/features/admin/pages/verifications/BusinessVerificationListPage.tsx` (representative of the admin list convention; `ProviderVerificationListPage.tsx`/`VehicleVerificationListPage.tsx` follow the same shape)
 
 ```typescript
-// Using React Query with filters
+const [statusFilter, setStatusFilter] = useState<VerificationStatus | 'ALL'>('PENDING');
+const [searchQuery, setSearchQuery] = useState('');
+const [sortBy, setSortBy] = useState<string>('CreatedAt');
+const [sortDescending, setSortDescending] = useState<boolean>(true);
+const [page, setPage] = useState(1);
+const [pageSize, setPageSize] = useState(10);
+
+// Debounced search — the one place a debounce pattern is actually used, and it's
+// hand-rolled per-page, not a shared hook:
+const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
+useMemo(() => {
+  const timer = setTimeout(() => {
+    setDebouncedSearch(searchQuery);
+    setPage(1);
+  }, 300);
+  return () => clearTimeout(timer);
+}, [searchQuery]);
+
 const { data, isLoading } = useQuery({
-  queryKey: ['rfqs', filters], // Filters in query key for caching
-  queryFn: () => rfqService.getRFQs(filters),
-  keepPreviousData: true, // Show previous data while loading
-  staleTime: 5 * 60 * 1000,
+  queryKey: ['admin-business-verifications', statusFilter, debouncedSearch, businessTypeFilter, tierFilter, sortBy, sortDescending, page, pageSize],
+  queryFn: () => adminVerificationService.getBusinesses({
+    pageNumber: page, pageSize,
+    search: debouncedSearch || undefined,
+    status: statusFilter === 'ALL' ? undefined : statusFilter,
+    sortBy, sortDescending,
+  }),
 });
-
-// Filter state in component
-const [filters, setFilters] = useState<RFQFilters>({
-  pageNumber: 1,
-  pageSize: 20,
-});
-
-// Update filters (resets to page 1)
-const handleFilterChange = (newFilters: Partial<RFQFilters>) => {
-  setFilters({ ...filters, ...newFilters, pageNumber: 1 });
-};
 ```
 
-### Filter Chips Component
-
-**File:** `src/shared/components/data/filter-chips.tsx`
-
-```typescript
-interface FilterChip {
-  key: string;
-  label: string;
-  value: string;
-  onRemove: () => void;
-}
-
-export const FilterChips = ({ chips }: { chips: FilterChip[] }) => {
-  if (chips.length === 0) return null;
-
-  return (
-    <div className="flex flex-wrap gap-2">
-      {chips.map((chip) => (
-        <Badge key={chip.key} variant="secondary" className="flex items-center gap-1">
-          <span>{chip.label}: {chip.value}</span>
-          <button
-            onClick={chip.onRemove}
-            className="ml-1 hover:bg-gray-300 rounded-full p-0.5"
-          >
-            <X className="h-3 w-3" />
-          </button>
-        </Badge>
-      ))}
-    </div>
-  );
-};
-```
+Differences from the RFQ list convention worth calling out if extending an admin page:
+- **Status is a `Tabs` row** (`PENDING` / etc.), not a multi-select dropdown — admin verification queues are single-status-at-a-time by design.
+- **Search actually is debounced here** (300ms via `useMemo` + `setTimeout`), unlike `RFQListPage`'s explicit search button. Note the debounce is implemented with `useMemo` as a side-effect trick rather than `useEffect` — copy this pattern only if you're matching this file's existing style, it's not the idiomatic React approach.
+- The full query key includes every filter field individually (not one `filters` object), so cache entries are keyed the same way but constructed differently than the RFQ list.
 
 ---
 
-## 📊 Sort Implementation
+## Conventions to Follow When Adding a New List Page
 
-### Sortable Table Header
+Based on what's actually consistent across the real pages above:
 
-```typescript
-interface SortableHeaderProps {
-  column: string;
-  currentSort: { by: string; descending: boolean };
-  onSort: (column: string) => void;
-  children: React.ReactNode;
-}
-
-export const SortableHeader: FC<SortableHeaderProps> = ({
-  column,
-  currentSort,
-  onSort,
-  children,
-}) => {
-  const isActive = currentSort.by === column;
-  const isDescending = isActive && currentSort.descending;
-
-  return (
-    <TableHead>
-      <button
-        onClick={() => onSort(column)}
-        className="flex items-center gap-1 hover:text-gray-700"
-      >
-        {children}
-        {isActive ? (
-          isDescending ? <ArrowDown className="h-4 w-4" /> : <ArrowUp className="h-4 w-4" />
-        ) : (
-          <ArrowUpDown className="h-4 w-4 text-gray-400" />
-        )}
-      </button>
-    </TableHead>
-  );
-};
-```
-
-### Usage
-
-```typescript
-const [sort, setSort] = useState({ by: 'createdAt', descending: true });
-
-<SortableHeader
-  column="createdAt"
-  currentSort={sort}
-  onSort={(column) =>
-    setSort({
-      by: column,
-      descending: sort.by === column ? !sort.descending : true,
-    })
-  }
->
-  Created Date
-</SortableHeader>
-```
-
----
-
-## ✅ Best Practices
-
-1. **Debounce search** inputs (300ms default)
-2. **Reset to page 1** when filters change
-3. **Sync filters with URL** for shareable links
-4. **Use React Query** for server state
-5. **Keep previous data** while loading new page
-6. **Show loading states** during filter changes
-7. **Clear filters** button for better UX
-8. **Filter chips** to show active filters
-9. **Mobile responsive** filter panels
-10. **Accessible** filter controls (keyboard navigation)
-
----
-
-**END OF SEARCH/FILTER/PAGINATION GUIDE**
-
-*For specific implementations, see portal-specific guides*
-
+1. **Reset `page` to 1 on every filter change** — every real list page does this without exception.
+2. **Use `DataPagination`**, not a hand-rolled pager — it already handles the page-size selector, ellipsis truncation, and the "Showing X-Y of Z" line.
+3. **Put the whole filter object in the React Query key** (`queryKey: ['thing', filters]`) rather than individual primitives, unless the page you're extending already uses the individual-fields convention (admin lists) — match the sibling file in that feature area.
+4. **Don't assume URL sync exists or is complete** — check the specific page. `RFQListPage` only syncs `statuses`/`page`/`pageSize`; most filter state elsewhere isn't URL-synced at all. If a task requires shareable/bookmarkable filter links, that needs to be added, not assumed present.
+5. **Confirm the actual backend query-param names in the relevant `*-service.ts` file before wiring a new filter** — `pageNumber` vs. `page`, `statuses` (repeated) vs. `status` (single), and per-module naming are not uniform across services.
+6. **Debounce only if the page needs live-as-you-type search**; the more common pattern in this codebase is an explicit search action (button/Enter), which avoids needless network chatter on every keystroke and is simpler to reason about — don't add a debounce hook by default.
