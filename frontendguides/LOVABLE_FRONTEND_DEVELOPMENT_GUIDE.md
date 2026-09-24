@@ -1,9 +1,9 @@
 # Lovable Frontend Development Guide
-## Movello B2B Mobility Marketplace — React + Vite + TypeScript (as built)
+## Anqelba Car Rental B2B Mobility Marketplace — React + Vite + TypeScript (as built)
 
 **Last verified against code: 2026-07-23**
 
-> **Reframing notice.** This document was originally written (December 2025) as a **from-scratch build prompt for the Lovable AI platform** — instructions for generating a new frontend, targeting React 18.2+/Vite 5.0+, "npm or pnpm," a `src/app/routes/index.tsx` router file, a `ui-store.ts` third Zustand store, `src/styles/globals.css`, and `react-error-boundary`/optional Playwright as assumed tooling. **The app was in fact bootstrapped via Lovable early on** (`lovable-tagger`'s `componentTagger()` Vite plugin still runs in development mode as a leftover of that origin) **but has since been extensively hand-developed well beyond that scaffold**, and several structural details in the original prompt were never actually how the app was built (there is no separate router file, no `ui-store`, no `styles/` folder, no `react-error-boundary` dependency). Rather than delete this document, it has been rewritten as an **as-built development reference** — the section structure (tech stack, project structure, patterns, error handling, responsive design, accessibility, performance, build/deploy) is preserved because it's still a useful map of the codebase, but every claim has been corrected against `package.json`, `vite.config.ts`, and the real `src/` tree in `marketplace-project-implementation/movello-marketplace-core/`. Where this document and the code disagree in the future, trust the code and `project-docs/18_Implementation_Coverage_Audit.md`.
+> **Reframing notice.** This document was originally written (December 2025) as a **from-scratch build prompt for the Lovable AI platform** — instructions for generating a new frontend, targeting React 18.2+/Vite 5.0+, "npm or pnpm," a `src/app/routes/index.tsx` router file, a `ui-store.ts` third Zustand store, `src/styles/globals.css`, and `react-error-boundary`/optional Playwright as assumed tooling. **The app was in fact bootstrapped via Lovable early on** (`lovable-tagger`'s `componentTagger()` Vite plugin still runs in development mode as a leftover of that origin) **but has since been extensively hand-developed well beyond that scaffold**, and several structural details in the original prompt were never actually how the app was built (there is no separate router file, no `ui-store`, no `styles/` folder, no `react-error-boundary` dependency). Rather than delete this document, it has been rewritten as an **as-built development reference** — the section structure (tech stack, project structure, patterns, error handling, responsive design, accessibility, performance, build/deploy) is preserved because it's still a useful map of the codebase, but every claim has been corrected against `package.json`, `vite.config.ts`, and the real `src/` tree in `marketplace-project-implementation/anqelbacarrental-marketplace-core/`. Where this document and the code disagree in the future, trust the code and `project-docs/18_Implementation_Coverage_Audit.md`.
 
 ---
 
@@ -27,7 +27,7 @@
 ## 🎯 Project Overview
 
 ### Purpose
-This guide documents how the Movello B2B Mobility Marketplace frontend is actually built — React, Vite, Tailwind CSS, and TypeScript, in the single Vite project `marketplace-project-implementation/movello-marketplace-core/` — for anyone extending it or generating new screens consistent with the real codebase.
+This guide documents how the Anqelba Car Rental B2B Mobility Marketplace frontend is actually built — React, Vite, Tailwind CSS, and TypeScript, in the single Vite project `marketplace-project-implementation/anqelbacarrental-marketplace-core/` — for anyone extending it or generating new screens consistent with the real codebase.
 
 ### Application Structure
 The application is **one Vite single-page app** serving **three role-scoped portals**, not three separate deployables:
@@ -105,7 +105,7 @@ The original prompt listed "ESLint + Prettier" and "Playwright (optional)" — n
 ## 📁 Project Structure (verified against the real `src/` tree — corrected from the original prompt's structure)
 
 ```
-movello-marketplace-core/
+anqelbacarrental-marketplace-core/
 ├── public/
 ├── src/
 │   ├── App.tsx                        # single flat route table for the WHOLE app — there is
@@ -484,7 +484,7 @@ There is no confirmed custom `<Image>` wrapper component with built-in lazy-load
 ## 🚀 Deployment & Build
 
 ### Environment Variables (real resolution order, `vite.config.ts`)
-Backend URL resolution order is: `BACKEND_URL` env (Docker runtime) → `VITE_BACKEND_URL` → a mode-specific default. Each Vite `--mode` (`local`, `development`, `staging`, `production`) points at a different `carclaks.com` host (or `localhost:5207` for local dev) — there is no single static `.env.local` value that covers every environment as the original prompt implied:
+Backend URL resolution order is: `BACKEND_URL` env (Docker runtime) → `VITE_BACKEND_URL` → a mode-specific default. Each Vite `--mode` (`local`, `development`, `staging`, `production`) points at a different `anqelbacarrental.com` host (or `localhost:5207` for local dev) — there is no single static `.env.local` value that covers every environment as the original prompt implied:
 ```bash
 # .env.local (local dev only — other modes resolve their backend URL differently, see vite.config.ts)
 VITE_BACKEND_URL=http://localhost:5207

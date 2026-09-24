@@ -1,4 +1,4 @@
-# UI Design Reference (for Stitch/v0/Figma AI) — Movello B2B Mobility Marketplace
+# UI Design Reference (for Stitch/v0/Figma AI) — Anqelba Car Rental B2B Mobility Marketplace
 
 **Last verified against code: 2026-07-23**
 

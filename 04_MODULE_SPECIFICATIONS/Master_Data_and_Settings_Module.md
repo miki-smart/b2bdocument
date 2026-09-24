@@ -276,7 +276,7 @@ These are the module's most straightforwardly "as designed" pieces — real CRUD
 - **Finance module:** `EscrowPolicyRepository.CalculateEscrowLockDaysAsync` (real but dead-path, §5.2); `SettlementPolicyRule` (unused by the live settlement job, §5.6); `Bank`/Chapa-code mapping for payouts.
 - **Marketplace module:** consumes `lookups`/`lookup_types` for RFQ line-item vehicle/engine/period fields.
 - **Delivery module:** consumes `ChecklistTemplateItem` for the inspection-checklist UI.
-- **Web admin (`movello-marketplace-core`):** full CRUD screens for tiers, commission/escrow/settlement/contract policy versions and rules, contract-terms templates, checklist templates, document types, KYC requirements, lookups, settings, banks, platform bank accounts — the admin *authoring* surface is comprehensive even where the *consumption* side (§5) is stubbed or bypassed.
+- **Web admin (`anqelbacarrental-marketplace-core`):** full CRUD screens for tiers, commission/escrow/settlement/contract policy versions and rules, contract-terms templates, checklist templates, document types, KYC requirements, lookups, settings, banks, platform bank accounts — the admin *authoring* surface is comprehensive even where the *consumption* side (§5) is stubbed or bypassed.
 
 ## Related documents
 

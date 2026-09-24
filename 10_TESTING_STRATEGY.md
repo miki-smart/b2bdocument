@@ -8,7 +8,7 @@
 
 ## 0. What changed in this revision
 
-v1.0 named a toolset that isn't in this repo — Testcontainers and Playwright appear nowhere in the actual test projects — and implied a Kubernetes-scale "70/20/10 pyramid" with a nightly Playwright suite that was never built. What actually exists is a single xUnit test project for the backend (`Marketplace.Tests`) using **EF Core InMemory** (not Testcontainers) for its integration-style tests, plus a **standalone Cypress project** (`movello-marketplace-e2e`) that tests the web frontend against the real backend over HTTP — not Playwright, and explicitly not covering either Flutter mobile app. This rewrite is built from the real project files: `backend/tests/Marketplace.Tests/Marketplace.Tests.csproj` and its source tree, `backend/.github/workflows/ci-production.yml`, and `movello-marketplace-e2e/package.json`/`README.md`/`cypress/e2e/`.
+v1.0 named a toolset that isn't in this repo — Testcontainers and Playwright appear nowhere in the actual test projects — and implied a Kubernetes-scale "70/20/10 pyramid" with a nightly Playwright suite that was never built. What actually exists is a single xUnit test project for the backend (`Marketplace.Tests`) using **EF Core InMemory** (not Testcontainers) for its integration-style tests, plus a **standalone Cypress project** (`anqelbacarrental-marketplace-e2e`) that tests the web frontend against the real backend over HTTP — not Playwright, and explicitly not covering either Flutter mobile app. This rewrite is built from the real project files: `backend/tests/Marketplace.Tests/Marketplace.Tests.csproj` and its source tree, `backend/.github/workflows/ci-production.yml`, and `anqelbacarrental-marketplace-e2e/package.json`/`README.md`/`cypress/e2e/`.
 
 ---
 
@@ -17,7 +17,7 @@ v1.0 named a toolset that isn't in this repo — Testcontainers and Playwright a
 | Surface | Project | Frameworks | Scope |
 | --- | --- | --- | --- |
 | Backend unit + "integration" | `backend/tests/Marketplace.Tests/` | xUnit, Moq, FluentAssertions, EF Core InMemory, `Microsoft.AspNetCore.Mvc.Testing` | Domain/handler/validator logic, controller-boundary behavior, architecture/convention rules, in-process HTTP tests against an in-memory DB. |
-| Web + backend E2E | `movello-marketplace-e2e/` (standalone repo/folder, no shared code with the web app) | Cypress 13.6, TypeScript | Browser-driven flows against a running web app + running backend, over HTTP. Web + backend only — **not** the Flutter apps. |
+| Web + backend E2E | `anqelbacarrental-marketplace-e2e/` (standalone repo/folder, no shared code with the web app) | Cypress 13.6, TypeScript | Browser-driven flows against a running web app + running backend, over HTTP. Web + backend only — **not** the Flutter apps. |
 | Mobile (business app, provider app) | — | — | **No automated test suite found for either Flutter app in this pass** — treat mobile QA as manual/unverified until a `flutter test` suite is located and confirmed. |
 
 There is no weighted "70/20/10" split enforced anywhere (no code-coverage gate in CI ties a percentage to a category) — treat that framing as aspirational, not a real, measured target.
@@ -108,14 +108,14 @@ CI **does** spin up real ephemeral Postgres and Redis service containers and poi
 
 ---
 
-## 3. Web + Backend E2E Suite (`movello-marketplace-e2e`)
+## 3. Web + Backend E2E Suite (`anqelbacarrental-marketplace-e2e`)
 
 ### 3.1 What it actually is
 
-A **standalone project**, deliberately kept separate from `movello-marketplace-core` (no shared code, own `package.json`) so frontend builds never carry test overhead. It drives the real web app via Cypress and asserts against the real backend API's effects — **it does not test either Flutter mobile app**, and by its own README, deliberately excludes CI/CD, Docker, and any deployment automation ("Per your requirements, this test project excludes: CI/CD pipelines... Docker containers... These tests are designed to run locally on your development machine").
+A **standalone project**, deliberately kept separate from `anqelbacarrental-marketplace-core` (no shared code, own `package.json`) so frontend builds never carry test overhead. It drives the real web app via Cypress and asserts against the real backend API's effects — **it does not test either Flutter mobile app**, and by its own README, deliberately excludes CI/CD, Docker, and any deployment automation ("Per your requirements, this test project excludes: CI/CD pipelines... Docker containers... These tests are designed to run locally on your development machine").
 
 - **Framework:** Cypress 13.6.0 + TypeScript 5.3, Page Object Model (`cypress/support/pages/`), 31 custom commands (`cypress/support/commands.ts`).
-- **Targets:** frontend at `http://localhost:8060` (`movello-marketplace-core`, `npm run dev`), backend at `http://localhost:5207` (`dotnet run`) — both must be running locally; there is no containerized or CI-hosted variant of this suite today.
+- **Targets:** frontend at `http://localhost:8060` (`anqelbacarrental-marketplace-core`, `npm run dev`), backend at `http://localhost:5207` (`dotnet run`) — both must be running locally; there is no containerized or CI-hosted variant of this suite today.
 - **Test data:** fixture-driven — 4 businesses (B1–B4), 4 providers (P1–P4) with 25 vehicles each (100 total), 16 RFQs, 1 admin — plus PDF fixtures for the 7 document types used across KYC/KYB/insurance uploads.
 
 ### 3.2 Planned vs. actually implemented — a real, material gap
@@ -142,7 +142,7 @@ Tests are **designed to run sequentially, in module order** (`npm run test:regis
 
 ## 4. Mobile Testing — not verified in this pass
 
-No automated test directory (`test/`, `integration_test/`) was confirmed for either `movello-mobile/business_app` or `movello-mobile/provider_app` in this pass. If a `flutter test`/`integration_test` suite exists, it was not part of the files reviewed for this rewrite — do not claim mobile test coverage numbers without checking `movello-mobile/*/test/` and `*/.github/workflows/ci.yml` (if present) directly first. Treat mobile QA as unverified rather than either "covered" or "absent" until that check is done.
+No automated test directory (`test/`, `integration_test/`) was confirmed for either `anqelbacarrental-mobile/business_app` or `anqelbacarrental-mobile/provider_app` in this pass. If a `flutter test`/`integration_test` suite exists, it was not part of the files reviewed for this rewrite — do not claim mobile test coverage numbers without checking `anqelbacarrental-mobile/*/test/` and `*/.github/workflows/ci.yml` (if present) directly first. Treat mobile QA as unverified rather than either "covered" or "absent" until that check is done.
 
 ---
 

@@ -1,4 +1,4 @@
-# Movello — Architecture Overview
+# Anqelba Car Rental — Architecture Overview
 
 **Version:** 2.0 (rewritten against running code)
 **Last verified against code:** 2026-07-23
@@ -156,7 +156,7 @@ minio             — object storage
 rabbitmq          — provisioned message broker (see §1.4 on actual usage)
 ```
 
-The web app (`movello-marketplace-core`) is a **separate** Vite/React build with its own `docker-compose*.yml` files (development/production/VPS variants), typically deployed as a static build behind Nginx — independently of the backend's deployment. Mobile apps (`business_app`, `provider_app`) are native Flutter builds distributed via app stores/APK — not containerized, not part of this compose topology at all.
+The web app (`anqelbacarrental-marketplace-core`) is a **separate** Vite/React build with its own `docker-compose*.yml` files (development/production/VPS variants), typically deployed as a static build behind Nginx — independently of the backend's deployment. Mobile apps (`business_app`, `provider_app`) are native Flutter builds distributed via app stores/APK — not containerized, not part of this compose topology at all.
 
 ### 1.8 Scalability
 

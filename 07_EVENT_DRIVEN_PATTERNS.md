@@ -17,7 +17,7 @@
 
 ## 1. What "event-driven" actually means here
 
-Movello's backend (`Marketplace.API`) is a **.NET 9 modular monolith**: one deployable, one process, 8 module folders (Auth, Contracts, Delivery, Finance, Identity, Marketplace, MasterData, Notifications) sharing one Postgres database. Modules don't call each other's application/domain layers directly for cross-module side effects — instead:
+Anqelba Car Rental's backend (`Marketplace.API`) is a **.NET 9 modular monolith**: one deployable, one process, 8 module folders (Auth, Contracts, Delivery, Finance, Identity, Marketplace, MasterData, Notifications) sharing one Postgres database. Modules don't call each other's application/domain layers directly for cross-module side effects — instead:
 
 - A module's command handler mutates its own aggregate and calls `entity.AddDomainEvent(new SomethingHappenedEvent(...))`, **or** a handler calls `_mediator.Publish(new SomethingHappenedEvent(...))` directly.
 - Every other module that cares registers an `INotificationHandler<SomethingHappenedEvent>` (MediatR's term for "one event with N handlers" — this is *not* MediatR's `IRequest`/`IRequestHandler`, which is the 1:1 command/query mechanism).

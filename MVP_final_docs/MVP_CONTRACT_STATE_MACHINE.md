@@ -1,4 +1,4 @@
-# Movello MVP - Contract State Machine Specification
+# Anqelba Car Rental MVP - Contract State Machine Specification
 
 ## Complete State Definitions, Transitions & Timeouts — Version 2.0
 

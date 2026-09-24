@@ -1,4 +1,4 @@
-# Movello MVP - Dispute Resolution Workflow
+# Anqelba Car Rental MVP - Dispute Resolution Workflow
 
 ## Status: PROPOSED DESIGN — NOT IMPLEMENTED IN CODE
 
@@ -12,7 +12,7 @@
 
 ## 0. Read this first
 
-**Nothing in this document exists in the Movello codebase today.** This was the single biggest finding of the 2026-07-23 implementation coverage audit regarding disputes: there is no `Dispute` entity, no `DisputeEvidence`/`DisputeAction`-equivalent entity, no dispute controller, no dispute API endpoint, no dispute background job, no `Disputes` module, and no dispute-specific database table anywhere in the backend, web app, or either mobile app. Confirmed by repo-wide search across all four surfaces.
+**Nothing in this document exists in the Anqelba Car Rental codebase today.** This was the single biggest finding of the 2026-07-23 implementation coverage audit regarding disputes: there is no `Dispute` entity, no `DisputeEvidence`/`DisputeAction`-equivalent entity, no dispute controller, no dispute API endpoint, no dispute background job, no `Disputes` module, and no dispute-specific database table anywhere in the backend, web app, or either mobile app. Confirmed by repo-wide search across all four surfaces.
 
 What *does* exist, and is the entire real footprint of "dispute" in the running system:
 

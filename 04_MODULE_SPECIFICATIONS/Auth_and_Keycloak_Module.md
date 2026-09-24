@@ -10,7 +10,7 @@
 
 ## What changed in this rewrite
 
-**v1.0 of this document was almost entirely fictional.** It described a standalone **BFF built on YARP** proxying to Keycloak and to a separately-deployed `Marketplace.API`, an Angular frontend, Authorization-Code-Flow-with-PKCE, a `movello-web` Keycloak client with `directAccessGrantsEnabled: false`, and JWT-Bearer middleware in the BFF that mapped `business_id`/`provider_id` into claims. **None of that exists in code.** What is actually running:
+**v1.0 of this document was almost entirely fictional.** It described a standalone **BFF built on YARP** proxying to Keycloak and to a separately-deployed `Marketplace.API`, an Angular frontend, Authorization-Code-Flow-with-PKCE, a `anqelbacarrental-web` Keycloak client with `directAccessGrantsEnabled: false`, and JWT-Bearer middleware in the BFF that mapped `business_id`/`provider_id` into claims. **None of that exists in code.** What is actually running:
 
 - **One process**, not two. `Marketplace.API` calls Keycloak directly — there is no separate BFF deployable and no YARP reverse-proxy configuration anywhere in the repo.
 - **Login is the Resource Owner Password Credentials grant** (`grant_type=password`), not Authorization Code + PKCE. The frontend posts a plain email/password JSON body to `/web/login`; there is no redirect to a Keycloak-hosted login page.
@@ -18,7 +18,7 @@
 - **Email/phone verification and password reset are NOT Keycloak-native flows.** They are implemented as 6-digit OTP codes stored directly on the local `UserAccount` entity (`Modules/Identity`), verified against local DB fields — Keycloak's own `emailVerified` flag is only best-effort synced afterward via an admin-API call. This is a significant, previously-undocumented divergence — see §5.
 - **MFA does not exist.** `KeycloakAuthService.VerifyMfaAsync` throws `NotSupportedException` unconditionally.
 - **There is no local `login_sessions`/`mfa_challenges`/`login_attempts` schema and no risk-scoring engine.** "Sessions" shown to a user are a live read-through to Keycloak's own admin session list.
-- **The frontend is React 18.3 + Vite**, not Angular — see `movello-marketplace-core/src/shared/lib/api-client.ts`, `LoginPage.tsx`.
+- **The frontend is React 18.3 + Vite**, not Angular — see `anqelbacarrental-marketplace-core/src/shared/lib/api-client.ts`, `LoginPage.tsx`.
 
 Everything below describes the real, running implementation. No fictional YARP/PKCE/Angular content is preserved — git history has the original if needed.
 
@@ -120,7 +120,7 @@ Cookie settings (identical logic duplicated in `AuthController` and this middlew
 
 Both are startup/bootstrap concerns, deliberately kept outside `Modules/Auth/`:
 
-- **`KeycloakInitializer.InitializeAsync`** — polls up to 120 times (1s apart) across several candidate health endpoints until Keycloak responds, then: gets a master-realm admin token, checks if the configured realm exists, imports a realm-export JSON file if not (tries app directory, `/app/`, then absolute path), and finally patches the realm's `attributes.frontendUrl` (not the deprecated top-level `frontendUrl` field, which newer Keycloak rejects) to `http://localhost:8086` in `Local`/`Development` or `https://auth.carclaks.com` otherwise.
+- **`KeycloakInitializer.InitializeAsync`** — polls up to 120 times (1s apart) across several candidate health endpoints until Keycloak responds, then: gets a master-realm admin token, checks if the configured realm exists, imports a realm-export JSON file if not (tries app directory, `/app/`, then absolute path), and finally patches the realm's `attributes.frontendUrl` (not the deprecated top-level `frontendUrl` field, which newer Keycloak rejects) to `http://localhost:8086` in `Local`/`Development` or `https://auth.anqelbacarrental.com` otherwise.
 - **`KeycloakUserSyncService.SyncUsersAsync`** — for **exactly 3 hardcoded Keycloak user IDs per environment** (one each for ADMIN/PROVIDER/BUSINESS, different fixed GUIDs for Development/Staging/Production, matched against each environment's `realm-export*.json`), fetches the user from Keycloak and upserts a matching row into the local `user_accounts` table (creating with `UserAccount.Create(...)` if missing, updating name/email-verified flag if present but changed). This is a fixed-seed-user sync for dev/test/demo accounts, not a general Keycloak→local user-provisioning pipeline — real end-user registration goes through `CreateUserAccountCommandHandler` instead (§4).
 
 ---

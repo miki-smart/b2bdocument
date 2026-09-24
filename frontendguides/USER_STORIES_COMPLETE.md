@@ -1,5 +1,5 @@
 # User Stories Reference
-## Movello Frontend - React Implementation
+## Anqelba Car Rental Frontend - React Implementation
 
 **Version:** 2.0
 **Last verified against code: 2026-07-23**

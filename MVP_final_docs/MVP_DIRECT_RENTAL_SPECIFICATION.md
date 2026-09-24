@@ -1,4 +1,4 @@
-# Movello MVP — Direct Rental (DR) Specification
+# Anqelba Car Rental MVP — Direct Rental (DR) Specification
 ## Business Rules, Lifecycle, Flows & Integration — Version 2.0
 
 **Document Status:** AUTHORITATIVE (Direct Rental domain)

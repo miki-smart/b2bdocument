@@ -1,4 +1,4 @@
-# Movello MVP — Direct Rental Request State Machine
+# Anqelba Car Rental MVP — Direct Rental Request State Machine
 ## State Definitions, Transitions & Timeouts — Version 2.0
 
 **Document Status:** AUTHORITATIVE (Direct Rental lifecycle)

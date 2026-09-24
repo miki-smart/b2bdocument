@@ -1,4 +1,4 @@
-# Movello MVP - Settlement Processing Specification
+# Anqelba Car Rental MVP - Settlement Processing Specification
 ## Settlement Triggers, Calculations & Workflows — As Implemented
 
 **Version:** 2.0 (rewritten against running code)
@@ -140,7 +140,7 @@ Seeded commission rates by tier (MasterData `ProviderTier`, admin-configurable i
 | Gold | 6% |
 | Platinum | 5% |
 
-There is **no fifth "Red Zone"/blacklist tier** anywhere in code. This table matches `epic-06-contract-management.md`/the trust-engine spec; if project memory (`movello_business_overview.md`) states different numbers, that memory file — not this document — is what needs reconciling against code, per the 2026-07-23 audit §10.2.
+There is **no fifth "Red Zone"/blacklist tier** anywhere in code. This table matches `epic-06-contract-management.md`/the trust-engine spec; if project memory (`anqelbacarrental_business_overview.md`) states different numbers, that memory file — not this document — is what needs reconciling against code, per the 2026-07-23 audit §10.2.
 
 ---
 

@@ -10,7 +10,7 @@
 
 v1.0 described a Kubernetes-adjacent microservices topology that was never built: Traefik as an edge router, a standalone YARP "BFF" gateway service, an Angular frontend served by its own Nginx container, and one monolithic `docker-compose.yml` wiring all of it together under `movello.et` domains. None of that exists in this repo.
 
-What is actually deployed is a **single .NET 9 modular monolith** (`Marketplace.API`) plus a **separately-deployed React web app** (`movello-marketplace-core`), each with its own environment-split Docker Compose files and its own GitHub Actions pipeline, talking to shared/standalone infrastructure containers (Postgres, Redis, MinIO, RabbitMQ, Keycloak). Both Flutter mobile apps are distributed through app stores, not through this deployment pipeline, and are out of scope for this document. This rewrite is built directly from the real files: `marketplace-project-implementation/backend/docker-compose*.yml`, `Dockerfile`, `.github/workflows/ci-development.yml`/`ci-production.yml`; `marketplace-project-implementation/movello-marketplace-core/docker-compose*.yml`, `Dockerfile`, `.github/workflows/deploy-development.yml`/`deploy-production.yml`.
+What is actually deployed is a **single .NET 9 modular monolith** (`Marketplace.API`) plus a **separately-deployed React web app** (`anqelbacarrental-marketplace-core`), each with its own environment-split Docker Compose files and its own GitHub Actions pipeline, talking to shared/standalone infrastructure containers (Postgres, Redis, MinIO, RabbitMQ, Keycloak). Both Flutter mobile apps are distributed through app stores, not through this deployment pipeline, and are out of scope for this document. This rewrite is built directly from the real files: `marketplace-project-implementation/backend/docker-compose*.yml`, `Dockerfile`, `.github/workflows/ci-development.yml`/`ci-production.yml`; `marketplace-project-implementation/anqelbacarrental-marketplace-core/docker-compose*.yml`, `Dockerfile`, `.github/workflows/deploy-development.yml`/`deploy-production.yml`.
 
 ---
 
@@ -29,7 +29,7 @@ Internet ──▶ :5100 ──▶ marketplace-api (Marketplace.API) container
                             └──▶ keycloak        (shared container, own Postgres,
                                                    attached to both dev + prod networks)
 
-Internet ──▶ :<web-port> ──▶ movello-marketplace-core (web) container
+Internet ──▶ :<web-port> ──▶ anqelbacarrental-marketplace-core (web) container
                             separate Compose project, its own Dockerfile/Nginx serve
 ```
 
@@ -60,7 +60,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: ${BACKEND_IMAGE_NAME:-movello-marketplace-backend}:${BACKEND_IMAGE_TAG:-latest}
+    image: ${BACKEND_IMAGE_NAME:-anqelbacarrental-marketplace-backend}:${BACKEND_IMAGE_TAG:-latest}
     restart: always
     env_file: [.env.production]
     environment:
@@ -68,7 +68,7 @@ services:
       ASPNETCORE_URLS: http://+:8080
       ConnectionStrings__DefaultConnection: Host=postgres;Port=5432;Database=${POSTGRES_DB};...
       ConnectionStrings__Redis: ${REDIS_CONNECTION_STRING:-redis:6379,defaultDatabase=0}
-      Keycloak__Authority: ${KEYCLOAK_AUTHORITY:-https://auth.carclaks.com/realms/marketplace-realm}
+      Keycloak__Authority: ${KEYCLOAK_AUTHORITY:-https://auth.anqelbacarrental.com/realms/marketplace-realm}
       Keycloak__ValidateIssuer: ${KEYCLOAK_VALIDATE_ISSUER:-true}
       MinIO__Endpoint: minio:9000
       RabbitMQ__HostName: rabbitmq
@@ -79,7 +79,7 @@ services:
     ports: ["5100:8080"]
     volumes:
       - backend_prod_logs:/app/logs
-      - /srv/carclaks/uploads:/app/storage/uploads
+      - /srv/anqelbacarrental/uploads:/app/storage/uploads
       - ./realm-export.json:/app/realm-export.json:ro
     healthcheck:
       test: curl -f http://localhost:8080/health/live || exit 1
@@ -97,7 +97,7 @@ Real, verified details worth calling out:
 - **Every secret and connection string is environment-driven** (`.env.production`, not committed) — there is no hardcoded credential in the compose file itself beyond harmless local-dev fallback defaults (`postgres`/`redis:6379` etc.) that are overridden in real deployments.
 - **Resource caps are real and modest**: `mem_limit: 512m`, `cpus: 0.5` on the API container — appropriate for a single-VPS MVP deployment, not a cluster.
 - **`realm-export.json` is mounted read-only into the container** so `KeycloakInitializer` can import it into the shared Keycloak instance on first boot if the realm doesn't already exist.
-- **Uploads persist to a host bind mount** (`/srv/carclaks/uploads`), not solely to MinIO — `LocalStorage__Path`/`LocalStorage__PublicUrl` env vars (visible in the real compose file) indicate local-disk storage is a live path alongside MinIO, not purely MinIO-backed as v1.0 implied.
+- **Uploads persist to a host bind mount** (`/srv/anqelbacarrental/uploads`), not solely to MinIO — `LocalStorage__Path`/`LocalStorage__PublicUrl` env vars (visible in the real compose file) indicate local-disk storage is a live path alongside MinIO, not purely MinIO-backed as v1.0 implied.
 - **Networks are `external: true`** — they must be created once (`docker network create marketplace-prod-network`) before the first deploy; Compose does not own their lifecycle.
 
 ### 2.2 Infrastructure isolation (production)
@@ -110,7 +110,7 @@ From `docker-compose.infrastructure.prod.yml`:
 
 ### 2.3 Keycloak (shared across environments)
 
-`docker-compose.keycloak.yml` runs **one** Keycloak container serving both `marketplace-realm` (prod) and `marketplace-realm-dev` (dev) — it is not duplicated per environment. It has its own dedicated `keycloak-postgres` on a private `marketplace-keycloak-network`, and is additionally attached to both `marketplace-dev-network` and `marketplace-prod-network` (with a `keycloak` DNS alias on each) so either backend can resolve it by container name. `KC_PROXY: edge` and `KC_HOSTNAME_STRICT: "false"` indicate it expects to sit behind a reverse proxy for its own public hostname (`auth.carclaks.com`) — that proxy is not part of this repo.
+`docker-compose.keycloak.yml` runs **one** Keycloak container serving both `marketplace-realm` (prod) and `marketplace-realm-dev` (dev) — it is not duplicated per environment. It has its own dedicated `keycloak-postgres` on a private `marketplace-keycloak-network`, and is additionally attached to both `marketplace-dev-network` and `marketplace-prod-network` (with a `keycloak` DNS alias on each) so either backend can resolve it by container name. `KC_PROXY: edge` and `KC_HOSTNAME_STRICT: "false"` indicate it expects to sit behind a reverse proxy for its own public hostname (`auth.anqelbacarrental.com`) — that proxy is not part of this repo.
 
 ### 2.4 Dockerfile
 
@@ -118,9 +118,9 @@ From `docker-compose.infrastructure.prod.yml`:
 
 ---
 
-## 3. Web Frontend (`movello-marketplace-core`) — Separate Deployment
+## 3. Web Frontend (`anqelbacarrental-marketplace-core`) — Separate Deployment
 
-All paths relative to `marketplace-project-implementation/movello-marketplace-core/`.
+All paths relative to `marketplace-project-implementation/anqelbacarrental-marketplace-core/`.
 
 This is a **React 18.3 + Vite** SPA — not the Angular app v1.0's compose file built. It has its own Dockerfile, its own dev/production/override Compose files, and its own CI pipeline; it is not built or served by the same pipeline as the backend.
 

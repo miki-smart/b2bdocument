@@ -1,9 +1,9 @@
 # API Integration Specification
-## Movello Frontend - React Implementation
+## Anqelba Car Rental Frontend - React Implementation
 
 **Version:** 2.0
-**Last verified against code: 2026-07-23** — full rewrite. The v1.0 spec described Bearer-token auth headers, a wrapped `{ success, data, meta }` response envelope, and a service/hook layer that doesn't match the real codebase. This version was checked directly against `movello-marketplace-core/src/shared/lib/api-client.ts` and the 30 files under `src/core/services/`.
-**App:** `marketplace-project-implementation/movello-marketplace-core` (React 18.3 + Vite 6, TanStack Query 5)
+**Last verified against code: 2026-07-23** — full rewrite. The v1.0 spec described Bearer-token auth headers, a wrapped `{ success, data, meta }` response envelope, and a service/hook layer that doesn't match the real codebase. This version was checked directly against `anqelbacarrental-marketplace-core/src/shared/lib/api-client.ts` and the 30 files under `src/core/services/`.
+**App:** `marketplace-project-implementation/anqelbacarrental-marketplace-core` (React 18.3 + Vite 6, TanStack Query 5)
 **Base URL:** relative `/api` (same-origin — Vite dev proxy locally, nginx in Docker/production; see `VITE_API_BASE_URL` in `src/shared/constants/index.ts`)
 **Related:** [AUTHENTICATION_GUIDE.md](./AUTHENTICATION_GUIDE.md), [FORM_VALIDATIONS_SPEC.md](./FORM_VALIDATIONS_SPEC.md)
 

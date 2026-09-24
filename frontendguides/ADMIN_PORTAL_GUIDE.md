@@ -1,9 +1,9 @@
 # Admin Portal — As-Built Reference
-## Movello Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
+## Anqelba Car Rental Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
 
 **Last verified against code: 2026-07-23**
 
-> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable). The admin portal has been built for a long time and has grown far beyond that original scope. This version is a **reference of what actually exists in code today** — real routes, real components, real flows — verified against `marketplace-project-implementation/movello-marketplace-core/src/features/admin/**` and the route table in `src/App.tsx`. Treat code as the source of truth if this drifts again; re-derive from `project-docs/18_Implementation_Coverage_Audit.md` first.
+> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable). The admin portal has been built for a long time and has grown far beyond that original scope. This version is a **reference of what actually exists in code today** — real routes, real components, real flows — verified against `marketplace-project-implementation/anqelbacarrental-marketplace-core/src/features/admin/**` and the route table in `src/App.tsx`. Treat code as the source of truth if this drifts again; re-derive from `project-docs/18_Implementation_Coverage_Audit.md` first.
 
 All admin routes live under `/admin` inside `AdminLayout`, gated by `ProtectedRoute allowedRoles={['admin']}`. The admin portal is dramatically larger than the original guide's 5 sections (Dashboard, KYC/KYB, User Management, Transaction Monitoring, System Settings) — in practice it has **seven** functional areas: Dashboard, Verifications (incl. admin-initiated onboarding), Master Data / Settings, Users, Operations (RFQ/Bids/Contracts/Settlements/Wallet Accounts/Monitoring/Direct Rental), Wallets, Finance, and Notifications (Templates/Providers). This doc is organized around those seven, each with its real route table.
 
@@ -82,7 +82,7 @@ This is the area the original guide underspecified the most — it called it "Ma
 | `/admin/settings/documents` | `DocumentTypesPage.tsx` | Document type catalog |
 | `/admin/settings/lookups` | `LookupsPage.tsx` | Generic key/value lookup tables (fuel types, engine types, etc.) |
 | `/admin/settings/banks` | `BanksPage.tsx` | Bank master list (for bank-account forms across the platform) |
-| `/admin/settings/platform-bank-accounts` | `PlatformBankAccountsPage.tsx` | Movello's own settlement/receiving bank accounts |
+| `/admin/settings/platform-bank-accounts` | `PlatformBankAccountsPage.tsx` | Anqelba Car Rental's own settlement/receiving bank accounts |
 | `/admin/settings/tiers` | `TiersPage.tsx` | Business tiers (STANDARD/BUSINESS_PRO/ENTERPRISE/GOV_NGO) + Provider tiers (BRONZE/SILVER/GOLD/PLATINUM), tabbed |
 | `/admin/settings/geography` | `GeographyPage.tsx` | Cities/regions used across address and location pickers |
 | `/admin/settings/rules` | `RulesPage.tsx` | **Combined versioned-policy manager** — escrow / settlement / contract / commission rules in one tabbed UI, backed by `RuleForms.tsx` |

@@ -1,9 +1,9 @@
 # Business Portal — As-Built Reference
-## Movello Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
+## Anqelba Car Rental Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
 
 **Last verified against code: 2026-07-23**
 
-> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable), including illustrative code snippets for a portal that didn't exist yet. The business portal has since been built, and its real shape differs from that original assumption in several load-bearing ways — most importantly the RFQ/bid/award model. This version documents **what actually exists in code today**, verified against `marketplace-project-implementation/movello-marketplace-core/src/features/business/**` and the route table in `src/App.tsx`. Where this doc and the original guide's code samples disagree, trust this doc.
+> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable), including illustrative code snippets for a portal that didn't exist yet. The business portal has since been built, and its real shape differs from that original assumption in several load-bearing ways — most importantly the RFQ/bid/award model. This version documents **what actually exists in code today**, verified against `marketplace-project-implementation/anqelbacarrental-marketplace-core/src/features/business/**` and the route table in `src/App.tsx`. Where this doc and the original guide's code samples disagree, trust this doc.
 
 All business routes live under `/business` inside `BusinessLayout`, gated by `ProtectedRoute allowedRoles={['business']}`.
 

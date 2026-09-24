@@ -2,7 +2,7 @@
 
 **Last verified against code: 2026-07-23**
 
-> **Correction notice.** The prior version of this document (November 26, 2025) described an **Angular 19 + Signals** architecture — standalone components, `NgModule`-free lazy-loaded feature modules, a `Service-with-Signals` store pattern, `CanActivateFn` route guards, `HttpClient`-based services. **No Angular code has ever existed in this repository.** The real web frontend, `marketplace-project-implementation/movello-marketplace-core/`, is and has only ever been **React 18.3 + Vite 6 + TypeScript**, using TanStack React Query 5 for server state and Zustand 5 for the small amount of global client state. This rewrite replaces the prior content in full, verified directly against `package.json`, `vite.config.ts`, and the `src/` tree. See `project-docs/18_Implementation_Coverage_Audit.md` §8/§10 for the correction record, and treat `.agent/roles/frontend-developer.md`, `markdown-documentations/Frontend_Architecture_Guide.md`, and `markdown-documentations/FRONTEND_AUDIT_REPORT.md` (all rewritten the same day) as the fuller companion references for this stack.
+> **Correction notice.** The prior version of this document (November 26, 2025) described an **Angular 19 + Signals** architecture — standalone components, `NgModule`-free lazy-loaded feature modules, a `Service-with-Signals` store pattern, `CanActivateFn` route guards, `HttpClient`-based services. **No Angular code has ever existed in this repository.** The real web frontend, `marketplace-project-implementation/anqelbacarrental-marketplace-core/`, is and has only ever been **React 18.3 + Vite 6 + TypeScript**, using TanStack React Query 5 for server state and Zustand 5 for the small amount of global client state. This rewrite replaces the prior content in full, verified directly against `package.json`, `vite.config.ts`, and the `src/` tree. See `project-docs/18_Implementation_Coverage_Audit.md` §8/§10 for the correction record, and treat `.agent/roles/frontend-developer.md`, `markdown-documentations/Frontend_Architecture_Guide.md`, and `markdown-documentations/FRONTEND_AUDIT_REPORT.md` (all rewritten the same day) as the fuller companion references for this stack.
 
 **Framework:** React 18.3.1
 **Build tool:** Vite 6.4 (`@vitejs/plugin-react-swc`)
@@ -15,7 +15,7 @@
 
 ## 1. Overview
 
-The Movello web frontend is **one Vite single-page application**, not a multi-app workspace and not three separately deployed frontends. All three role-scoped portals — Business, Provider, Admin — are served from the same bundle, the same React Router route table, and the same build output. What separates them is folder structure and route guards, not build boundaries:
+The Anqelba Car Rental web frontend is **one Vite single-page application**, not a multi-app workspace and not three separately deployed frontends. All three role-scoped portals — Business, Provider, Admin — are served from the same bundle, the same React Router route table, and the same build output. What separates them is folder structure and route guards, not build boundaries:
 
 1. **Feature folders** — `src/features/{business,provider,admin}/pages/` each hold that portal's pages (provider and admin also have portal-scoped `components/`).
 2. **Layout components** — `BusinessLayout`, `ProviderLayout`, `AdminLayout`, `PublicLayout` in `src/app/layouts/`, selected per route group in the flat route table in `src/App.tsx`.
@@ -28,7 +28,7 @@ There is no separate Angular-style `CanActivateFn` guard, no `NgModule`/lazy-`lo
 ## 2. Project Structure (verified against `src/`)
 
 ```
-movello-marketplace-core/
+anqelbacarrental-marketplace-core/
 ├── src/
 │   ├── App.tsx                     # single flat route table for the entire app
 │   ├── main.tsx
@@ -195,7 +195,7 @@ export const apiClient = new ApiClient();
 
 33 domain services in `core/services/` (`rfqService`, `bidService`, `contractService`, `walletService`, `directRentalService`, `adminWalletService`, `providerFleetCapacityService`, …) are each a plain object of async functions built on top of this one client.
 
-**Dev-time backend resolution** (`vite.config.ts`): `BACKEND_URL` env (Docker runtime) → `VITE_BACKEND_URL` → mode-specific default — `localdev`/`development`/`staging`/`production` each point at a different `carclaks.com` host (or `localhost:5207` for local dev). The dev/preview server proxies `/api`, `/web`, and `/hubs` (WebSocket) to the backend so cookies work same-origin under `SameSite=Lax`.
+**Dev-time backend resolution** (`vite.config.ts`): `BACKEND_URL` env (Docker runtime) → `VITE_BACKEND_URL` → mode-specific default — `localdev`/`development`/`staging`/`production` each point at a different `anqelbacarrental.com` host (or `localhost:5207` for local dev). The dev/preview server proxies `/api`, `/web`, and `/hubs` (WebSocket) to the backend so cookies work same-origin under `SameSite=Lax`.
 
 ---
 

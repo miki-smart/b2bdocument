@@ -1,8 +1,8 @@
-# Movello MVP - Business Logic Flows
+# Anqelba Car Rental MVP - Business Logic Flows
 
 **Version:** 2.0
 **Last verified against code: 2026-07-23**
-**Status:** Reconciled against running code (backend `Marketplace.API` `Modules/**`, web `movello-marketplace-core`, both Flutter mobile apps)
+**Status:** Reconciled against running code (backend `Marketplace.API` `Modules/**`, web `anqelbacarrental-marketplace-core`, both Flutter mobile apps)
 
 **How to read this document:** every flow below describes what the code actually does today, not an aspirational design. Where a step, status, or number differs from earlier drafts of this document, a **Reality Check** note explains the correction. Where a described capability is not built at all, it is marked **NOT YET IMPLEMENTED**. The canonical, numbered rule reference is [`MVP_final_docs/MVP_AUTHORITATIVE_BUSINESS_RULES.md`](./MVP_final_docs/MVP_AUTHORITATIVE_BUSINESS_RULES.md) — BR-IDs referenced below (e.g. BR-010, BR-025, BR-031A) match that document and, where noted, actual code comments.
 

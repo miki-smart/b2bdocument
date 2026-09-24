@@ -1,4 +1,4 @@
-# Movello MVP - Module Integration Specification
+# Anqelba Car Rental MVP - Module Integration Specification
 ## Module Communication Patterns & Dependencies
 
 **Version:** 2.0 (rewritten against running code)

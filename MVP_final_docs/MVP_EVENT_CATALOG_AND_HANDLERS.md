@@ -1,4 +1,4 @@
-# Movello MVP - Event Catalog and Handler Specifications
+# Anqelba Car Rental MVP - Event Catalog and Handler Specifications
 ## Event-Driven Architecture Reference
 
 **Last verified against code: 2026-07-23**
@@ -37,7 +37,7 @@ Full explanation lives in `07_EVENT_DRIVEN_PATTERNS.md`. Short version, needed t
 - **"Published"** means one of two things happened: `entity.AddDomainEvent(new XEvent(...))` (collected by `BaseEntity`, drained and dispatched by `MarketplaceDbContext.SaveChangesAsync` after the save succeeds), or a handler called `_mediator.Publish(new XEvent(...))` directly (fires immediately, independent of any save).
 - **"Consumed"** means a class implementing `MediatR.INotificationHandler<XEvent>` exists somewhere in the codebase and is registered via the single `AddMediatR(cfg => cfg.RegisterServicesFromAssembly(typeof(Program).Assembly))` call in `Program.cs`. There is one assembly (it's a monolith) — no per-module registration, no separate consumer process, no network hop.
 - **Dispatch timing (fixed 2026-07-13):** if the raising code is inside an explicit `BeginTransactionAsync()`/`CommitTransactionAsync()` block, the event is held and only dispatched after the commit succeeds; an explicit rollback drops it. Outside a transaction, it dispatches immediately after `SaveChangesAsync`.
-- **RabbitMQ** is used by exactly two consumers in this entire catalog (`OTPGeneratedEventHandler`, `ReturnOTPGeneratedEventHandler`, both in Delivery) to fire-and-forget an SMS-gateway message onto a named routing key (`notification.sms.movello`). No other event in this catalog touches RabbitMQ, and no outbox/DLQ backs that publish.
+- **RabbitMQ** is used by exactly two consumers in this entire catalog (`OTPGeneratedEventHandler`, `ReturnOTPGeneratedEventHandler`, both in Delivery) to fire-and-forget an SMS-gateway message onto a named routing key (`notification.sms.anqelbacarrental`). No other event in this catalog touches RabbitMQ, and no outbox/DLQ backs that publish.
 
 ---
 
@@ -243,7 +243,7 @@ Published when the counter-party (or admin override) approves completion, moving
 #### `OTPGeneratedEvent(Guid SessionId, string ContractNumber, string RecipientPhone, string Code, string? RecipientEmail = null) : MediatR.INotification`
 Raised when a delivery-handover OTP is generated.
 **Consumed by:**
-- `OTPGeneratedEventHandler` (Delivery) — publishes to **RabbitMQ** (routing key `notification.sms.movello`), only when `FeaturesSettings.SmsEnabled` is true. One of only two RabbitMQ consumers in the entire backend.
+- `OTPGeneratedEventHandler` (Delivery) — publishes to **RabbitMQ** (routing key `notification.sms.anqelbacarrental`), only when `FeaturesSettings.SmsEnabled` is true. One of only two RabbitMQ consumers in the entire backend.
 - `OTPGeneratedNotificationHandler` (Notifications) — the email fallback / general notification path, independent of the RabbitMQ publish.
 
 #### `OTPVerifiedEvent(Guid SessionId, DateTime VerifiedAt) : MediatR.INotification`

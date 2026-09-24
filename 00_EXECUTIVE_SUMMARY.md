@@ -1,4 +1,4 @@
-# Movello B2B Mobility Marketplace — Executive Summary
+# Anqelba Car Rental B2B Mobility Marketplace — Executive Summary
 
 **Version:** 2.0 (rewritten against running code)
 **Last verified against code:** 2026-07-23
@@ -10,7 +10,7 @@
 
 ## Executive Overview
 
-Movello (CarClaks) is a B2B mobility marketplace connecting **Business Clients** with **Vehicle Providers** through a blind-bidding RFQ system, plus a separate fixed-price **Direct Rental** booking surface. The platform spans four buildable surfaces: a single .NET backend, a React web app, and two Flutter mobile apps (business and provider).
+Anqelba Car Rental (Anqelba Car Rental) is a B2B mobility marketplace connecting **Business Clients** with **Vehicle Providers** through a blind-bidding RFQ system, plus a separate fixed-price **Direct Rental** booking surface. The platform spans four buildable surfaces: a single .NET backend, a React web app, and two Flutter mobile apps (business and provider).
 
 ### Vision Statement
 
@@ -31,7 +31,7 @@ To make B2B vehicle rental in Ethiopia transparent, trustworthy, and largely aut
 3. **Manual Processes:** Paper-based contracts, cash payments
 4. **Compliance Gaps:** Insurance lapses, unlicensed operators
 
-### Movello Solution (as actually implemented)
+### Anqelba Car Rental Solution (as actually implemented)
 - **Blind Bidding:** Line-item RFQs with per-item, multi-provider split awards; provider identity is withheld by the web UI until award (the API itself does not withhold the field server-side — see the known gap noted in `backlog/mvp/epic-05-bidding-engine.md`).
 - **Trust Scoring:** A real, formula-based provider trust score (0–100) and tier system (Bronze/Silver/Gold/Platinum) exists and is DI-registered — but per the audit, it currently has **zero production call sites** and every provider's score is effectively frozen at its default. There is **no** business-side risk score.
 - **Escrow System:** Automated escrow lock on contract creation, with retry/backoff and a timeout-driven auto-cancel job.
@@ -86,7 +86,7 @@ This diagram, and every claim in this document, should be read together with:
 |----------|--------------|-------|
 | **Pattern** | Single .NET 9 modular monolith (`Marketplace.API`) | One `.csproj` in `backend/src` besides the test project; one deployable container |
 | **Backend** | .NET 9, EF Core 9 + Npgsql/PostgreSQL | Confirmed via `Marketplace.API.csproj` |
-| **Web frontend** | React 18.3 + Vite 6 + TanStack Query + Zustand + shadcn/ui | **Not Angular.** Confirmed via `movello-marketplace-core/package.json`. A single Vite SPA with role-based routing, not 3 separate portal apps. |
+| **Web frontend** | React 18.3 + Vite 6 + TanStack Query + Zustand + shadcn/ui | **Not Angular.** Confirmed via `anqelbacarrental-marketplace-core/package.json`. A single Vite SPA with role-based routing, not 3 separate portal apps. |
 | **Mobile** | Flutter only — `business_app`, `provider_app` (`flutter_riverpod`, `go_router`) | Flutter-only since inception; older mobile-spec docs' "React Native or Flutter" hedge is stale, not an open decision. |
 | **Auth** | Keycloak, called **directly, in-process** by `Modules/Auth` (`KeycloakAuthService`) via Resource Owner Password Credentials grant | No separate Auth microservice, no separate BFF/gateway service. A real `BffTokenRefreshMiddleware` exists, but as in-process middleware inside the same monolith — see `architecture/auth-service-microservice-spec.md` §1. |
 | **Events** | MediatR (in-process) is the dominant, actively-used mechanism | `RabbitMQ.Client` is a real package dependency and a real docker-compose service, but the coverage audit found minimal active production usage today — provisioned, not primary. |
@@ -187,7 +187,7 @@ Confirmed via `backend/docker-compose*.yml` (split per environment: `development
 - **`postgres`** — single PostgreSQL instance.
 - **`keycloak`** — identity provider, its own compose file.
 - **`redis`**, **`minio`**, **`rabbitmq`** — cache, object storage, and message broker (provisioned; see Events note above on actual RabbitMQ usage level).
-- **Web** (`movello-marketplace-core`) — a separate Vite/React build with its own `docker-compose*.yml` files, deployed independently of the backend (typically behind Nginx as static assets).
+- **Web** (`anqelbacarrental-marketplace-core`) — a separate Vite/React build with its own `docker-compose*.yml` files, deployed independently of the backend (typically behind Nginx as static assets).
 - **Mobile** — Flutter apps built and distributed natively (APK/IPA via app stores), not containerized.
 
 `02_DATABASE_SCHEMA_DESIGN.md` and `03_API_SPECIFICATIONS.md` in this documentation suite predate the current codebase and were **not** re-verified as part of this rewrite pass — read them as historical/aspirational rather than current fact until they get their own audit pass (see `DOCUMENTATION_PROGRESS.md`).

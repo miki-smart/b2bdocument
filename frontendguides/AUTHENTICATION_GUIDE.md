@@ -1,9 +1,9 @@
 # Authentication & Authorization Guide
 
-## Movello Frontend - React Implementation
+## Anqelba Car Rental Frontend - React Implementation
 
 **Version:** 2.0
-**Last verified against code: 2026-07-23** — full rewrite. The v1.0 guide described in-memory access tokens, a `refreshToken()` call the frontend is expected to invoke, and a `requiredRoles` prop on `ProtectedRoute`. None of that matches the real code. This version was checked against `movello-marketplace-core/src/stores/auth-store.ts`, `src/core/services/auth-service.ts`, `src/shared/components/auth/ProtectedRoute.tsx`, `src/shared/lib/api-client.ts`, and the backend's `architecture/auth-service-microservice-spec.md` / `architecture/bff-backend-for-frontend-spec.md` (both rewritten 2026-07-23).
+**Last verified against code: 2026-07-23** — full rewrite. The v1.0 guide described in-memory access tokens, a `refreshToken()` call the frontend is expected to invoke, and a `requiredRoles` prop on `ProtectedRoute`. None of that matches the real code. This version was checked against `anqelbacarrental-marketplace-core/src/stores/auth-store.ts`, `src/core/services/auth-service.ts`, `src/shared/components/auth/ProtectedRoute.tsx`, `src/shared/lib/api-client.ts`, and the backend's `architecture/auth-service-microservice-spec.md` / `architecture/bff-backend-for-frontend-spec.md` (both rewritten 2026-07-23).
 **Related:** [API_INTEGRATION_SPEC.md](./API_INTEGRATION_SPEC.md), [FORM_VALIDATIONS_SPEC.md](./FORM_VALIDATIONS_SPEC.md)
 
 ---
@@ -34,7 +34,7 @@ There is **one** backend process (`Marketplace.API`, a .NET 9 modular monolith) 
 - **No redirect to a Keycloak-hosted login page.** `LoginPage.tsx` is a normal in-app email/password form. Keycloak is only ever called server-side (Resource Owner Password Credentials grant), never via an Authorization Code redirect the browser participates in.
 - **No access token in JS memory, ever.** Not in a variable, not in Zustand, not in `sessionStorage`. Tokens are `HttpOnly` cookies (`mov_access_token`, `mov_refresh_token`) the frontend cannot read even if it wanted to.
 - **No frontend-initiated refresh call.** `authService.refreshToken()` still exists in `auth-service.ts` but is a deprecated no-op (`console.warn('refreshToken() called - BFF handles token refresh automatically')`). Refresh is entirely server-side, transparent, and happens on `/api/*` requests, not on a schedule the frontend manages.
-- **This is the web-only pattern.** The Flutter mobile apps use `MobileAuthController`, which returns tokens **in the JSON response body** (comment in the backend code: "mobile clients cannot use httpOnly cookies") and are stored in Keychain/Keystore, sent as `Authorization: Bearer` headers. If you are writing code for `movello-marketplace-core`, that pattern is irrelevant — do not add a Bearer header here.
+- **This is the web-only pattern.** The Flutter mobile apps use `MobileAuthController`, which returns tokens **in the JSON response body** (comment in the backend code: "mobile clients cannot use httpOnly cookies") and are stored in Keychain/Keystore, sent as `Authorization: Bearer` headers. If you are writing code for `anqelbacarrental-marketplace-core`, that pattern is irrelevant — do not add a Bearer header here.
 
 ### Flow diagram (as implemented)
 
@@ -234,7 +234,7 @@ export const useAuthStore = create<AuthState>()(
       },
     }),
     {
-      name: AUTH_STORAGE_KEY,  // 'movello-auth'
+      name: AUTH_STORAGE_KEY,  // 'anqelbacarrental-auth'
       storage: createJSONStorage(() => localStorage),
       partialize: (state) => ({ user: state.user, isAuthenticated: state.isAuthenticated }), // NEVER tokens
     }

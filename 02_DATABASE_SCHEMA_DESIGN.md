@@ -1,4 +1,4 @@
-# Movello Database Schema Design
+# Anqelba Car Rental Database Schema Design
 
 **Last verified against code:** 2026-07-23
 **Database:** PostgreSQL 16 · **ORM:** EF Core 9 (Npgsql) · **Migration count:** 35 (`InitialCreate` 2026-02-12 → `AddContractTermsVersioningAndAcceptance` 2026-07-08)

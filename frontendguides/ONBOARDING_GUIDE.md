@@ -1,10 +1,10 @@
 # Onboarding — As-Built Reference
 
-## Movello Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
+## Anqelba Car Rental Web Frontend (React 18.3 + Vite + TanStack Query + Zustand)
 
 **Last verified against code: 2026-07-23**
 
-> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable), including illustrative code for wizards that didn't exist yet. Both onboarding wizards have since been built, plus an admin-initiated variant the original guide never anticipated at all. This version documents **what actually exists in code today**, verified against `marketplace-project-implementation/movello-marketplace-core/src/features/onboarding/**`, `src/features/admin/pages/verifications/onboarding/**`, and the route table in `src/App.tsx`.
+> **Reframing note:** This file was originally written as a from-scratch *build guide* (the kind fed to an AI scaffolding tool such as Lovable), including illustrative code for wizards that didn't exist yet. Both onboarding wizards have since been built, plus an admin-initiated variant the original guide never anticipated at all. This version documents **what actually exists in code today**, verified against `marketplace-project-implementation/anqelbacarrental-marketplace-core/src/features/onboarding/**`, `src/features/admin/pages/verifications/onboarding/**`, and the route table in `src/App.tsx`.
 
 | Route | Component | Who |
 |---|---|---|

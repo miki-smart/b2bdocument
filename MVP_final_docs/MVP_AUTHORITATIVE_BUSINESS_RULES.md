@@ -1,4 +1,4 @@
-# Movello MVP - Authoritative Business Rules
+# Anqelba Car Rental MVP - Authoritative Business Rules
 ## Single Source of Truth - Version 2.0
 
 **Document Status:** AUTHORITATIVE — rewritten against running code
@@ -10,7 +10,7 @@
 
 ## Document Control
 
-**Purpose:** This document is the single authoritative source for business rules in the Movello B2B mobility marketplace MVP, reconciled directly against the running `.NET 9` backend (a single modular monolith, `Marketplace.API`, not separate microservices), the React web portal, and both Flutter mobile apps. Where this document and code disagree in the future, **trust the code** and re-run this reconciliation — this document is a snapshot as of 2026-07-23.
+**Purpose:** This document is the single authoritative source for business rules in the Anqelba Car Rental B2B mobility marketplace MVP, reconciled directly against the running `.NET 9` backend (a single modular monolith, `Marketplace.API`, not separate microservices), the React web portal, and both Flutter mobile apps. Where this document and code disagree in the future, **trust the code** and re-run this reconciliation — this document is a snapshot as of 2026-07-23.
 
 **What changed in this rewrite (v1.2 → v2.0):** every rule below was individually re-verified against actual entities, command handlers, and seeded master data — not against the previous version's text. Several rules in the prior version described features that either don't exist, are dormant (built but never invoked), or use different numbers than what's actually seeded. Every such case is marked **NOT YET IMPLEMENTED** or **DORMANT** below rather than silently corrected — see Appendix A for the full list of what changed and why. Two internal `BR-ID` numbering collisions in the previous version (the same ID used for two unrelated rules) were also fixed — see Appendix A.
 
