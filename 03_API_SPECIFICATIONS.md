@@ -571,6 +571,28 @@ Both Flutter apps (business, provider) share this one surface — routes are rol
 | `MobileFileController` | `mobile/files` | `POST upload`, `POST upload-photo` — mirrors `api/files` (§9) with a photo-specific variant. |
 | `MobileDashboardController` | `mobile/dashboard` | `GET stats` — role-aware (business vs. provider) dashboard stat cards. |
 | `MobileReferenceDataController` | `mobile/reference` | `GET vehicle-types`, `fuel-types`, `rfq-terms`, `cities`, `business-types`, `industries`, `insurance-coverage-types`, `provider-types`, `banks`, `lookups/{typeCode}`, `all` — **no `[Authorize]` on this controller**, all public reference data. |
+| `MobileCatalogueController` | `mobile/catalogue` | `GET vehicles`, `GET vehicles/{id}`, `POST cart-quote`, `GET rfqs`, `GET rfqs/{id}`, `GET bid-limits` — **`[AllowAnonymous]`**, rate-limited per IP; the guest-mode catalogue (§10.1). |
+
+### 10.1 Guest Mode Endpoints (browse before sign-in)
+
+**Full spec:** [MVP_GUEST_MODE_SPECIFICATION.md](./MVP_final_docs/MVP_GUEST_MODE_SPECIFICATION.md) §9 (request/response shapes, validation, outcomes). **Last verified against code: 2026-10-05**, backend branch `feature/mobile-guest-mode` (not yet merged to `development`).
+
+Both apps call `mobile/catalogue/*` while signed out (no `Authorization` header) and two authenticated `api/...` endpoints to hand guest work to the account once it exists. Nothing here submits a cart or a bid.
+
+| Method | Route | Auth | Purpose |
+|---|---|---|---|
+| GET | `mobile/catalogue/vehicles` | Anonymous, `mobile-guest` | Rentable direct-rental vehicles (`GetPublicVehiclesQuery`): `search`, `vehicleType`, `fuelType`, `minDailyRate`, `maxDailyRate`, `minSeatingCapacity`, `sortBy` (`dailyRentalRate`\|`year`), `sortDescending`, `pageNumber`, `pageSize` (1–50). No plate, VIN or provider identity; `providerCity` + opaque `providerRef`. |
+| GET | `mobile/catalogue/vehicles/{id}` | Anonymous, `mobile-guest` | One vehicle; `404` when not listable. |
+| POST | `mobile/catalogue/cart-quote` | Anonymous, `mobile-guest-write` | 1–20 `{vehicleId, startDate, endDate}` → per-item `OK`/`UNAVAILABLE`/`INVALID_DATES`, inclusive days, amounts, 30-day-capped escrow hold, provider groups (`Provider 1`, …). Reserves nothing. |
+| GET | `mobile/catalogue/rfqs` | Anonymous, `mobile-guest` | Open RFQs, soonest deadline first: `vehicleType`, `fuelType`, `pickupCity`, `requiredFrom`, paging (1–50). No business identity, title, specifications or target price; lines carry `remainingQuantity`. |
+| GET | `mobile/catalogue/rfqs/{id}` | Anonymous, `mobile-guest` | One open RFQ with line ids; `404` when it no longer takes bids. |
+| GET | `mobile/catalogue/bid-limits` | Anonymous, `mobile-guest` | `{ minBidAmount }` — the minimum `SubmitBidCommand` enforces. |
+| POST | `api/marketplace/cart/merge` | `[Authorize]`, `user_type == BUSINESS` | Merge the phone cart (1–20 items) into the business cart. Per item `ADDED` / `ALREADY_IN_CART` (server copy wins) / `INVALID_DATES` / `UNAVAILABLE`. Idempotent. `409 BUSINESS_PROFILE_REQUIRED` before the onboarding Company step. |
+| POST | `api/marketplace/bid-drafts` | `Policy=ProviderUser` | Save a guest bid as saved bids (`{rfqId, items[{rfqLineItemId, unitPrice, quantity}], notes}`, 1–50 lines). Per line `SAVED` / `LINE_REMOVED` / `ALREADY_BID`. `409 PROVIDER_PROFILE_REQUIRED` before the onboarding Identity step; `422 RFQ_CLOSED`. |
+
+**Rate limits** (`Program.cs`, per client IP, 1-minute sliding window): `mobile-guest` 120 requests/min, `mobile-guest-write` 30 requests/min; a rejection is `429` with `Retry-After: 60`. These named limiter policies (and the `public-*` policies of the website API) post-date §1.6 above.
+
+**Coded errors** used by guest mode are written by `GlobalExceptionHandlerMiddleware` as `ErrorResponse` with a top-level `code` (`CodedConflictException` → `409`, `CodedRuleException` → `422`). `AddToCartCommand` (`POST api/marketplace/cart/items`) now fails with `422` and `VEHICLE_UNAVAILABLE`, `ALREADY_IN_CART` or `INVALID_DATES`.
 
 ---
 
@@ -582,6 +604,7 @@ The Mobile API surface (§10) does **not** cover everything both Flutter apps ne
 |---|---|---|
 | **Direct Rental** (both apps) | `api/marketplace/direct-rental/requests`, `api/marketplace/direct-rental/vehicles`, `api/marketplace/cart`, `api/marketplace/cart/items`, `api/marketplace/cart/submit-preview`, `api/marketplace/cart/submit` | No `Mobile*` controller for Direct Rental exists at all — §4.5's `DirectRentalCartController`/`DirectRentalRequestController`/`DirectRentalVehicleController` are called as-is from both `business_app` and `provider_app`. |
 | **Provider fleet capacity extras** (provider app) | `api/marketplace/provider/fleet/capacity`, `api/marketplace/provider/fleet/capacity/bid-preview`, `api/marketplace/provider/fleet/action-items` | `MobileProviderFleetController` (§10) only exposes `capacity`/`capacity/bid-preview`/`action-items`/`eligible-vehicles` under `mobile/marketplace/provider/fleet` — yet the provider app's `provider_fleet_capacity_service.dart` calls the **web** `ProviderFleetController` routes instead of the mobile ones for this specific service file (both routes exist and return equivalent data; this app is just using the non-mobile one here). |
+| **Guest-mode hand-over** (both apps) | `api/marketplace/cart/merge` (business app); `api/marketplace/bid-drafts` (POST, GET), `api/marketplace/bid-drafts/{id}`, `.../{id}/readiness`, `.../{id}/submit` (provider app) | The merge lives on `DirectRentalCartController` and saved bids on `BidDraftController`, both shared with the website; there is no mobile mirror. See §10.1 and `MVP_final_docs/MVP_GUEST_MODE_SPECIFICATION.md`. |
 | **Provider invoices** (provider app) | `api/finance/invoices` | No `MobileProviderInvoiceController`/mobile route exists — `ProviderInvoiceController` (§6.7) is called directly. |
 | **Onboarding reference data** (both apps) | `api/kyc-requirements`, `api/document-types` | These specific reference lists aren't mirrored under `mobile/reference` (§10's `MobileReferenceDataController` covers vehicle/fuel/business types, cities, banks, lookups — but not KYC requirements or document types), so onboarding screens call the public web routes (§9) directly. |
 | **Bank-transfer deposits** (business app) | `api/finance/deposit-requests`, `api/finance/deposit-requests/my`, `api/platform-bank-accounts` | No `MobileDepositRequestController`/mobile deposit route exists — the business app's bank-transfer deposit screens call `DepositRequestController` and `PlatformBankAccountController` (§6.4, §9) directly. Automated-gateway deposits *do* have a mobile route (`mobile/payments/intent`, §10). |
