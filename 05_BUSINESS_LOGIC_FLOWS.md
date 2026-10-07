@@ -21,6 +21,7 @@
 9. [Settlement & Payouts](#settlement--payouts)
 10. [Trust Score Calculation](#trust-score-calculation)
 11. [Direct Rental (Vehicle Catalog)](#direct-rental-vehicle-catalog)
+12. [Guest Browsing & Deferred Sign-Up (mobile)](#guest-browsing--deferred-sign-up-mobile)
 
 ---
 
@@ -750,6 +751,51 @@ CONTRACT BRIDGE
 | Wallet check | At award (BR-006) | At cart submit (BR-DR-004) |
 | Identity | Masked at UI layer until award | Provider visible in catalog from the start |
 | Contract status machine | Full 18-value model | Same 18-value model (shared `Contract` aggregate) |
+
+---
+
+## Guest Browsing & Deferred Sign-Up (mobile)
+
+**Full spec:** [MVP_GUEST_MODE_SPECIFICATION.md](./MVP_final_docs/MVP_GUEST_MODE_SPECIFICATION.md)
+**Last verified against code: 2026-10-05** (backend `feature/mobile-guest-mode`, both apps `feature/guest-mode`; not yet merged to `development`)
+
+Both Flutter apps open on their market screens without an account and ask for sign-in only when the person acts. Work done while signed out is kept on the phone (`shared_preferences`, outside the cache that sign-out wipes), moved to the account once the account can hold it, and the person is brought back to where they were. Nothing is submitted automatically. Guests never see business names, provider names or plates. Sign-out and session expiry return to the guest home (business: Vehicles; provider: Market). `--dart-define=GUEST_MODE_ENABLED=false` restores login-first behaviour.
+
+### Flow Diagram
+
+```
+BUSINESS APP — GUEST CART → BOOKING
+  Browse  GET mobile/catalogue/vehicles[/{id}]   (anonymous, redacted, 5-angle photos)
+  Cart    guest_cart_v1 on the phone (max 20)  ─► POST mobile/catalogue/cart-quote (prices, 30-day hold, groups)
+  Checkout ─► "Sign in to book" sheet ─► register ─► OTP ─► automatic sign-in
+  Sign-in  ─► POST api/marketplace/cart/merge ─► 409 BUSINESS_PROFILE_REQUIRED (cart stays on phone)
+  Onboarding Company step creates the Business ─► cart/merge ─► ADDED | ALREADY_IN_CART | UNAVAILABLE | INVALID_DATES
+  Review submit ─► lands on the cart: readiness checklist (verification pending, escrow deposit)
+  Verified + funded ─► business taps Submit ─► POST api/marketplace/cart/submit (Direct Rental rules)
+
+PROVIDER APP — GUEST BID → SAVED BID
+  Market  GET mobile/catalogue/rfqs[/{id}], bid-limits   (no business identity, title, target price)
+  Bid     lines × qty (≤ remaining) × unit price (≥ minimum) ─► guest_bid_v1 on the phone ─► sign-in sheet
+  Register ─► OTP ─► automatic sign-in ─► Type ─► Identity creates the Provider
+  Identity ─► POST api/marketplace/bid-drafts ─► SAVED | LINE_REMOVED | ALREADY_BID   (422 RFQ_CLOSED drops it)
+  Review submit ─► Saved bid screen: readiness (verified, open, slots, vehicles, capacity, price)
+  All green ─► provider taps Submit ─► POST api/marketplace/bid-drafts/{id}/submit ─► SubmitBidCommand
+  (An already-VERIFIED provider instead returns to the normal bid form, pre-filled, and submits there.)
+
+PROVIDER APP — GUEST "ADD YOUR VEHICLE"
+  Wizard identity + 5 photos (local file paths) ─► guest_vehicle_v1 ─► sign-in sheet
+  Identity step ─► POST mobile/vehicles (PENDING) ─► POST mobile/vehicles/{id}/photos
+               └─ 409 duplicate plate/VIN: draft kept with the reason, corrected on the form
+  After Review ─► wizard resumes at Insurance ─► Vehicle documents ─► "Do this later" allowed
+```
+
+### Business Rules
+
+- Nothing auto-submits: a guest cart becomes a server cart, a guest bid becomes saved bids (`ProviderBidDraft`, invisible to businesses), a guest vehicle becomes `PENDING`.
+- A server cart needs a `Business` row; submitting it needs a `VERIFIED` business (`422 BUSINESS_NOT_VERIFIED`).
+- A bid needs a `VERIFIED` provider with `APPROVED`, insured vehicles and enough segment capacity; saved bids need only a `Provider` row.
+- Only vehicles of `VERIFIED` providers are rentable (`RentableVehicles`, shared by the signed-in browse, the anonymous catalogue, the quote and add-to-cart).
+- Saved bids whose RFQ stops taking bids are closed by `WebsiteDraftsJob` and the provider is told.
 
 ---
 
