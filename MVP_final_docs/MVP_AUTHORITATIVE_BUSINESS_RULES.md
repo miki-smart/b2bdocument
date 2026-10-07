@@ -236,7 +236,7 @@ The real condition-verification mechanism is a **vehicle inspection checklist**,
 
 **Process:**
 1. Provider (delivery) submits a structured checklist (`POST /delivery/sessions/{id}/checklist`) — bool/enum/numeric fields (fuel level, odometer, tyre condition, visible damage, lights, spare tyre, documents-in-vehicle, etc.), no photo upload. All `IsRequired` items (minus EV-only items on non-EV vehicles) must have a response.
-2. Business approves or rejects the checklist (`POST /delivery/checklists/{id}/approve|reject`).
+2. Business approves or rejects the checklist (`POST /delivery/checklists/{id}/approve|reject`). A rejection carries an optional reason; the provider fixes the checklist and submits it again (BR-015).
 3. **OTP generation is hard-blocked server-side until the checklist is `APPROVED`** — enforced in `GenerateOTPCommandHandler`, not just a UI convention.
 4. Provider requests the delivery OTP (`POST /delivery/sessions/{id}/otp/generate`) — a 6-digit, cryptographically random code, **5-minute expiry**, sent via SMS (or email fallback) to the **business** — it is **never returned in any API response** (`GenerateOTPResponseDto.Code` is always an empty string by design).
 5. The business reads/shows the code to the provider; the provider enters it (`POST /delivery/sessions/{id}/otp/verify`) to confirm delivery.
@@ -249,9 +249,15 @@ The real condition-verification mechanism is a **vehicle inspection checklist**,
 
 ### 4.4 Delivery / Checklist Rejection
 
-**Rule BR-015: Business Rejection of a Delivery Checklist**
+**Rule BR-015: Rejecting a Checklist, and Resubmitting It**
 
-- Business can reject the delivery checklist **before** an OTP is ever generated (checklist approval gates OTP generation entirely — see BR-014). A rejected checklist blocks the flow; there is no automated "provider replace vehicle or cancel contract, escalate to dispute after 24h" pipeline confirmed in code — dispute escalation specifically is **NOT YET IMPLEMENTED** (§13).
+The party that reviews a checklist can reject it: the **business** rejects the provider's delivery checklist, and the **provider** rejects the business's return checklist (mobile: `POST mobile/delivery/checklists/{id}/reject` and `POST mobile/delivery/returns/checklists/{id}/reject`, body `{reviewedByName, reason?}`).
+
+- **Before OTP only.** Checklist approval gates OTP generation entirely (BR-014), so a rejection always happens before any code is sent.
+- **The reason is kept** (`reviewReason`, up to 500 characters, optional) and returned with the checklist.
+- **The submitter is told.** The provider gets `delivery_checklist_rejected`; the business gets `return_checklist_rejected` (in-app/push and email). Both include the contract number, the plate and the reason.
+- **Fix and resubmit.** The submitter sends a corrected checklist for the same session through the usual submit endpoint. The rejected checklist is kept as history. A session has at most one live (not rejected) checklist, so a second submission while one is waiting for review is refused. The session's checklist endpoint returns the latest one.
+- **No limit and no automation.** There is no cap on resubmissions and no automatic "replace the vehicle, cancel the contract, or escalate to a dispute after 24h" pipeline; dispute escalation is **NOT YET IMPLEMENTED** (§13). If the two parties cannot agree, the provider can still replace the vehicle (new session, new checklist).
 - **After OTP verification:** delivery is final for that vehicle — there is no "reject after OTP" path. Post-delivery issues are handled through the early-termination flow (§6) or (once built) a dispute process, not a delivery-rejection reversal.
 
 ---
@@ -633,7 +639,7 @@ Contract completion is blocked while any required settlement cycle for returned 
 
 **Status: confirmed absent on every surface.** There is **no `Dispute` entity anywhere in the backend** (repo-wide search returns zero hits for a dispute table/entity). `Contract.Status` values `DISPUTED` and `ON_HOLD` exist only as bare, never-set enum members (§5.1) — a contract can be conceptually "disputed" in narrative only; there is no evidence-collection entity, no admin arbitration screen, no resolution-to-escrow-instruction pipeline, and no trust-score-penalty wiring behind either status. `EscrowLock` and `ContractPenalty` have their **own**, unrelated `"DISPUTED"` status values (real, reachable via the freeze/dispute-flag API) — those are not the same field as `Contract.Status` and do not constitute a dispute workflow either; they just mark money as frozen pending manual, out-of-band resolution.
 
-The five dispute categories, evidence requirements, 48-hour resolution timeline, and outcome tables from earlier drafts of this section (`BR-034` through `BR-037`) remain a reasonable **design reference** (see `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` for the fuller prior design thinking) but must not be presented as shipped behavior. If a business or provider wants to contest a delivery, condition, settlement amount, or contract term today, the only real in-product levers are: reject a checklist before OTP (§4.4), the provider-invoice approve/reject flow for tax reclaim (unrelated to disputing a settlement calculation — see §12), and the admin's ability to freeze/unfreeze an escrow lock (a manual, out-of-band action, not a structured dispute workflow).
+The five dispute categories, evidence requirements, 48-hour resolution timeline, and outcome tables from earlier drafts of this section (`BR-034` through `BR-037`) remain a reasonable **design reference** (see `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` for the fuller prior design thinking) but must not be presented as shipped behavior. If a business or provider wants to contest a delivery, condition, settlement amount, or contract term today, the only real in-product levers are: reject a checklist before OTP, with a reason the other party sees and answers with a corrected checklist (§4.4), the provider-invoice approve/reject flow for tax reclaim (unrelated to disputing a settlement calculation — see §12), and the admin's ability to freeze/unfreeze an escrow lock (a manual, out-of-band action, not a structured dispute workflow).
 
 **Recommendation:** treat Stories 12.6–12.9 of `backlog/mvp/epic-12-risk-trust-scoring.md` (business risk scoring, fraud detection, dispute workflow, risk-based transaction limits) as an explicit, unresolved product-prioritization decision — the platform has operated without any of them through MVP.
 
