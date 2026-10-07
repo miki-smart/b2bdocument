@@ -120,9 +120,9 @@ Search on the public app pages is a glass icon that opens a search field and an 
 |---|---|---|
 | GET | `api/admin/hot-deals?phase=` | List deals by phase (`PENDING_REVIEW`, `LIVE`, `SCHEDULED`, `ENDED`) |
 | POST | `api/admin/hot-deals/{id}/approve` · `/reject {reason}` · `/end {reason}` | Review and end |
-| GET | `api/admin/featured?targetType=` | Active featured rows with target summaries |
-| POST | `api/admin/featured` | `{targetType, targetId, sortOrder, startsAt?, endsAt?}` |
-| PUT / DELETE | `api/admin/featured/{id}` | Change order or end date / end it |
+| GET | `api/admin/featured?targetType=VEHICLE\|RFQ&includeEnded=` | `{items[], activeCount, maxActive}`. Items are the active rows by sort order (each with `title`, `subtitle` and `isShown`); with `includeEnded`, the last 50 ended rows follow |
+| POST | `api/admin/featured` | `{targetType, targetId, sortOrder?, startsAt?, endsAt?}`. `sortOrder` defaults to last and `startsAt` to now; with no `endsAt`, the row stays until removed. Returns 201 |
+| PUT / DELETE | `api/admin/featured/{id}` | `{sortOrder, endsAt?}` / end it (the row is kept as `ENDED`) |
 
 **Catalogue** — the same additions on `mobile/catalogue/*` (anonymous) and `api/public/*` (website API key). The signed-in browse (`api/marketplace/direct-rental/vehicles`) gets the filters and sorts; its Hot deals section uses `?hotDealsOnly=true&sortBy=saving`.
 
@@ -134,7 +134,9 @@ Search on the public app pages is a glass icon that opens a search field and an 
 | GET | `vehicles?hotDealsOnly=&featuredOnly=&sortBy=saving` | New filters and sort |
 | GET | `rfqs?featuredOnly=&sortBy=deadline\|orderSize` | `orderSize` = most vehicles first |
 
-**Vehicle DTOs** (public and signed-in): `dailyRentalRate` is the **effective** rate (older clients keep pricing correctly); new `normalDailyRate`, `hotDeal { id, dealDailyRate, discountPercent, endsAt }?`, `isFeatured`. **RFQ DTOs:** new `isFeatured`.
+**Signed-in provider RFQ board** (`api/marketplace/rfqs`, `mobile/marketplace/rfqs`): new `featuredOnly`, and `sortBy=order_size` (snake case, like that board's other sorts).
+
+**Vehicle DTOs** (public and signed-in): `dailyRentalRate` is the **effective** rate (older clients keep pricing correctly); new `normalDailyRate`, `hotDeal { id, dealDailyRate, discountPercent, endDate, endsAt }?`, `isFeatured`. **RFQ DTOs:** new `isFeatured`; the signed-in list DTO also gains `totalQuantity` (the public one already has it).
 
 **Cart:**
 
