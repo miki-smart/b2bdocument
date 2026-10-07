@@ -799,4 +799,37 @@ PROVIDER APP — GUEST "ADD YOUR VEHICLE"
 
 ---
 
+## Promotions: Hot Deals & Featured Listings
+
+**Full spec:** [MVP_PROMOTIONS_SPECIFICATION.md](./MVP_final_docs/MVP_PROMOTIONS_SPECIFICATION.md) · Rules: `MVP_AUTHORITATIVE_BUSINESS_RULES.md` §20 · Decided 2026-10-07, implementation in progress.
+
+### Hot deal flow
+
+```
+Provider (app/portal) proposes deal rate + dates on a rentable vehicle
+   → PENDING_REVIEW (admins told)
+Admin (portal) approves ── or rejects with a reason (provider told)
+   → APPROVED: scheduled until the start day, then live
+Live: catalogues show the deal (badge, struck-through normal price, ends-in);
+      quote, cart, preview and submit price at the deal rate
+Deal ends (end date / admin / provider withdraws / vehicle unavailable)
+   → carts are re-priced at submit; a stale expected total gets CART_PRICE_CHANGED
+```
+
+### Featured flow
+
+```
+Admin features a rentable vehicle or an open RFQ (order, optional end date)
+   → Featured sections and badges on website, portal and both apps
+Target stops qualifying or end date passes → it disappears; the job ends the row
+```
+
+### Business Rules
+- Provider proposes, admin approves; at least 10% off, at most 14 days, start within 30 days, one open deal per vehicle (Settings).
+- The provider cannot change the normal rate while a deal is open.
+- A deal live at submit prices the whole rental; the request stores charged rate, normal rate and deal id.
+- Featured never changes price or the order of the normal lists.
+
+---
+
 **Next Document:** [04_MODULE_SPECIFICATIONS/Identity_and_Compliance_Module.md](./04_MODULE_SPECIFICATIONS/Identity_and_Compliance_Module.md)

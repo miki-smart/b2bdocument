@@ -258,6 +258,15 @@ Work prepared without an account — on the marketing website (`PendingActionApp
 
 Related changes in this module: `AddToCartCommand` throws `CodedRuleException` (`422`) with `VEHICLE_UNAVAILABLE`, `ALREADY_IN_CART` or `INVALID_DATES`; migration `20261002180240_Add-DirectRentalCartItem-UniqueVehiclePerCart` adds the filtered unique index `UX_direct_rental_cart_items_cart_vehicle_active` on `(cartId, vehicleId) WHERE "isDeleted" = false` (older live duplicates are soft-deleted first) and the handler maps a unique violation to `ALREADY_IN_CART`. Because the predicate now requires a `VERIFIED` provider, the signed-in catalogue no longer lists vehicles of pending, suspended or blocked providers.
 
+### 12. Promotions: Hot deals and Featured listings (decided 2026-10-07, implementation in progress)
+
+**Full spec:** [../MVP_final_docs/MVP_PROMOTIONS_SPECIFICATION.md](../MVP_final_docs/MVP_PROMOTIONS_SPECIFICATION.md).
+
+- **`VehicleHotDeal`** (`marketplace.vehicle_hot_deals`): provider-proposed, admin-approved lower daily rate for a date range on one rentable vehicle; one open deal per vehicle; statuses `PENDING_REVIEW`, `APPROVED`, `REJECTED`, `WITHDRAWN`, `EXPIRED`, `ENDED`.
+- **`FeaturedListing`** (`marketplace.featured_listings`): admin-curated vehicles and open RFQs with order and optional end date; shown only while the target still qualifies.
+- **`VehiclePricing`** (next to `RentableVehicles`): the single effective-rate service (live deal rate, else normal rate) used by the catalogue lists and detail, the guest quote, `AddToCartCommand`, the cart, the submit preview and `SubmitCartCommand`, which re-prices at submit and returns `CART_PRICE_CHANGED` when the business's expected total is stale.
+- **`PromotionsExpiryJob`** expires and ends deals and featured rows; reads never depend on it.
+
 ---
 
 ## Events
