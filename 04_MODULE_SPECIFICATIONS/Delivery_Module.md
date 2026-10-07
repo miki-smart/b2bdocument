@@ -115,7 +115,7 @@ Modules/Delivery/
     └── Repositories/ (one per Domain/Repositories interface)
 ```
 
-Controllers live outside the module folder: `Controllers/Delivery/DeliveryController.cs` (`[Route("api/delivery")]`, web) and `Controllers/Mobile/MobileDeliveryController.cs` (`[Route("mobile/delivery")]`, both mobile apps) — thin wrappers around the identical MediatR commands/queries; there is exactly one implementation of every business rule behind two route prefixes. The mobile controller adds one extra route the web controller doesn't have: a dedicated `POST returns/checklists/{checklistId:guid}/approve` (provider-only) alongside the shared `POST checklists/{checklistId}/approve`/`reject` both controllers expose.
+Controllers live outside the module folder: `Controllers/Delivery/DeliveryController.cs` (`[Route("api/delivery")]`, web) and `Controllers/Mobile/MobileDeliveryController.cs` (`[Route("mobile/delivery")]`, both mobile apps) — thin wrappers around the identical MediatR commands/queries; there is exactly one implementation of every business rule behind two route prefixes. The mobile controller adds two routes the web controller doesn't have: dedicated `POST returns/checklists/{checklistId:guid}/approve` and `.../reject` (provider-only) alongside the shared `POST checklists/{checklistId}/approve`/`reject` both controllers expose.
 
 ---
 
@@ -261,7 +261,9 @@ sequenceDiagram
 
 **Initiation** (`POST /returns/{contractId}/vehicles/{vehicleId}/initiate`, body `{ initiatorRole }`): the controller allows either `BUSINESS` or `PROVIDER` to call it, though the intended flow is business-initiated. Requires the vehicle assignment to be `DELIVERED` or `ACTIVE`. Idempotent (returns the existing `SCHEDULED` session if present). Publishes `ReturnSessionInitiatedEvent`.
 
-**Checklist:** business submits (`POST /returns/sessions/{sessionId}/checklist`, requires `DELIVERED`/`ACTIVE` assignment); provider approves (`POST /returns/checklists/{checklistId}/approve`) or the generic `POST /checklists/{checklistId}/reject` (shared, role-agnostic at the DB layer — return-checklist rejection is not wired into either mobile app's UI today even though the command supports it).
+**Checklist:** business submits (`POST /returns/sessions/{sessionId}/checklist`, requires `DELIVERED`/`ACTIVE` assignment); provider approves (`POST /returns/checklists/{checklistId}/approve`) or rejects with a reason (mobile: `POST /returns/checklists/{checklistId}/reject`; web: the shared `POST /checklists/{checklistId}/reject`). After a rejection the business submits a corrected checklist (see **Rejection and resubmission** below).
+
+**Rejection and resubmission (both flows, BR-015):** the reviewer rejects with an optional reason (`reviewReason`, max 500). The rejected checklist stays as history and the submitter is notified (`delivery_checklist_rejected` to the provider, `return_checklist_rejected` to the business; `ChecklistRejectedEvent` → `ChecklistRejectedNotificationHandler`). The submitter then sends a corrected checklist to the same submit endpoint. A session may have several checklists over time but at most one that is not `REJECTED` (filtered unique indexes on `deliverySessionId` / `returnSessionId`), and `GET .../checklist` returns the latest.
 
 **OTP:** business calls `GenerateReturnOTPCommand` (requires `APPROVED` checklist), a 6-digit `ReturnOTP` (5-minute expiry, `RecipientRole = "PROVIDER"`) is sent to the provider. Business then calls `VerifyReturnOTPCommand` with the code the provider reads back.
 
@@ -278,7 +280,7 @@ sequenceDiagram
 
 - **`DeliverySession.Status`** (string, no enum type): `SCHEDULED → IN_PROGRESS → COMPLETED`, or `CANCELLED`. In practice the wired flow never calls `Start()` — sessions go `SCHEDULED → COMPLETED` directly on OTP verification; `IN_PROGRESS`/`Cancel()` have no controller action driving them for delivery sessions today.
 - **`DeliveryReturnSession.Status`**: same shape and caveat — no endpoint transitions a return session to `IN_PROGRESS` either.
-- **`VehicleInspectionChecklist.Status`**: `SUBMITTED → APPROVED | REJECTED`. The web UI additionally renders a `REPLACEMENT_REQUESTED` state for the case where a business rejects a delivery checklist and requests a different vehicle — this is a **client-side interpretation layer**, not a distinct backend value (`Reject()` only ever sets `Status = "REJECTED"`).
+- **`VehicleInspectionChecklist.Status`**: `SUBMITTED → APPROVED | REJECTED`. `REJECTED` is final for that checklist; the submitter continues with a new `SUBMITTED` checklist for the same session. The web UI additionally renders a `REPLACEMENT_REQUESTED` state for the case where a business rejects a delivery checklist and requests a different vehicle — this is a **client-side interpretation layer**, not a distinct backend value (`Reject()` only ever sets `Status = "REJECTED"`).
 - **`DeliveryOTP`/`ReturnOTP`**: `IsUsed` (bool) + `ExpiresAt`, no status string. Verification failure just throws; there is no server-side attempt counter/lockout — the caller must generate a fresh OTP after any number of failed guesses.
 
 ---
@@ -294,8 +296,8 @@ Every endpoint exists twice — `api/delivery` (`DeliveryController`, web) and `
 - `GET sessions/{sessionId}/otp` — pending OTP metadata, no code; `GET business/{businessId}/pending-otps` (mobile: `GET pending-otps`, business-only, current-user-scoped)
 - `POST contracts/{contractId}/vehicles/{vehicleId}/request-confirmation` — provider, creates or returns existing session
 - `GET checklist-template?isEv=&isReturn=` — template items for the current context
-- `POST sessions/{sessionId}/checklist`, `GET sessions/{sessionId}/checklist` — provider submits / anyone fetches
-- `POST checklists/{checklistId}/approve`, `POST checklists/{checklistId}/reject` — business
+- `POST sessions/{sessionId}/checklist`, `GET sessions/{sessionId}/checklist` — provider submits (again after a rejection) / anyone fetches the latest
+- `POST checklists/{checklistId}/approve`, `POST checklists/{checklistId}/reject` (body `{reviewedByName, reason?}`) — business
 
 **Return:**
 - `POST returns/{contractId}/vehicles/{vehicleId}/initiate` — business (or provider)
@@ -304,6 +306,7 @@ Every endpoint exists twice — `api/delivery` (`DeliveryController`, web) and `
 - `GET returns/sessions/{sessionId}`, `GET returns/sessions/contract/{contractId}`
 - `POST returns/sessions/{sessionId}/checklist`, `GET returns/sessions/{sessionId}/checklist` — business submits
 - `POST returns/checklists/{checklistId}/approve` (mobile also has a dedicated `POST returns/checklists/{checklistId}/approve`, provider-only, in addition to the shared endpoint) — provider
+- `POST returns/checklists/{checklistId}/reject` (mobile, provider-only; body `{reviewedByName, reason?}`) — provider rejects; the business resubmits
 
 ---
 
@@ -314,7 +317,7 @@ Every endpoint exists twice — `api/delivery` (`DeliveryController`, web) and `
 3. **No GPS/geofence arrival confirmation exists.** No `Latitude`/`Longitude` columns, no arrival-radius check, no `EN_ROUTE`/`ARRIVED` distinction. `DeliverySession.LocationAddress` exists but is always `null` in practice. Matches epic-15 (post-MVP) being confirmed Not Started everywhere.
 4. **No server-side OTP attempt counter or lockout.** Neither `DeliveryOTP` nor `ReturnOTP` has an `Attempts` field; a wrong guess just fails, with no escalating lockout behavior.
 5. **`IN_PROGRESS` is unreachable for both session types.** `Start()` exists on both `DeliverySession` and `DeliveryReturnSession` but no controller action calls it — both flows go directly from `SCHEDULED` to `COMPLETED`.
-6. **Return-checklist rejection is backend-complete but not wired into either mobile app's UI.** `POST /checklists/{checklistId}/reject` works for a return checklist at the API layer, but neither Flutter app exposes a "reject" action on its return-checklist screen — only the web app's approve action is exercised for returns today.
+6. **Return-checklist rejection on the web.** The provider app now rejects a return checklist (mobile `POST returns/checklists/{checklistId}/reject`) and the business app resubmits it; the web portal still exposes only approve for returns.
 7. **`DeliveryChecklistApprovedEvent`/`ReturnChecklistApprovedEvent` have no functional subscribers** beyond logging/notification wiring — approving a checklist does not itself trigger OTP generation; that remains a separate explicit action by whichever party operates the OTP-request endpoint.
 8. **The web return-flow's delivery-vs-return comparison table is client-side only** — both checklists are fetched independently and diffed in React; there is no backend "damage delta" entity or endpoint to build server-side tooling against.
 9. **The provider mobile app's delivery-OTP screen renders a "Share OTP with Driver" panel that can never populate** — `GenerateOTPResponseDto.Code` is always empty by design (§5), so that panel is a latent UI artifact, not a security hole and not documentation of intended behavior.

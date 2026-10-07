@@ -474,12 +474,12 @@ Inverts the older "system generates the invoice" assumption — **providers subm
 | GET | `api/delivery/returns/sessions/{sessionId}` | |
 | GET | `api/delivery/returns/sessions/contract/{contractId}` | |
 | GET | `api/delivery/checklist-template` | Vehicle-inspection checklist template (query param scopes vehicle type). |
-| POST | `api/delivery/sessions/{sessionId}/checklist` | Submit outbound inspection checklist. |
-| GET | `api/delivery/sessions/{sessionId}/checklist` | |
+| POST | `api/delivery/sessions/{sessionId}/checklist` | Submit outbound inspection checklist (again after a rejection; BR-015). |
+| GET | `api/delivery/sessions/{sessionId}/checklist` | The latest checklist for the session (may be `REJECTED`, with `reviewReason`). |
 | POST | `api/delivery/returns/sessions/{sessionId}/checklist` | Submit return inspection checklist. |
 | GET | `api/delivery/returns/sessions/{sessionId}/checklist` | |
 | POST | `api/delivery/checklists/{checklistId}/approve` | |
-| POST | `api/delivery/checklists/{checklistId}/reject` | |
+| POST | `api/delivery/checklists/{checklistId}/reject` | Body `{reviewedByName, reason?}`. Reason kept as `reviewReason`; the submitter is notified and resubmits. |
 
 ---
 
@@ -564,7 +564,7 @@ Both Flutter apps (business, provider) share this one surface — routes are rol
 | `MobileProviderFleetController` | `mobile/marketplace/provider/fleet` | `GET capacity`, `POST capacity/bid-preview`, `GET action-items`, `GET rfq/awards/{awardId}/eligible-vehicles`. |
 | `MobileVehicleController` | `mobile/vehicles` | `POST` (register), `GET my-vehicles`, `GET {id}`, `PUT {id}`, `POST {id}/photos`, `POST {id}/documents`, `POST {id}/insurance`, `PUT insurance/{insuranceId}`, `GET {id}/assignments`, `PUT {id}/maintenance-status`. **No Direct Rental enable/disable endpoints on the mobile surface** — those only exist on the web `VehicleController` (§3.3); see §11 for how mobile actually reaches Direct Rental. |
 | `MobileContractController` | `mobile/contracts` | `GET my-contracts`, `GET {id}`, `GET {id}/vehicles`, `GET {contractId}/terms`, `POST {contractId}/terms/otp/generate`, `POST {contractId}/terms/otp/verify`, `GET {contractId}/line-items/{lineItemId}/available-vehicles`, `POST {contractId}/line-items/{lineItemId}/assign-vehicle`, `POST {contractId}/termination/request`, `POST {contractId}/termination/approve`, `GET {contractId}/completion/readiness`, `POST {contractId}/completion/request`, `POST {contractId}/completion/approve`, `POST {contractId}/completion/reject` — a near-complete mirror of the web `ContractsController` (§5), correctly `[Authorize]`-protected (unlike its web counterpart). |
-| `MobileDeliveryController` | `mobile/delivery` | Full mirror of `api/delivery` (§7) — sessions, timeline, OTP generate/verify, returns, checklist submit/approve/reject — **and, unlike the web version, this one is `[Authorize]`-protected.** |
+| `MobileDeliveryController` | `mobile/delivery` | Full mirror of `api/delivery` (§7) — sessions, timeline, OTP generate/verify, returns, checklist submit/approve/reject (plus a provider-only `returns/checklists/{checklistId}/reject` for return checklists) — **and, unlike the web version, this one is `[Authorize]`-protected.** |
 | `MobileWalletController` | `mobile/wallets` | `GET summary`, `GET balance`, `GET transactions` (supports a `contractId` filter the web UI doesn't expose), `GET verified-bank-accounts`, `POST withdrawal`, `GET withdrawals/my`, `GET settlements`, `GET settlements/{payoutId}`, `GET escrow-breakdown`, `GET upcoming-transactions`, `GET provider/upcoming-settlements`. 8+ distinct endpoints (older mobile spec docs undercounted this at 4). |
 | `MobilePaymentController` | `mobile/payments` | `GET providers`, `POST intent`, `GET status/{transactionReference}` — mirrors §6.5's user-facing (non-webhook) endpoints; webhooks stay on `api/payments` since gateways call the web route regardless of client. |
 | `MobileNotificationController` | `mobile/notifications` | `GET` (list), `GET summary`, `PUT {id}/read`, `PUT mark-all-read`, `DELETE {id}`, `POST push/rebind`, `POST push/unregister` — push-token lifecycle is mobile-only (naturally; there's no equivalent on web). Note: `push/rebind`/`push/unregister` is the real route pair — some mobile spec docs still describe a `POST mobile/me/devices` route that does not exist. |
