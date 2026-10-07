@@ -244,6 +244,20 @@ Provider enables a vehicle (`Vehicle.EnableDirectRental()`, requires `APPROVED` 
 ### 10. Fleet-capacity conflict preview
 Before responding to a Direct Rental request, a provider can call `GET /direct-rental/requests/{id}/accept-preview` (`GetDirectRentalAcceptPreviewQuery`) to see per-vehicle conflict codes (`DR_ACCEPT_AWARD_NOT_FULLY_ASSIGNED`, `DR_ACCEPT_VEHICLE_ON_AWARD`, `DR_ACCEPT_BID_CAPACITY`) against their RFQ bid/award commitments, via the same `IProviderFleetCapacityService` used for RFQ bidding. The preview is advisory — the actual `respond` call re-enforces the same gate server-side.
 
+### 11. Shared services for guest mode and the website
+
+**Full spec:** [../MVP_final_docs/MVP_GUEST_MODE_SPECIFICATION.md](../MVP_final_docs/MVP_GUEST_MODE_SPECIFICATION.md) §11. **Last verified against code: 2026-10-05**, backend branch `feature/mobile-guest-mode` (not yet merged to `development`).
+
+Work prepared without an account — on the marketing website (`PendingActionApplier`, Public module) or in the mobile apps' guest mode — enters the Marketplace module through three shared pieces, so both channels apply identical rules:
+
+| Piece | Location | Contract | Used by |
+|---|---|---|---|
+| `ICartMergeService` / `CartMergeService` | `Application/DirectRentalCart/Services/CartMergeService.cs` | `MergeAsync(businessId, items, ct)` → per-vehicle `ADDED` / `ALREADY_IN_CART` / `INVALID_DATES` / `UNAVAILABLE`. Adds through `AddToCartCommand` one vehicle at a time; a vehicle already in the cart keeps its server dates; a refused line becomes an outcome instead of failing the batch (`UnsavedChanges.Discard` drops half-built entities). Idempotent, never submits. | `MergeCartCommand` (`POST api/marketplace/cart/merge`), `PendingActionApplier.ApplyCartAsync` |
+| `IBidDraftService` / `BidDraftService` | `Application/BidDrafts/BidDraftService.cs` | `SaveAsync(providerId, rfqId, items, notes, ct)` → `Saved` with per-line `SAVED` / `LINE_REMOVED` / `ALREADY_BID`, or `RfqNotFound` / `RfqClosed`. One live `ProviderBidDraft` per provider per line (saving again updates it); never creates an `RFQBid`. Tracks changes; the caller saves. | `CreateBidDraftsCommand` (`POST api/marketplace/bid-drafts`, maps not-found/closed to `422 RFQ_CLOSED`), `PendingActionApplier.ApplyBidAsync` |
+| `RentableVehicles` + `DirectRentalPeriod` | `Domain/Services/RentableVehicles.cs` | `RentableVehicles.Predicate`: not deleted, `IsAvailableForDirectRental`, `APPROVED`, active, not in maintenance, `DailyRentalRate > 0`, provider not deleted and **`VERIFIED`**. `DirectRentalPeriod`: dates valid when start ≥ today (UTC) and end > start; `TotalDays` inclusive; `EscrowHold = rate × min(days, 30)`. Locks from requests/contracts stay in `IVehicleAvailabilityService`. | `GetAvailableVehiclesQuery`, `GetAvailableVehicleByIdQuery`, `AddToCartCommand`, the anonymous catalogue and cart quote (Public module) |
+
+Related changes in this module: `AddToCartCommand` throws `CodedRuleException` (`422`) with `VEHICLE_UNAVAILABLE`, `ALREADY_IN_CART` or `INVALID_DATES`; migration `20261002180240_Add-DirectRentalCartItem-UniqueVehiclePerCart` adds the filtered unique index `UX_direct_rental_cart_items_cart_vehicle_active` on `(cartId, vehicleId) WHERE "isDeleted" = false` (older live duplicates are soft-deleted first) and the handler maps a unique violation to `ALREADY_IN_CART`. Because the predicate now requires a `VERIFIED` provider, the signed-in catalogue no longer lists vehicles of pending, suspended or blocked providers.
+
 ---
 
 ## Events
@@ -266,7 +280,8 @@ Before responding to a Direct Rental request, a provider can call `GET /direct-r
 | `BidController` | `api/marketplace/bids` | `POST`, `PUT /{id}`, `DELETE /{id}`, `POST /award`, `GET /{id}`, `GET`, `GET /rfq/{rfqId}`, `GET /provider/{providerId}`, `GET /{id}/award-assignments` |
 | `RfqAwardController` | `api/marketplace/rfq/awards` | `GET /{awardId}/assignments`, `POST /{awardId}/vehicles`, `DELETE /{awardId}/vehicles/{vehicleId}`, `GET /{awardId}/eligible-vehicles` |
 | `DirectRentalVehicleController` | `api/marketplace/direct-rental/vehicles` | `GET` (catalog list), `GET /{vehicleId}` (detail) |
-| `DirectRentalCartController` | `api/marketplace/cart` | `GET`, `POST /items`, `PATCH /items/{cartItemId}`, `DELETE /items/{cartItemId}`, `GET /submit-preview`, `POST /submit` |
+| `DirectRentalCartController` | `api/marketplace/cart` | `GET`, `POST /items`, `PATCH /items/{cartItemId}`, `DELETE /items/{cartItemId}`, `POST /merge` (guest cart hand-over, §11), `GET /submit-preview`, `POST /submit` |
+| `BidDraftController` | `api/marketplace/bid-drafts` | `Policy=ProviderUser`: `POST` (save prices as saved bids, §11), `GET`, `PUT /{id}`, `DELETE /{id}`, `GET /{id}/readiness`, `POST /{id}/submit` (runs `SubmitBidCommand`) |
 | `DirectRentalRequestController` | `api/marketplace/direct-rental/requests` | `GET`, `GET /{requestId}`, `GET /{requestId}/history`, `POST /{requestId}/cancel`, `POST /{requestId}/respond`, `GET /{requestId}/accept-preview` |
 | `ProviderFleetController` | `api/marketplace/provider/fleet` | `GET /capacity`, `POST /capacity/bid-preview`, `GET /action-items` |
 | `AdminDirectRentalController` (`Controllers/Admin/`) | `api/admin/direct-rental` | Vehicle browse, request list/detail/history, business-cart CRUD + submit-preview + submit (tagged `ADMIN`), respond-on-behalf-of-provider — all `[Authorize(Policy = "AdminOnly")]` |
