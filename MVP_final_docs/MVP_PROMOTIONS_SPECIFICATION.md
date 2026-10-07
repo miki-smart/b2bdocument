@@ -68,7 +68,7 @@ A deal is **live** when: `APPROVED`, now ≥ start (00:00 Addis on the start day
 - The **effective daily rate** of a vehicle is the live deal rate, else its normal rate. One pricing service computes it for every read and write.
 - A deal live **when the business submits** prices the **whole** rental, even if the rental runs past the deal's end. The 30-day escrow cap and day counting (end date excluded) are unchanged.
 - **Cart:** adding a vehicle stores the effective rate, the deal id and the normal rate. Changing the dates refreshes them.
-- **Re-price at submit (decision 2026-10-07):** the cart, the submit preview and submit always use the **current** effective rate. If a deal ended (or the normal rate changed) since the vehicle was added, the cart and preview flag the item (`priceChanged`, reason `DEAL_ENDED` / `RATE_CHANGED`) and show old vs new rate. Clients send the total they showed (`expectedTotalAmount`); if it no longer matches, submit returns **409 `CART_PRICE_CHANGED`** with the changes, and the client shows them before the business confirms again. A client that sends no expected total gets the request at the re-priced amounts.
+- **Re-price at submit (decision 2026-10-07):** the cart, the submit preview and submit always use the **current** effective rate. If the price moved since the vehicle was added, the cart and preview flag the item (`priceChanged`, reason `DEAL_ENDED`, `DEAL_STARTED` or `RATE_CHANGED`) and show the old and new rate. Clients send the total they showed (`expectedTotalAmount`). If it no longer matches, submit returns **409 `CART_PRICE_CHANGED`** and creates nothing. The client then reloads the cart or preview, which list the changes, and shows them before the business confirms again. A client that sends no expected total gets the request at the re-priced amounts.
 - **Request and contract:** the request vehicle stores the charged rate (`DailyRate`), the normal rate and the deal id. Contract value, escrow, early delivery, ledger and settlement work from the charged rate exactly as before.
 - The **guest cart quote** prices with the effective rate.
 
@@ -96,7 +96,7 @@ Search on the public app pages is a glass icon that opens a search field and an 
 
 ## 6. Data Model
 
-**`marketplace.vehicle_hot_deals` (`VehicleHotDeal`)** — `Id`, `VehicleId`, `ProviderId`, `DealDailyRate`, `NormalRateAtProposal`, `StartDate`, `EndDate` (Addis days), `StartsAtUtc`, `EndsAtUtc` (derived), `Status`, `RejectionReason`, `ReviewedBy`, `ReviewedAt`, `EndedBy`, `EndedAt`, `EndReason`, audit fields. Filtered unique index on `VehicleId` for open deals; index on `(Status, EndsAtUtc)`.
+**`marketplace.vehicle_hot_deals` (`VehicleHotDeal`)** — `Id`, `VehicleId`, `ProviderId`, `DealDailyRate`, `NormalRateAtProposal`, `StartDate`, `EndDate` (Addis days), `StartsAtUtc`, `EndsAtUtc` (derived), `Status`, `RejectionReason`, `ReviewedBy`, `ReviewedAt`, `EndedBy`, `EndedAt`, `EndReason` (`ADMIN`, `RATE_CHANGED`, `DIRECT_RENTAL_DISABLED`, `VEHICLE_UNAVAILABLE`), `EndNote` (the admin's reason when ending), audit fields. Filtered unique index on `VehicleId` for open deals; index on `(Status, EndsAtUtc)`.
 
 **`marketplace.featured_listings` (`FeaturedListing`)** — `Id`, `TargetType` (`VEHICLE` | `RFQ`), `TargetId`, `SortOrder`, `StartsAtUtc`, `EndsAtUtc?`, `Status` (`ACTIVE` | `ENDED` | `EXPIRED`), `Source` (`ADMIN`; `PAID` reserved), `CreatedBy`, `EndedBy`, `EndedAt`, `EndReason`. Filtered unique index on `(TargetType, TargetId)` where `ACTIVE`.
 
@@ -118,13 +118,13 @@ Search on the public app pages is a glass icon that opens a search field and an 
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `api/admin/hot-deals?status=` | List deals (`PENDING_REVIEW`, `LIVE`, `SCHEDULED`, `ENDED`) |
+| GET | `api/admin/hot-deals?phase=` | List deals by phase (`PENDING_REVIEW`, `LIVE`, `SCHEDULED`, `ENDED`) |
 | POST | `api/admin/hot-deals/{id}/approve` · `/reject {reason}` · `/end {reason}` | Review and end |
 | GET | `api/admin/featured?targetType=` | Active featured rows with target summaries |
 | POST | `api/admin/featured` | `{targetType, targetId, sortOrder, startsAt?, endsAt?}` |
 | PUT / DELETE | `api/admin/featured/{id}` | Change order or end date / end it |
 
-**Catalogue** — the same additions on `mobile/catalogue/*` (anonymous) and `api/public/*` (website API key), and on the signed-in browse:
+**Catalogue** — the same additions on `mobile/catalogue/*` (anonymous) and `api/public/*` (website API key). The signed-in browse (`api/marketplace/direct-rental/vehicles`) gets the filters and sorts; its Hot deals section uses `?hotDealsOnly=true&sortBy=saving`.
 
 | Method | Path | Notes |
 |---|---|---|
@@ -136,7 +136,13 @@ Search on the public app pages is a glass icon that opens a search field and an 
 
 **Vehicle DTOs** (public and signed-in): `dailyRentalRate` is the **effective** rate (older clients keep pricing correctly); new `normalDailyRate`, `hotDeal { id, dealDailyRate, discountPercent, endsAt }?`, `isFeatured`. **RFQ DTOs:** new `isFeatured`.
 
-**Cart:** items gain `currentDailyRate`, `priceChanged`, `priceChangeReason`, `hotDealEndsAt`; the submit preview gains `priceChanges[]`; submit accepts `expectedTotalAmount` and may return 409 `CART_PRICE_CHANGED`.
+**Cart:**
+
+- Each item's `dailyRate`, `totalAmount` and `escrowHoldAmount` are the **current** prices.
+- Items gain `currentDailyRate` (equal to `dailyRate`), `dailyRateWhenAdded`, `normalDailyRate`, `priceChanged`, `priceChangeReason` and `hotDealEndsAt`.
+- The submit preview gains `priceChanges[] {cartItemId, vehicleId, plateNumber, previousDailyRate, currentDailyRate, reason}`.
+- Submit accepts `expectedTotalAmount` and may return 409 `CART_PRICE_CHANGED`.
+- The guest `cart-quote` items gain `normalDailyRate` and `hotDeal`.
 
 **Error codes:** `HOT_DEAL_ALREADY_OPEN`, `HOT_DEAL_OPEN` (rate change blocked), `HOT_DEAL_DISCOUNT_TOO_SMALL`, `HOT_DEAL_DATES_INVALID`, `HOT_DEAL_VEHICLE_NOT_RENTABLE`, `HOT_DEAL_NOT_REVIEWABLE`, `FEATURED_TARGET_NOT_LISTABLE`, `FEATURED_LIMIT_REACHED`, `FEATURED_ALREADY_ACTIVE`, `CART_PRICE_CHANGED`.
 
