@@ -998,6 +998,10 @@ Promotions attract people to the public pages: businesses to **Hot deals** and *
 **Rule BR-PROMO-010: Featured Does Not Change Price or Normal Ranking**
 - Featuring adds the item to the Featured sections and shows a badge; it does not change the price or the order of the normal lists.
 
+**Rule BR-PROMO-012: A Car in a Hot Deal Shows in Hot Deals Only**
+- While a vehicle has a live hot deal it is not featured: it is left out of the Featured sections and the `featuredOnly` filter, and carries no Featured badge. Its featured row is kept and shows again when the deal ends; the expiry job does not end it. An admin cannot feature a vehicle whose deal is live (`FEATURED_VEHICLE_HAS_HOT_DEAL`).
+- Where a Hot deals section is shown above an "All vehicles" list, that list leaves the deal cars out (`excludeHotDeals=true`), and the section holds every live deal (up to 50), so each car appears once. A filtered or searched list includes them.
+
 ### 20.4 Notifications
 
 **Rule BR-PROMO-011: Who Is Told**
@@ -1016,7 +1020,7 @@ Promotions attract people to the public pages: businesses to **Hot deals** and *
 
 ---
 
-| 2.1 | 2026-10-07 | Added §20 Promotions (BR-PROMO-001–011): provider-proposed, admin-approved **Hot deals** on direct-rental vehicles; admin-curated **Featured** vehicles and RFQs; effective-rate pricing and **re-price at submit** (supersedes the add-to-cart rate snapshot). Decided by the business owner; implementation in progress. BR-015 (checklist rejection and resubmission) was revised on 2026-10-07 in the same release. |
+| 2.1 | 2026-10-07 | Added §20 Promotions (BR-PROMO-001–012): provider-proposed, admin-approved **Hot deals** on direct-rental vehicles; admin-curated **Featured** vehicles and RFQs; effective-rate pricing and **re-price at submit** (supersedes the add-to-cart rate snapshot). Decided by the business owner; implementation in progress. BR-015 (checklist rejection and resubmission) was revised on 2026-10-07 in the same release. |
 
 ---
 

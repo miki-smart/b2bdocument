@@ -79,6 +79,8 @@ A deal is **live** when: `APPROVED`, now ≥ start (00:00 Addis on the start day
 - **Shown only while the target still qualifies**: an RFQ drops out when its deadline passes or it is awarded or cancelled; a vehicle drops out when it is no longer rentable. The expiry job then ends the row (`TARGET_NOT_LISTABLE`).
 - **Ending:** an admin removes it, or its end date passes (`EXPIRED`).
 - Featured does **not** change price or ranking in the normal lists; it only adds the item to the Featured section and a "Featured" badge.
+- **A vehicle with a live hot deal is not featured** while the deal runs (BR-PROMO-012). It shows in Hot deals instead, carries no Featured badge, and is left out of `featuredOnly`. The row is kept and shows again when the deal ends; the admin list marks it `hiddenReason: HOT_DEAL`. Featuring a vehicle whose deal is live is refused (`FEATURED_VEHICLE_HAS_HOT_DEAL`).
+- **Each car once:** where a Hot deals section is shown above "All vehicles" (the business app Vehicles page, the website `/fleet` once its promo rows show), the list is asked with `excludeHotDeals=true` and the section loads every live deal (up to 50). A filtered or searched list includes deal cars.
 
 ## 5. What Each Surface Shows
 
@@ -120,7 +122,7 @@ Search on the public app pages is a glass icon that opens a search field and an 
 |---|---|---|
 | GET | `api/admin/hot-deals?phase=` | List deals by phase (`PENDING_REVIEW`, `LIVE`, `SCHEDULED`, `ENDED`) |
 | POST | `api/admin/hot-deals/{id}/approve` · `/reject {reason}` · `/end {reason}` | Review and end |
-| GET | `api/admin/featured?targetType=VEHICLE\|RFQ&includeEnded=` | `{items[], activeCount, maxActive}`. Items are the active rows by sort order (each with `title`, `subtitle` and `isShown`); with `includeEnded`, the last 50 ended rows follow |
+| GET | `api/admin/featured?targetType=VEHICLE\|RFQ&includeEnded=` | `{items[], activeCount, maxActive}`. Items are the active rows by sort order (each with `title`, `subtitle`, `isShown` and `hiddenReason`: `NOT_LISTABLE` or `HOT_DEAL`); with `includeEnded`, the last 50 ended rows follow |
 | POST | `api/admin/featured` | `{targetType, targetId, sortOrder?, startsAt?, endsAt?}`. `sortOrder` defaults to last and `startsAt` to now; with no `endsAt`, the row stays until removed. Returns 201 |
 | PUT / DELETE | `api/admin/featured/{id}` | `{sortOrder, endsAt?}` / end it (the row is kept as `ENDED`) |
 
@@ -128,10 +130,10 @@ Search on the public app pages is a glass icon that opens a search field and an 
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `vehicles/hot-deals?limit=10` | Live deals: biggest saving first, then ending soonest |
-| GET | `vehicles/featured?limit=10` | By sort order |
+| GET | `vehicles/hot-deals?limit=10` | Live deals: biggest saving first, then ending soonest (`limit` up to 50) |
+| GET | `vehicles/featured?limit=10` | By sort order; never a vehicle in a live hot deal |
 | GET | `rfqs/featured?limit=10` | By sort order |
-| GET | `vehicles?hotDealsOnly=&featuredOnly=&sortBy=saving` | New filters and sort |
+| GET | `vehicles?hotDealsOnly=&featuredOnly=&excludeHotDeals=&sortBy=saving` | New filters and sort; `excludeHotDeals` for the list under a Hot deals section |
 | GET | `rfqs?featuredOnly=&sortBy=deadline\|orderSize` | `orderSize` = most vehicles first |
 
 **Signed-in provider RFQ board** (`api/marketplace/rfqs`, `mobile/marketplace/rfqs`): new `featuredOnly`, and `sortBy=order_size` (snake case, like that board's other sorts).
@@ -146,7 +148,7 @@ Search on the public app pages is a glass icon that opens a search field and an 
 - Submit accepts `expectedTotalAmount` and may return 409 `CART_PRICE_CHANGED`.
 - The guest `cart-quote` items gain `normalDailyRate` and `hotDeal`.
 
-**Error codes:** `HOT_DEAL_ALREADY_OPEN`, `HOT_DEAL_OPEN` (rate change blocked), `HOT_DEAL_DISCOUNT_TOO_SMALL`, `HOT_DEAL_DATES_INVALID`, `HOT_DEAL_VEHICLE_NOT_RENTABLE`, `HOT_DEAL_NOT_REVIEWABLE`, `FEATURED_TARGET_NOT_LISTABLE`, `FEATURED_LIMIT_REACHED`, `FEATURED_ALREADY_ACTIVE`, `CART_PRICE_CHANGED`.
+**Error codes:** `HOT_DEAL_ALREADY_OPEN`, `HOT_DEAL_OPEN` (rate change blocked), `HOT_DEAL_DISCOUNT_TOO_SMALL`, `HOT_DEAL_DATES_INVALID`, `HOT_DEAL_VEHICLE_NOT_RENTABLE`, `HOT_DEAL_NOT_REVIEWABLE`, `FEATURED_TARGET_NOT_LISTABLE`, `FEATURED_LIMIT_REACHED`, `FEATURED_ALREADY_ACTIVE`, `FEATURED_VEHICLE_HAS_HOT_DEAL`, `CART_PRICE_CHANGED`.
 
 ## 8. Expiry Job
 
