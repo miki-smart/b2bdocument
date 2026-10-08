@@ -39,6 +39,7 @@
 17. [Settlement Calculation with Vehicle Lifecycle](#17-settlement-calculation-with-vehicle-lifecycle)
 18. [Contract Extension Rules](#18-contract-extension-rules)
 19. [Direct Rental (Vehicle Catalog)](#19-direct-rental-vehicle-catalog)
+20. [Promotions: Hot Deals & Featured Listings](#20-promotions-hot-deals--featured-listings)
 
 ---
 
@@ -948,6 +949,66 @@ All six are terminal except `PENDING`.
 
 ---
 
+## 20. PROMOTIONS: HOT DEALS & FEATURED LISTINGS
+
+**Related specification:** [MVP_PROMOTIONS_SPECIFICATION.md](./MVP_PROMOTIONS_SPECIFICATION.md)
+
+**Status:** decided by the business owner on 2026-10-07; **implementation in progress** (backend PRs "Hot deals core", "Effective pricing", "Featured"). Re-verify against code after merge.
+
+Promotions attract people to the public pages: businesses to **Hot deals** and **Featured vehicles**, providers to **Featured RFQs**. They are shown on the website, the portal and both apps' public and signed-in browse screens.
+
+### 20.1 Hot Deals (vehicles)
+
+**Rule BR-PROMO-001: Provider Proposes, Admin Approves**
+- A hot deal is a lower daily rate for a date range on one direct-rental vehicle. The vehicle's **provider proposes** it; it is public only after an **admin approves** it. Admins may reject (reason required) or end it early (reason required); the provider may withdraw it while pending or approved.
+
+**Rule BR-PROMO-002: Eligibility and Limits**
+- The vehicle must be rentable (`APPROVED`, active, not in maintenance, direct rental on, rate > 0, provider `VERIFIED`) and owned by the proposing provider.
+- `dealRate ≤ normalRate × (1 − HOT_DEAL_MIN_DISCOUNT_PERCENT)` (default 10%).
+- Dates are Addis Ababa calendar days: start from today up to `HOT_DEAL_MAX_LEAD_DAYS` ahead (default 30); end ≥ start; at most `HOT_DEAL_MAX_DURATION_DAYS` long (default 14).
+- At most **one open deal** (`PENDING_REVIEW` or `APPROVED`) per vehicle.
+- Approval re-checks all of the above against the current rate.
+
+**Rule BR-PROMO-003: Deal Statuses**
+- `PENDING_REVIEW` → `APPROVED` → `EXPIRED` | `ENDED`; also `REJECTED`, `WITHDRAWN`. "Scheduled" and "live" are derived from the dates. A pending deal whose end passes expires.
+
+**Rule BR-PROMO-004: Live Definition**
+- Live = `APPROVED`, now within [00:00 Addis on the start day, 00:00 Addis after the end day), vehicle rentable, and deal rate below the normal rate. Every read applies this test; it never relies on the expiry job.
+
+**Rule BR-PROMO-005: Honest Struck-Through Price**
+- While a deal is open the provider cannot change the vehicle's normal rate (`HOT_DEAL_OPEN`). An admin rate change, turning direct rental off, or the vehicle becoming unrentable ends the deal.
+
+### 20.2 Pricing
+
+**Rule BR-PROMO-006: Effective Rate**
+- Effective daily rate = live deal rate, else the normal rate. Catalogue lists, detail, the guest quote, cart, submit preview and submit all use it. Public DTOs report `dailyRentalRate` = effective rate, plus `normalDailyRate` and the deal.
+
+**Rule BR-PROMO-007: Re-Price at Submit (supersedes the add-to-cart snapshot of BR-DR-007)**
+- The rate shown in the cart is re-checked at submit. If a deal ended or the normal rate changed since the vehicle was added, the current effective rate applies; the cart and preview flag the change, and submit with a stale `expectedTotalAmount` returns 409 `CART_PRICE_CHANGED` so the business confirms the new price.
+- A deal live at submit prices the whole rental. The request vehicle stores the charged rate, the normal rate and the deal id; contract, escrow (30-day cap) and settlement then work from the charged rate as before (BR-DR-014a).
+
+### 20.3 Featured Listings
+
+**Rule BR-PROMO-008: Admin-Curated**
+- Admins feature direct-rental vehicles and open RFQs, with a sort order and an optional end date. At most `FEATURED_MAX_VEHICLES` and `FEATURED_MAX_RFQS` active (default 12 each); a target is featured at most once at a time. Paid featuring is reserved for later (`Source = PAID`).
+
+**Rule BR-PROMO-009: Only While Listable**
+- A featured vehicle shows only while it is rentable; a featured RFQ only while it is open for bids (`PUBLISHED`, `BIDDING`, `PARTIALLY_AWARDED`, deadline in the future). The expiry job ends rows whose target stopped qualifying or whose end date passed.
+
+**Rule BR-PROMO-010: Featured Does Not Change Price or Normal Ranking**
+- Featuring adds the item to the Featured sections and shows a badge; it does not change the price or the order of the normal lists.
+
+**Rule BR-PROMO-012: A Car in a Hot Deal Shows in Hot Deals Only**
+- While a vehicle has a live hot deal it is not featured: it is left out of the Featured sections and the `featuredOnly` filter, and carries no Featured badge. Its featured row is kept and shows again when the deal ends; the expiry job does not end it. An admin cannot feature a vehicle whose deal is live (`FEATURED_VEHICLE_HAS_HOT_DEAL`).
+- Where a Hot deals section is shown above an "All vehicles" list, that list leaves the deal cars out (`excludeHotDeals=true`), and the section holds every live deal (up to 50), so each car appears once. A filtered or searched list includes them.
+
+### 20.4 Notifications
+
+**Rule BR-PROMO-011: Who Is Told**
+- Admins: deal proposed. Provider: deal approved, rejected (with reason), ended (by admin, rate change or vehicle unavailable), expired. Businesses are not notified about deals.
+
+---
+
 ## APPENDIX A: Rule Change Log
 
 | Version | Date | Changes |
@@ -956,6 +1017,10 @@ All six are terminal except `PENDING`.
 | 1.1 | Feb 20, 2026 | Added vehicle assignment lifecycle rules, contract completion logic, settlement calc with vehicle lifecycle, contract extension rules |
 | 1.2 | Jun 27, 2026 | Added §19 Direct Rental rules (BR-DR-001–BR-DR-015) |
 | **2.0** | **2026-07-23** | **Full reconciliation against running code.** Every rule individually re-verified. Key corrections: (1) escrow/commission/contract-lifecycle math corrected to match code exactly (BR-007/BR-010/BR-031A cap formula, BR-011 real 1s–16s backoff timing, no "every 30 min" retry); (2) the entire "Payment Default" grace-period/suspension saga (§3.3 in v1.2) marked **NOT YET IMPLEMENTED** — no `SUSPENDED` status, no debt tracking, no grace period exists in code; (3) provider commission table confirmed as Bronze 10%/Silver 8%/Gold 6%/Platinum 5%, no "Red Zone" tier; (4) trust score formula corrected to the real 4-input formula (no 5-factor weighted model) and flagged as **dormant** (zero production call sites); (5) new provider default corrected to `SILVER`/`50`, not `BRONZE`/`0`; (6) settlement cadence corrected to a flat 30-day rolling window, not tier-based or calendar-month; (7) `LOCKED` settlement-schedule status restored as real (v1.2 incorrectly called it deprecated); (8) `MAINTENANCE` vehicle-assignment status removed as fictional (real set is `ASSIGNED/DELIVERED/RETURNED/REPLACED/REMOVED`); (9) §7 Provider Rejection Handling and §13 Dispute Resolution marked **NOT YET IMPLEMENTED** in full; (10) §18's contract-extension gap (missing `POST /contracts/{id}/extend` endpoint despite a fully-built frontend button) elevated to the top-priority flagged gap in this document; (11) fixed three internal `BR-ID` collisions from v1.2 by renumbering the non-code-referenced side of each collision: the wallet-timing rule (was `BR-012`, now `BR-064` — `BR-012` is reassigned to its real code meaning, tier-based commission-rate resolution) and the three colliding status-definition rules in old §12.3/12.4/12.5/12.6 (old `BR-040`→`BR-065`, one of two old `BR-041`s→`BR-066`, old `BR-042`→`BR-067`, the other old `BR-041`→`BR-068`) — `BR-001`–`BR-011`, `BR-025`, `BR-031A`, and `BR-040`–`BR-042` (provider-tier section) were left untouched because they match real code comments. |
+
+---
+
+| 2.1 | 2026-10-07 | Added §20 Promotions (BR-PROMO-001–012): provider-proposed, admin-approved **Hot deals** on direct-rental vehicles; admin-curated **Featured** vehicles and RFQs; effective-rate pricing and **re-price at submit** (supersedes the add-to-cart rate snapshot). Decided by the business owner; implementation in progress. BR-015 (checklist rejection and resubmission) was revised on 2026-10-07 in the same release. |
 
 ---
 

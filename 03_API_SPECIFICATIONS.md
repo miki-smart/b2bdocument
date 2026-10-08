@@ -594,6 +594,18 @@ Both apps call `mobile/catalogue/*` while signed out (no `Authorization` header)
 
 **Coded errors** used by guest mode are written by `GlobalExceptionHandlerMiddleware` as `ErrorResponse` with a top-level `code` (`CodedConflictException` → `409`, `CodedRuleException` → `422`). `AddToCartCommand` (`POST api/marketplace/cart/items`) now fails with `422` and `VEHICLE_UNAVAILABLE`, `ALREADY_IN_CART` or `INVALID_DATES`.
 
+### 10.2 Promotions: Hot Deals & Featured (decided 2026-10-07, implementation in progress)
+
+**Full spec:** [MVP_PROMOTIONS_SPECIFICATION.md](./MVP_final_docs/MVP_PROMOTIONS_SPECIFICATION.md) §7. Rules: `MVP_AUTHORITATIVE_BUSINESS_RULES.md` §20.
+
+| Who | Routes |
+|---|---|
+| Provider (`ProviderUser`, apps and portal) | `GET/POST api/identity/vehicles/{id}/hot-deals`, `POST .../hot-deals/{dealId}/withdraw` |
+| Admin (`AdminOnly`) | `GET api/admin/hot-deals`, `POST api/admin/hot-deals/{id}/approve|reject|end`; `GET/POST api/admin/featured`, `PUT/DELETE api/admin/featured/{id}` |
+| Catalogue (`mobile/catalogue/*` anonymous, `api/public/*` API key, signed-in browse) | `GET vehicles/hot-deals`, `GET vehicles/featured`, `GET rfqs/featured`; list filters `hotDealsOnly`, `featuredOnly`, sorts `saving` (vehicles) and `orderSize` (RFQs) |
+
+Vehicle DTOs report `dailyRentalRate` as the **effective** rate plus `normalDailyRate`, `hotDeal` and `isFeatured`; RFQ DTOs add `isFeatured`. Cart submit takes `expectedTotalAmount` and may return `409 CART_PRICE_CHANGED`.
+
 ---
 
 ## 11. Route-Prefix Exceptions — Mobile Clients Calling `api/...` Directly
