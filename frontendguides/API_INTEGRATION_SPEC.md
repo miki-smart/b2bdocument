@@ -277,7 +277,7 @@ interface BackendTransactionDto {
 }
 ```
 
-Deposits go through `POST /payments/intent` (Chapa/Telebirr/CBE Birr gateway integration is live, not a "future risk item"). Withdrawals go through `POST /finance/wallets/my-wallet/withdrawal`. Escrow locks are read via `GET /finance/escrow/my-locks`.
+Deposits go through `POST /finance/deposit-requests` (bank transfer with receipt, approved by an admin; there is no payment gateway). Withdrawals go through `POST /finance/wallets/my-wallet/withdrawal`. Escrow locks are read via `GET /finance/escrow/my-locks`.
 
 ---
 
@@ -359,7 +359,7 @@ This is not an exhaustive OpenAPI mirror — the source of truth is `src/core/se
 | `/finance/wallets/{walletId}/transactions` | GET | Paginated ledger |
 | `/finance/escrow/my-locks` | GET | Active escrow locks |
 | `/finance/wallets/my-wallet/withdrawal` | POST | |
-| `/payments/intent` | POST | Deposit — returns a gateway `checkoutUrl` (Chapa/Telebirr/CBE Birr) |
+| `/finance/deposit-requests` | POST | Deposit request — multipart: bank, transaction number, receipt; credited on admin approval |
 
 ### Vehicles / Fleet (`/identity/*` — `fleet-service.ts`)
 

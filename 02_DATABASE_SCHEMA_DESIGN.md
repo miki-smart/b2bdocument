@@ -79,7 +79,7 @@ Configuration, policy, and lookup data. Contains MasterData's **versioned policy
 
 | Table | Purpose |
 |---|---|
-| `banks` | Ethiopian bank directory incl. Chapa payment-gateway bank code mapping |
+| `banks` | Ethiopian bank directory (bank codes for owner bank accounts) |
 | `business_tiers` / `business_tier_rules` | Business tier definitions + hybrid qualification rules (RFQ/contract/fleet-size thresholds) |
 | `checklist_template_items` | Vehicle inspection checklist question bank (delivery/return) |
 | `countries` / `regions` / `cities` | Geography hierarchy (lat/long on cities) |
@@ -102,7 +102,6 @@ Configuration, policy, and lookup data. Contains MasterData's **versioned policy
 | code | varchar(32) | NOT NULL | |
 | shortName | varchar(32) | NOT NULL | |
 | name | varchar(150) | NOT NULL | |
-| chapaCode | varchar(32) | NULL | maps to Chapa payment-gateway bank identifier |
 | logoUrl | varchar(512) | NULL | |
 | isActive | boolean | NOT NULL | |
 | createdAt/updatedAt/createdBy/updatedBy/isDeleted | audit columns | | |
@@ -366,7 +365,7 @@ walletAccountId (FK cascade), balance/lockedBalance/availableBalance (numeric), 
 transactionId? (FK **set-null**), walletAccountId? (FK **set-null**), actorId?/actorType varchar(32, default `SYSTEM`), eventType varchar(64), description?, eventPayload (jsonb) + audit (createdAt uses `HasDefaultValueSql("now()")` — the sole DB-side timestamp default in the whole schema besides a few MasterData booleans). Four indexes incl. two composite (actorType+createdAt, walletAccountId+createdAt).
 
 ### 7.10 `wallet.payment_intents` (`PaymentIntent`)
-walletAccountId (FK cascade), amount (numeric), currency (text), paymentMethod varchar(32), status (plain string, default `PENDING`: PENDING/PROCESSING/COMPLETED/FAILED/CANCELLED/EXPIRED), transactionReference varchar(100), gatewayTransactionId varchar(100)?, returnUrl?, metadata (text)?, failureReason?, expiresAt?/completedAt? + audit. Backs the live Chapa/Telebirr/CBEBirr payment-gateway webhook flow.
+walletAccountId (FK cascade), amount (numeric), currency (text), paymentMethod varchar(32), status (plain string, default `PENDING`: PENDING/PROCESSING/COMPLETED/FAILED/CANCELLED/EXPIRED), transactionReference varchar(100), gatewayTransactionId varchar(100)?, returnUrl?, metadata (text)?, failureReason?, expiresAt?/completedAt? + audit. Read-only history: the payment gateway was removed, and no new rows are written.
 
 ### 7.11 `wallet.deposit_requests` (`DepositRequest`)
 walletAccountId (FK restrict), platformBankAccountId? (FK restrict), ownerId/ownerType varchar(16), amount decimal(18,2), currency varchar(8), transactionNumber varchar(128), receiptUrl varchar(500)/receiptFileName?, status (plain string, default `PENDING_REVIEW`: PENDING_REVIEW/APPROVED/REJECTED), adminReviewedAt?/adminReviewedBy?, rejectionReason?, notes? + audit. Named index `IX_deposit_requests_transaction_number`.
@@ -452,7 +451,7 @@ Both: {channel}NotificationId (FK cascade to the sent-record row), retryCount (i
 | 03-09 | `AddFcmProviderConfigs` | `fcm_provider_configs` table |
 | 03-17 | `AddBusinessProfileExtendedFields` | Business profile address/contact fields |
 | 03-18 | `AddDedicatedBankAccountTables` | `business_bank_accounts` / `provider_bank_accounts` |
-| 03-25 | `AddChapaPaymentIntegration` | `payment_intents` and Chapa gateway support |
+| 03-25 | Payment-intents migration | `payment_intents` table (now read-only history; the payment gateway was removed) |
 | 03-27 | `MoveGatewayTransactionIdToWithdrawalRequest` | Moved a column onto `withdrawal_requests` |
 | 03-28 | `AddWithdrawalRequestsTableHotfix` | Re-adds `withdrawal_requests` — a corrective hotfix migration |
 | 04-01 | `AddDepositRequestsWithdrawalLockingAndAdminProcessing` | `deposit_requests` + admin processing fields |

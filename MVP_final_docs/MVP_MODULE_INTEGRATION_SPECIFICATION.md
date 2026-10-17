@@ -31,7 +31,7 @@ What follows describes the real module list, the real in-process event mechanism
 1. **Auth** — Keycloak-backed login/session/MFA-stub integration (see `architecture/auth-service-microservice-spec.md` for the full current-vs-proposed picture; not otherwise covered here)
 2. **Marketplace** — RFQ (header + `RFQLineItem[]`), per-line-item bidding (`RFQBidItem`), multi-provider split awards (`RFQBidAward`/`RFQAwardVehicleAssignment`), and Direct Rental (`DirectRentalCart/Request`) — Direct Rental lives in the Marketplace module, not a separate one
 3. **Contracts** — Contract lifecycle (18 real status strings, not the 6-value model v1.0 assumed), vehicle-assignment sub-lifecycle, dual-party OTP terms signing, termination/completion
-4. **Finance** — Wallets, double-entry ledger, escrow locks, settlement cycles/payouts, payment-gateway webhooks (Chapa/Telebirr/CBEBirr), withholding tax
+4. **Finance** — Wallets, double-entry ledger, escrow locks, settlement cycles/payouts, bank-transfer deposit and withdrawal requests (admin-approved), withholding tax
 5. **Delivery** — Delivery/return OTP verification, vehicle inspection checklists
 6. **Identity** — Users, businesses, providers, vehicles, insurance, KYC/KYB, provider trust score (`TrustScoreCalculator`, provider-only — see `project-docs/11_Trust_Escrow_Dispute_Engines_Spec.md` §1)
 7. **MasterData** — Lookups, commission strategies/tiers, contract/escrow/settlement policy versions and rules, vehicle types, geography, banks

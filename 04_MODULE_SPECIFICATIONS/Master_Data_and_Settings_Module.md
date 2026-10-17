@@ -39,7 +39,7 @@ The MasterData module is the **configuration backbone** of the platform: slow-ch
 - **Contract terms versioning** — `ContractTermsVersion` (real, actively consumed by the Contracts module's dual-party OTP e-signature flow).
 - **Compliance configuration** — `DocumentType`, `KYCRequirement` (real, consumed by Identity/onboarding flows) and `ProfileRequirement` (real, consumed by `ProfileCompletionService`).
 - **Checklist templates** — `ChecklistTemplateItem` (real, consumed by the Delivery module's vehicle-inspection checklist).
-- **Banking reference data** — `Bank` (real, replaces an earlier `BANK` lookup-type approach; maps to Chapa's numeric bank codes for payouts).
+- **Banking reference data** — `Bank` (real, replaces an earlier `BANK` lookup-type approach; its `code` is the bank code stored on owner bank accounts for payouts).
 - **Geography** — `Country/Region/City` (schema exists with full navigation; city data is also separately seeded as a plain `CITY` lookup-type used by the mobile/RFQ city picker — the two geography representations coexist, see §3.7).
 
 ---
@@ -156,7 +156,7 @@ Modules/MasterData/
 ### 3.11 Banking reference data
 | Table | Key columns |
 |---|---|
-| `banks` | `code` (internal, e.g. `CBE`), `chapaCode` (nullable — Chapa's numeric bank ID, admin-mapped post-seed), `shortName`, `name`, `logoUrl`, `isActive` — 14 seeded Ethiopian banks. A legacy `BANK` `LookupType` is deliberately **deactivated** (not deleted) by the seeder once this table is populated, so lookups keep historical integrity but new clients stop fetching banks via the generic lookup endpoint. |
+| `banks` | `code` (internal, e.g. `CBE`), `shortName`, `name`, `logoUrl`, `isActive` — 14 seeded Ethiopian banks. A legacy `BANK` `LookupType` is deliberately **deactivated** (not deleted) by the seeder once this table is populated, so lookups keep historical integrity but new clients stop fetching banks via the generic lookup endpoint. |
 
 ### 3.12 Geography
 | Table | Key columns |
@@ -186,7 +186,7 @@ Modules/MasterData/
 | `KYCRequirementsController` | `api/kyc-requirements` | CRUD |
 | `CountriesController` | `api/countries` | CRUD — no dedicated regions/cities controller found |
 | `Admin/AdminChecklistTemplateController` | `api/admin/checklist-template` | CRUD + activate/deactivate |
-| `Finance/AdminBankController` | (lives in Finance module's controller folder, but operates on MasterData's `Bank` entity) | Bank CRUD + Chapa-code mapping |
+| `Finance/AdminBankController` | (lives in Finance module's controller folder, but operates on MasterData's `Bank` entity) | Bank CRUD |
 
 All admin-mutation endpoints (`POST`/`PUT`/`PUT .../activate`/`DELETE`) are `[Authorize(Roles = "ADMIN")]`; `GET` endpoints are generally open to any authenticated caller (used by RFQ creation forms, onboarding wizards, etc. across the web app and both mobile apps).
 
@@ -251,7 +251,7 @@ These are the module's most straightforwardly "as designed" pieces — real CRUD
 - **Settings** are read ad hoc by whichever module needs a given key (e.g. OTP expiry/attempt-limit constants, VAT/withholding-tax rates, settlement minimums/auto-approve threshold) — there is no dedicated `ISettingsService` wrapper class; consumers inject `ISettingsRepository`/`IMasterDataUnitOfWork` directly.
 - **DocumentType/KYCRequirement** drive the Identity module's onboarding document-upload requirements per actor type/subtype/tier (e.g. Gold+ providers additionally require liability + passenger insurance; Platinum additionally requires cargo insurance).
 - **ChecklistTemplateItem** drives the Delivery module's vehicle-inspection checklist UI on both delivery and return.
-- **Bank** drives withdrawal/payout bank selection and the Chapa payout-gateway integration (`ChapaCode` mapping, admin-editable post-seed since Chapa's bank list isn't hardcoded at seed time).
+- **Bank** drives withdrawal/payout bank selection; payouts are admin-approved bank transfers to the owner's bank account.
 
 ---
 
@@ -273,7 +273,7 @@ These are the module's most straightforwardly "as designed" pieces — real CRUD
 
 - **Identity module:** `IdentityService.GetProviderSnapshotAsync`/`GetBusinessSnapshotAsync` (real commission-rate + tier-code lookups, with the placeholder noted in §5.4); `ProfileCompletionService` (real `ProfileRequirement` consumer); `KYCRequirement`/`DocumentType` drive onboarding document gates.
 - **Contracts module:** `IMasterDataService.GetActiveContractPolicyAsync` (stubbed, §5.3); `ContractTermsVersion` (real, dual-OTP signing); commission rate flows in via Identity, not directly from this module.
-- **Finance module:** `EscrowPolicyRepository.CalculateEscrowLockDaysAsync` (real but dead-path, §5.2); `SettlementPolicyRule` (unused by the live settlement job, §5.6); `Bank`/Chapa-code mapping for payouts.
+- **Finance module:** `EscrowPolicyRepository.CalculateEscrowLockDaysAsync` (real but dead-path, §5.2); `SettlementPolicyRule` (unused by the live settlement job, §5.6); `Bank` codes for payout bank accounts.
 - **Marketplace module:** consumes `lookups`/`lookup_types` for RFQ line-item vehicle/engine/period fields.
 - **Delivery module:** consumes `ChecklistTemplateItem` for the inspection-checklist UI.
 - **Web admin (`anqelbacarrental-marketplace-core`):** full CRUD screens for tiers, commission/escrow/settlement/contract policy versions and rules, contract-terms templates, checklist templates, document types, KYC requirements, lookups, settings, banks, platform bank accounts — the admin *authoring* surface is comprehensive even where the *consumption* side (§5) is stubbed or bypassed.

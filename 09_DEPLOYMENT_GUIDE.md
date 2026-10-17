@@ -73,9 +73,7 @@ services:
       MinIO__Endpoint: minio:9000
       RabbitMQ__HostName: rabbitmq
       BlindBidding__SaltSecret: ${BLIND_BIDDING_SALT}
-      PaymentProviders__Chapa__...: (public/secret/webhook/approval keys, all env-driven)
       DataProtection__Key: ${DATA_PROTECTION_KEY}
-      Withdrawal__AutoApprovalThresholdETB: ${WITHDRAWAL_AUTO_APPROVAL_THRESHOLD:-5000}
     ports: ["5100:8080"]
     volumes:
       - backend_prod_logs:/app/logs

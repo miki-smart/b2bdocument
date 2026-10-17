@@ -304,7 +304,7 @@ Then: Award-time check may pass for both, but the escrow-lock retry at contract-
 ### **Test Case 5: Deposit & Retry**
 ```
 Given: Business has insufficient AvailableBalance
-When: Deposits funds (bank transfer, admin-approved, or Chapa/Telebirr/CBE Birr instant top-up)
+When: Deposits funds (bank-transfer deposit request, admin-approved)
 And: Retries the award or the manual escrow-retry endpoint
 Then: Award/escrow-lock succeeds with the new balance
 ```

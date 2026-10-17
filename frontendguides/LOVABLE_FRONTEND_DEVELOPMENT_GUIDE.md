@@ -42,7 +42,7 @@ Portal separation happens through `src/features/{business,provider,admin}/pages/
 - Multi-step onboarding wizards with document upload (business: 3 steps; provider: type-preselect + 3 further steps including vehicle registration).
 - RFQ creation as a **header + line-items model** (multiple vehicle types/terms per RFQ) and blind bidding with **per-line-item split awards** (`SplitAwardDialog.tsx`) — not a single vehicle-type/quantity RFQ with whole-RFQ awarding.
 - Contract management with a **dual-party OTP e-signature step** (distinct from delivery OTP), a post-award **vehicle-assignment** step, and contract **extension** (there is no "renew as new contract" flow, and no "Suspended" status).
-- Wallet management with escrow locking, live Chapa/Telebirr/CBEBirr payment-gateway integration, and 17+ dedicated wallet/settlement pages across all three portals.
+- Wallet management with escrow locking, admin-approved bank-transfer deposits and withdrawals, and 17+ dedicated wallet/settlement pages across all three portals.
 - Real-time notifications via **SignalR** (not raw WebSocket) plus Firebase FCM push, with a full admin-configurable multi-channel (email/SMS/FCM) settings surface.
 - Delivery **and return-trip** OTP verification, each paired with a vehicle inspection checklist.
 - Trust score and tier system (provider-only; computed on the backend, surfaced read-only on the frontend — there is no business-facing risk score).

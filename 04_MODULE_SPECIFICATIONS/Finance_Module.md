@@ -13,7 +13,7 @@
 Prior drafts of the Finance/Wallet documentation described a standalone "Wallet Engine" microservice with its own Postgres schema, talking to a separate "Contract Service"/"Settlement Engine"/"Delivery Engine" over a message bus, with payment gateways as an external "future" dependency. None of that is true of the running system. This rewrite corrects the record on every point below, verified directly against `Modules/Finance/**`:
 
 1. **Not a microservice.** One deployable (`Marketplace.API`), one process, one PostgreSQL database. Finance's tables live under EF Core `Schema = "wallet"` (a schema-level grouping, not a separate data store) alongside a handful under `Schema = "delivery"`/default for other modules. Cross-module communication (`ContractCreatedEvent`, `DeliveryConfirmedEvent`, `BidAwardedEvent`) is in-process MediatR `INotificationHandler` dispatch, not a broker.
-2. **Payment gateways are live, not future work.** Chapa, Telebirr, and CBE Birr all have real webhook-validated integrations today (`Infrastructure/Payments/`).
+2. **There is no payment gateway.** Deposits are bank-transfer deposit requests approved by an admin; withdrawals are admin-approved bank transfers to the owner's bank account.
 3. **Settlement cadence is a flat, per-contract rolling 30-day window — not tier-based.** This directly resolves the contradiction flagged in `project-docs/18_Implementation_Coverage_Audit.md` §10.4 between the (now-superseded) wallet-cluster draft and the ledger/settlement-cluster draft. Reading `Modules/Finance/Application/Services/SettlementScheduleService.cs` and `Modules/Finance/Application/Settlement/Commands/GenerateSettlementCommand.cs` directly settles it: `SettlementScheduleService.GenerateSchedule()` produces fixed, inclusive 30-day cycles anchored to the contract's first-delivery date, with **zero tier branching** anywhere in the method. `GenerateSettlementCommand`'s doc-comment still asserts "Bronze/Silver: Monthly (1st), Gold: Bi-weekly (1st,15th), Platinum: Weekly (Monday)" (BR-FN-03) — that comment is stale/aspirational and describes behavior that was never implemented; the command's actual query logic only filters `MonthlySettlementSchedule` rows by `Status == "PENDING" AND SettlementDate <= EndDate`, with an optional `ProviderTierFilter` that merely narrows *which providers'* already-due payouts a given admin-triggered run processes — it does not change *when* a cycle becomes due. **Treat the 30-day rolling window as ground truth; treat every tier-cadence claim (including this module's own code comments) as incorrect until someone actually implements it.**
 4. **A fourth escrow-adjacent subsystem — refund requests — is fully modeled and completely unreachable.** `RefundRequest` (`PENDING_REVIEW → APPROVED | REJECTED → PROCESSING → PROCESSED`) plus its three command handlers (`CreateRefundRequestCommand`, `ReviewRefundRequestCommand`, `ProcessRefundCommand`) are fully implemented — but a repo-wide search found **zero controller or event-handler call sites for any of the three commands**, anywhere in the backend. This was not called out in any prior doc pass. See Known Gaps.
 5. **Escrow rollover between settlement cycles is real and wired**, not a documentation placeholder: `EscrowRollover` rows are created inside `LockNextCycleEscrowCommandHandler` (called from `ApproveSettlementPayoutCommand` on every non-final settlement approval) to carry unused escrow from one 30-day cycle into the next, with an excess-refund path if the rollover exceeds the next cycle's requirement.
@@ -28,7 +28,7 @@ The Finance module owns every fund movement on the platform: wallet accounts, es
 
 ### Two subsystems, one module
 
-**A. Wallet & Escrow** (epic-08 territory): `WalletAccount`, `EscrowLock`, `EscrowRollover`, `DepositRequest`, `WithdrawalRequest`, `PaymentIntent`, `RefundRequest`, `PlatformBankAccount`, `WalletLedgerTransaction`/`WalletLedgerEntry`, `WalletEventLog`, `WalletBalanceSnapshot`. Covers account creation, manual bank-transfer deposits, automated Chapa/Telebirr/CBE Birr top-ups, escrow lock at contract creation, release/partial-release/freeze/unfreeze, early termination, and withdrawal-to-bank for both businesses and providers.
+**A. Wallet & Escrow** (epic-08 territory): `WalletAccount`, `EscrowLock`, `EscrowRollover`, `DepositRequest`, `WithdrawalRequest`, `PaymentIntent`, `RefundRequest`, `PlatformBankAccount`, `WalletLedgerTransaction`/`WalletLedgerEntry`, `WalletEventLog`, `WalletBalanceSnapshot`. Covers account creation, bank-transfer deposit requests (admin-approved), escrow lock at contract creation, release/partial-release/freeze/unfreeze, early termination, and withdrawal-to-bank for both businesses and providers.
 
 **B. Daily Ledger & Settlement** (epic-09/epic-10 territory): `MonthlySettlementSchedule`, `SettlementCycle`, `SettlementPayout`, `SettlementPayoutLineItem`, `SettlementStatusHistory`, `CommissionEntry`, `ProviderInvoice`. Covers the nightly per-contract accrual job, 30-day settlement-schedule generation, admin-approved payout double-entry posting, and the provider-submitted VAT-invoice reclaim of withheld tax.
 
@@ -42,7 +42,6 @@ Both subsystems share the same double-entry ledger primitives (`WalletLedgerTran
 
 **Deposits**
 - Manual bank-transfer deposit requests with receipt upload, admin-reviewed (`PENDING_REVIEW → APPROVED | REJECTED`) — wallet is credited only on approval
-- Automated Chapa/Telebirr/CBE Birr top-ups via `PaymentIntent`, webhook- and callback-driven, idempotent per transaction reference
 
 **Escrow**
 - Automatic lock at `ContractCreatedEvent`, ≤30-day-per-line-item cap, 5-attempt exponential-backoff retry
@@ -50,7 +49,7 @@ Both subsystems share the same double-entry ledger primitives (`WalletLedgerTran
 - Rollover of unused escrow from one 30-day settlement cycle into the next (`EscrowRollover`), with excess-refund handling if the rollover exceeds the next cycle's need
 
 **Withdrawals**
-- Provider *and* business withdrawal requests against a verified bank account, funds locked at request time, admin-approved (Chapa transfer or manual bank transfer), retryable on Chapa failure
+- Provider *and* business withdrawal requests against a verified bank account, funds locked at request time, admin-approved and paid by bank transfer (receipt + transaction number)
 
 **Daily ledger**
 - Nightly (00:05 UTC) double-entry accrual of provider earnings + platform commission for every contract active that day, using the value-weighted commission rate snapshotted on the contract's own line items
@@ -78,7 +77,7 @@ All tables below use EF Core `Schema = "wallet"` unless noted.
 | `escrow_rollovers` | `EscrowRollover` — unused-escrow carry-forward between settlement cycles |
 | `deposit_requests` | `DepositRequest` — manual bank-transfer deposit submissions |
 | `withdrawal_requests` | `WithdrawalRequest` — provider/business cash-out requests |
-| `payment_intents` | `PaymentIntent` — Chapa/Telebirr/CBE Birr/bank-transfer payment attempts |
+| `payment_intents` | `PaymentIntent` — historical payment-gateway attempts (read-only; the gateway was removed) |
 | `platform_bank_accounts` | `PlatformBankAccount` — platform's own bank accounts shown to depositors |
 | `refund_requests` | `RefundRequest` — modeled but unreachable (no controller anywhere calls its commands) |
 | `wallet_ledger_transactions` | `WalletLedgerTransaction` — double-entry transaction header |
@@ -121,8 +120,7 @@ Modules/Finance/
 │   ├── Escrow/Commands/ (LockEscrow, RetryEscrowLock, ReleaseEscrow, PartialReleaseEscrow, FreezeEscrow, UnfreezeEscrow, ProcessEarlyTermination, LockNextCycleEscrow)
 │   ├── Escrow/Queries/ (GetEscrowByContract, GetMyEscrowLocks, GetAdminEscrowTransactions)
 │   ├── DepositRequest/Commands/ (SubmitDepositRequest, ApproveDepositRequest, RejectDepositRequest) + Queries
-│   ├── Withdrawal/Commands/ (RequestWithdrawal, ApproveWithdrawalRequest, RejectWithdrawalRequest, ProcessWithdrawalViaBankTransfer, RetryWithdrawalRequest) + Queries
-│   ├── Payment/Commands/ (CreatePaymentIntent, HandleChapaCallback, HandleChapaTransferApproval, ProcessPaymentWebhook)
+│   ├── Withdrawal/Commands/ (RequestWithdrawal, RejectWithdrawalRequest, ProcessWithdrawalViaBankTransfer) + Queries
 │   ├── Refund/Commands/ (CreateRefundRequest, ReviewRefundRequest, ProcessRefund — all unreachable, see Known Gaps)
 │   ├── PlatformBankAccount/Commands+Queries/ (Create, Update, Delete, ToggleStatus)
 │   ├── Ledger/Commands/ (ProcessDailyLedgerCommand)
@@ -136,11 +134,10 @@ Modules/Finance/
 │
 └── Infrastructure/
     ├── Configurations/FinanceConfigurations.cs (EF Core mappings, `Schema = "wallet"`)
-    ├── Payments/ (ChapaPaymentProvider, TelebirrPaymentProvider, CBEBirrPaymentProvider, PaymentServiceFactory, PaymentProviderOptions)
     └── Repositories/ (one per Domain/Repositories interface)
 ```
 
-Controllers live outside the module folder, under `Controllers/Finance/` (`WalletController`, `EscrowController`, `DepositRequestController`, `WithdrawalController`, `PaymentController`, `SettlementController`, `ProviderInvoiceController`, `AdminWalletController`, `AdminBankController`), `Controllers/PlatformBankAccountController.cs`/`Controllers/Admin/AdminPlatformBankAccountController.cs`, and `Controllers/Mobile/MobileWalletController.cs`/`MobilePaymentController.cs`. **No controller anywhere references the `RefundRequest` commands or the four `Reports/Queries` handlers** — see Known Gaps.
+Controllers live outside the module folder, under `Controllers/Finance/` (`WalletController`, `EscrowController`, `DepositRequestController`, `WithdrawalController`, `SettlementController`, `ProviderInvoiceController`, `AdminWalletController`, `AdminBankController`), `Controllers/PlatformBankAccountController.cs`/`Controllers/Admin/AdminPlatformBankAccountController.cs`, and `Controllers/Mobile/MobileWalletController.cs`. **No controller anywhere references the `RefundRequest` commands or the four `Reports/Queries` handlers** — see Known Gaps.
 
 ---
 
@@ -173,13 +170,13 @@ Controllers live outside the module folder, under `Controllers/Finance/` (`Walle
 ### WithdrawalRequest
 - `OwnerId`/`OwnerType` (`PROVIDER`|`BUSINESS`), `WalletAccountId`, `BankAccountId`/`BankAccountType`, `Amount`, `Currency`
 - Snapshotted bank details at request time: `BankCode`, `AccountNumber`, `AccountHolderName`, `BankName`
-- `TransactionReference`, `GatewayTransactionId` (Chapa), `WalletTransactionId` (links to the `WITHDRAWAL_PENDING` ledger transaction created at request time)
-- `Status`: `PENDING_ADMIN_APPROVAL → PENDING_TRANSFER → PENDING → COMPLETED | FAILED | REJECTED`
-- `ProcessingMethod` (`CHAPA`|`BANK_TRANSFER`), `AdminReceiptUrl`/`AdminTransactionNumber` (manual path)
-- Methods: `MarkPendingTransfer`, `MarkAutoApprovedPendingTransfer` (uses `Guid.Empty` as a system-approval marker), `MarkChapaPending`, `MarkCompleted`, `MarkCompletedViaBankTransfer`, `MarkFailed`, `MarkRetrying` (only from `FAILED`, clears the stale gateway reference), `Reject`, `SetGatewayTransactionId`, `SetWalletTransaction`
+- `TransactionReference`, `GatewayTransactionId` (historical only: retired gateway payout reference, no longer written), `WalletTransactionId` (links to the `WITHDRAWAL_PENDING` ledger transaction created at request time)
+- `Status`: `PENDING_ADMIN_APPROVAL → COMPLETED | REJECTED` (historical rows may be `FAILED`; they can still be paid by bank transfer)
+- `ProcessingMethod` (`BANK_TRANSFER`; historical rows may hold the retired gateway method), `AdminReceiptUrl`/`AdminTransactionNumber`
+- Methods: `MarkCompletedViaBankTransfer` (the only payout path), `Reject`, `SetWalletTransaction`
 
-### PaymentIntent
-- `WalletAccountId`, `TransactionReference`, `GatewayTransactionId`, `Amount`, `Currency`, `PaymentMethod` (`CHAPA`|`TELEBIRR`|`CBE_BIRR`|`BANK_TRANSFER`)
+### PaymentIntent (read-only history)
+- `WalletAccountId`, `TransactionReference`, `GatewayTransactionId`, `Amount`, `Currency`, `PaymentMethod` (gateway code recorded at the time)
 - `Status`: `PENDING → PROCESSING → COMPLETED | FAILED | CANCELLED | EXPIRED` (24-hour default expiry, `IsExpired()` helper)
 - `ReturnUrl`, `Metadata`, `FailureReason`, `CompletedAt`/`ExpiresAt`
 
@@ -225,8 +222,8 @@ Controllers live outside the module folder, under `Controllers/Finance/` (`Walle
 ### 2. Manual bank-transfer deposit
 Business/provider selects a `PlatformBankAccount`, submits amount + transaction number + receipt (multipart) → `DepositRequest` (`PENDING_REVIEW`, no credit yet) → admin `Approve` (credits wallet) or `Reject` (reason recorded, no credit).
 
-### 3. Automated gateway deposit (Chapa/Telebirr/CBE Birr)
-`CreatePaymentIntentCommand` creates a `PaymentIntent` and returns a checkout URL/reference. Completion arrives via provider-specific webhook (`ProcessPaymentWebhookCommand`, signature-validated per provider) and/or, for Chapa, a synchronous return-URL callback (`HandleChapaCallbackCommand`) — both paths are idempotent on transaction reference, and a `COMPLETED` status poll (`GET /api/payments/status/{ref}`) can also trigger crediting as a fallback if the webhook hasn't landed.
+### 3. Automated gateway deposit (removed)
+There is no payment gateway, so deposits use flow 2 only. Existing `PaymentIntent` rows remain as read-only history.
 
 ### 4. Escrow lock at contract creation
 `ContractCreatedEventHandler` computes `Σ line item (UnitAmount × QuantityAwarded × min(DurationDays, 30))`, validates the business `MAIN` wallet balance, and — with 5-attempt exponential backoff (1/2/4/8/16s) — debits `MAIN`/credits `ESCROW` (get-or-create) as one double-entry transaction, creates the `EscrowLock` (`LOCKED`), and calls `contract.ActivateAfterEscrowLock()`. After 5 failures the contract is marked `ESCROW_LOCK_FAILED`; an admin retries via `POST /api/finance/escrow/{contractId}/retry`. A second, parallel path (`FinanceBidAwardedEventHandler`, subscribed to `BidAwardedEvent`, using MasterData's `EscrowPolicyRule` instead of the hardcoded 30-day cap) almost always finds no contract yet and exits without locking — in practice only the `ContractCreatedEvent` path ever executes the real lock. This divergence (two computation paths, only one live) is a known cleanup item, not a doc error.
@@ -250,7 +247,7 @@ At contract creation/first-delivery, `SettlementScheduleService.GenerateSchedule
 - On success: payout → `COMPLETED`, schedules → `SETTLED`, `SettlementPayoutApprovedEvent`/`WalletCreditedEvent` published. On any failure: full rollback, payout → `FAILED`, no automatic retry.
 
 ### 10. Withdrawal (provider or business)
-`RequestWithdrawalCommand`: `wallet.LockForWithdrawal(amount)` (debits `Balance`, credits `PendingWithdrawalBalance` immediately) → `WithdrawalRequest.Create()` (`PENDING_ADMIN_APPROVAL`, snapshotting the verified bank account). Admin approves → Chapa transfer (`PENDING_TRANSFER → PENDING`, webhook confirms → `COMPLETED`) or manual bank transfer (`MarkCompletedViaBankTransfer`, straight to `COMPLETED`). Admin rejects → `wallet.UnlockWithdrawal()` refunds `Balance`. A `FAILED` Chapa transfer is retryable (`MarkRetrying`, re-debits without double-refunding since the original debit already happened at request time).
+`RequestWithdrawalCommand`: `wallet.LockForWithdrawal(amount)` (debits `Balance`, credits `PendingWithdrawalBalance` immediately) → `WithdrawalRequest.Create()` (`PENDING_ADMIN_APPROVAL`, snapshotting the verified bank account). Every withdrawal, of any amount, waits for an admin. The admin pays it by bank transfer to the owner's bank account (`ProcessWithdrawalViaBankTransferCommand` → `MarkCompletedViaBankTransfer`, straight to `COMPLETED`). Admin rejects → `wallet.UnlockWithdrawal()` refunds `Balance`. A historical `FAILED` request can still be paid by bank transfer (re-debited as `WITHDRAWAL_RETRY_DEBITED`, without double-refunding).
 
 ### 11. Escrow freeze/unfreeze & early termination
 `FreezeEscrowCommand`/`UnfreezeEscrowCommand` move the lock to/from `DISPUTED` (no money moves during a freeze; release and early-termination are both blocked while frozen). `ProcessEarlyTerminationCommand` computes days-used proration against the contract's total days, a MasterData-driven penalty (`EARLY_TERMINATION` policy), and a provider settlement using the contract's own **snapshotted, weighted-average line-item commission rate** (not the provider's current tier) — writing a single `EARLY_TERMINATION` transaction that debits the full locked escrow and credits business (refund), provider (settlement), and platform (commission + penalty combined), plus two `CommissionEntry` rows.
