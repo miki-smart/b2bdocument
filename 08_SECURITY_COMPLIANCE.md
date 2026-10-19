@@ -30,8 +30,7 @@ Marketplace.API  (single ASP.NET Core process — Kestrel, port 8080 internally)
    │  └─ ~50 other controllers across 8 modules, all in the same process
    │
    ├──▶ Keycloak (separate container, direct-grant + admin-API calls, no user-facing redirect)
-   ├──▶ PostgreSQL, Redis, MinIO, RabbitMQ (internal-network only in prod, see §5.3)
-   └──▶ Chapa / Telebirr / CBEBirr payment gateways (outbound calls + HMAC-verified webhooks)
+   └──▶ PostgreSQL, Redis, MinIO, RabbitMQ (internal-network only in prod, see §5.3)
 ```
 
 There is **no reverse-proxy-level security enforcement** documented here beyond whatever a deployer puts in front of the container (the production Compose file exposes the API directly on a host port; TLS termination, if any, happens outside this repo). There is no Traefik, no YARP gateway, and no mTLS between "services" — there is one service.
@@ -123,9 +122,9 @@ Every non-admin business/provider-facing controller instead relies on the named 
 
 `Modules/Marketplace/Domain/Services/BlindBiddingService` masks the identity of bidding providers from businesses before award: it SHA-256-hashes `{providerId}{salt}` (`BlindBidding:SaltSecret`, a required app secret — CI sets a fixed test value, production must supply its own) and displays a masked string (`"Provider •••4411"`). Per `18_Implementation_Coverage_Audit.md` §10.3, this masking is enforced **only at the UI layer** — `GetBidsByRFQQuery`/`GetBidQuery` on the backend set the real `ProviderName` on the response unconditionally regardless of award status; the API itself does not withhold the provider's identity pre-award. This is a real, currently open gap, not hypothetical — flag it if blind-bidding integrity is treated as a compliance requirement.
 
-### 4.4 Outbound payment webhook integrity
+### 4.4 Payment integrity (no payment gateway)
 
-Chapa and CBEBirr webhook/callback handling verifies an HMAC signature before trusting gateway callbacks: `ChapaPaymentProvider`/`CBEBirrPaymentProvider` compute HMAC-SHA256 (Chapa) / HMAC-SHA512 (CBEBirr) over the raw payload using a configured `WebhookSecret`, and `HandleChapaTransferApprovalCommand` separately validates an HMAC signature against a distinct `ApprovalSecret` before acting on transfer-approval callbacks. Per the remediation roadmap, these two handlers are the **only** ones deliberately kept on the `Result<T>` (non-throwing) pattern instead of the standard exception-based error handling, so a malformed/invalid webhook returns an acknowledging 200 (or a redirect) rather than crashing the retry loop on the gateway side.
+No payment gateway is integrated, so there are no payment webhooks or callbacks to verify. Deposits and withdrawals are admin-approved bank transfers: a deposit request credits the wallet only after an admin approves it against the uploaded receipt and transaction number, and a withdrawal is paid only by an admin, who records the bank-transfer receipt and transaction number.
 
 ---
 

@@ -315,7 +315,7 @@ Published when an admin rejects a withdrawal request; the locked amount is relea
 **Consumed by:** `WithdrawalRejectedNotificationHandler` (Notifications).
 
 #### `DepositCompletedEvent(Guid WalletId, Guid OwnerId, string OwnerType, decimal Amount, string TransactionReference, string OwnerName, string PhoneNumber) : DomainEvent`
-Published when a (business-initiated) deposit completes — e.g. a Chapa/Telebirr/CBEBirr payment-gateway webhook resolving successfully.
+Published when a deposit completes through `DepositFundsCommand` (the admin/system `POST api/finance/wallets/{walletId}/deposit` path). There is no payment-gateway deposit path.
 **Consumed by:** `DepositCompletedNotificationHandler` (Notifications).
 
 #### `AdminDepositCompletedEvent` / `AdminWithdrawalCompletedEvent`

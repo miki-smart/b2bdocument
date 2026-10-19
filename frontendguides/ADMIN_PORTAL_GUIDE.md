@@ -228,7 +228,7 @@ A separate route group from both Operations-Settlements (§7) and Wallets (§9) 
 | `/admin/finance/invoices` | `AdminProviderInvoicesPage.tsx` |
 | `/admin/finance/invoices/:id` | `AdminProviderInvoiceDetailPage.tsx` |
 
-**Note on invoices:** the invoice flow is **provider-submitted**, reviewed/approved by admin here — this inverts the assumption in the MVP daily-ledger epic that the system auto-generates invoices for admin to just view. Deposit/withdrawal requests here are the manual bank-transfer path (parallel to the automated Chapa/Telebirr/CBEBirr webhook path that posts directly without an approval queue).
+**Note on invoices:** the invoice flow is **provider-submitted**, reviewed/approved by admin here — this inverts the assumption in the MVP daily-ledger epic that the system auto-generates invoices for admin to just view. Deposit/withdrawal requests here are the only money-movement path: admin-approved bank transfers (there is no payment gateway).
 
 ---
 

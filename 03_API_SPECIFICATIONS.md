@@ -329,7 +329,7 @@ No class-level `[Authorize]` (see §1.5 for the verified auth gap on the two lis
 
 ---
 
-## 6. Finance Module — `api/finance/*`, `api/payments`, `api/admin/wallets`, `api/admin/banks`
+## 6. Finance Module — `api/finance/*`, `api/admin/wallets`, `api/admin/banks`
 
 ### 6.1 Wallets — `api/finance/wallets` (`WalletController`, `[Authorize]`)
 
@@ -356,10 +356,8 @@ Both **businesses and providers** can withdraw (`WithdrawalRequest.OwnerType` is
 | GET | `api/finance/withdrawals` | `Policy=AdminOnly` | Admin queue, filterable/sortable. |
 | GET | `api/finance/withdrawals/{requestId}` | `Policy=AdminOnly` | |
 | POST | `api/finance/withdrawals` | `[Authorize]` | Submit a request (`RequestWithdrawalCommand`) — funds move from `Balance` to `PendingWithdrawalBalance` immediately. |
-| POST | `api/finance/withdrawals/{requestId}/approve` | `Policy=AdminOnly` | Admin approves → initiates a Chapa transfer. |
 | POST | `api/finance/withdrawals/{requestId}/reject` | `Policy=AdminOnly` | Refunds the locked amount back to `Balance`. |
-| POST | `api/finance/withdrawals/{requestId}/process-bank-transfer` | `Policy=AdminOnly` | Manual bank-transfer processing (receipt + transaction number upload) → `COMPLETED`. |
-| POST | `api/finance/withdrawals/{requestId}/retry` | `Policy=AdminOnly` | Retry a `FAILED` Chapa transfer without double-refunding. |
+| POST | `api/finance/withdrawals/{requestId}/process-bank-transfer` | `Policy=AdminOnly` | Admin pays the request by bank transfer (receipt + transaction number upload) → `COMPLETED`. Every withdrawal goes through admin approval. |
 
 ### 6.3 Escrow — `api/finance/escrow` (`EscrowController`, `[Authorize]`)
 
@@ -388,21 +386,9 @@ Both **businesses and providers** can withdraw (`WithdrawalRequest.OwnerType` is
 | POST | `api/admin/deposit-requests/{id}/approve` | Credits the wallet only at approval. |
 | POST | `api/admin/deposit-requests/{id}/reject` | With reason. |
 
-### 6.5 Payments (gateways) — `api/payments` (`PaymentController`, mostly anonymous — webhooks must be, `[Authorize]` on the user-facing ones)
+### 6.5 Payments (gateways) — removed
 
-Chapa, Telebirr, and CBE Birr are all **live**, not a future integration.
-
-| Method | Route | Auth | Purpose |
-|---|---|---|---|
-| GET | `api/payments/providers` | `[Authorize]` | List available gateways. |
-| POST | `api/payments/intent` | `[Authorize]` | Create a payment intent; returns provider checkout URL/reference. |
-| GET | `api/payments/status/{transactionReference}` | `[Authorize]` | Poll status; a `COMPLETED` Chapa status also triggers wallet crediting as a fallback if the webhook hasn't landed. |
-| GET | `api/payments/chapa-callback` | anonymous | Chapa `return_url` — idempotent, redirects browser to `/wallet/deposit-callback`. |
-| POST | `api/payments/webhook/chapa` | anonymous, signature-validated | Async webhook, `X-Chapa-Signature`. |
-| POST | `api/payments/webhook/telebirr` | anonymous, signature-validated | `X-Telebirr-Signature`. |
-| POST | `api/payments/webhook/cbebirr` | anonymous, signature-validated | `X-CBE-Signature`. |
-| POST | `api/payments/webhook/{provider}` | anonymous | Generic fallback webhook route. |
-| POST | `api/payments/webhook/chapa/transfer-approval` | anonymous | Synchronous approval callback for outbound Chapa transfers (withdrawals) — must be registered in the Chapa dashboard. |
+There is no payment gateway. `api/payments/*` and `mobile/payments/*` were deleted. Deposits are bank-transfer deposit requests approved by an admin (§6.4); withdrawals are paid by admin-approved bank transfer (§6.2).
 
 ### 6.6 Settlements — `api/finance/settlements` (`SettlementController`, `[Authorize]`)
 
@@ -448,7 +434,6 @@ Inverts the older "system generates the invoice" assumption — **providers subm
 | POST | `api/admin/wallets/{walletId}/withdraw` | Admin-direct debit. |
 | GET | `api/admin/wallets/tax-report` | Withholding tax report. |
 | GET | `api/admin/banks` | List banks (reference data feeding bank-account forms). |
-| GET | `api/admin/banks/chapa-options` | Chapa's supported bank list for transfer routing. |
 | PUT | `api/admin/banks/{id}` | |
 | DELETE | `api/admin/banks/{id}` | |
 
@@ -566,7 +551,6 @@ Both Flutter apps (business, provider) share this one surface — routes are rol
 | `MobileContractController` | `mobile/contracts` | `GET my-contracts`, `GET {id}`, `GET {id}/vehicles`, `GET {contractId}/terms`, `POST {contractId}/terms/otp/generate`, `POST {contractId}/terms/otp/verify`, `GET {contractId}/line-items/{lineItemId}/available-vehicles`, `POST {contractId}/line-items/{lineItemId}/assign-vehicle`, `POST {contractId}/termination/request`, `POST {contractId}/termination/approve`, `GET {contractId}/completion/readiness`, `POST {contractId}/completion/request`, `POST {contractId}/completion/approve`, `POST {contractId}/completion/reject` — a near-complete mirror of the web `ContractsController` (§5), correctly `[Authorize]`-protected (unlike its web counterpart). |
 | `MobileDeliveryController` | `mobile/delivery` | Full mirror of `api/delivery` (§7) — sessions, timeline, OTP generate/verify, returns, checklist submit/approve/reject (plus a provider-only `returns/checklists/{checklistId}/reject` for return checklists) — **and, unlike the web version, this one is `[Authorize]`-protected.** |
 | `MobileWalletController` | `mobile/wallets` | `GET summary`, `GET balance`, `GET transactions` (supports a `contractId` filter the web UI doesn't expose), `GET verified-bank-accounts`, `POST withdrawal`, `GET withdrawals/my`, `GET settlements`, `GET settlements/{payoutId}`, `GET escrow-breakdown`, `GET upcoming-transactions`, `GET provider/upcoming-settlements`. 8+ distinct endpoints (older mobile spec docs undercounted this at 4). |
-| `MobilePaymentController` | `mobile/payments` | `GET providers`, `POST intent`, `GET status/{transactionReference}` — mirrors §6.5's user-facing (non-webhook) endpoints; webhooks stay on `api/payments` since gateways call the web route regardless of client. |
 | `MobileNotificationController` | `mobile/notifications` | `GET` (list), `GET summary`, `PUT {id}/read`, `PUT mark-all-read`, `DELETE {id}`, `POST push/rebind`, `POST push/unregister` — push-token lifecycle is mobile-only (naturally; there's no equivalent on web). Note: `push/rebind`/`push/unregister` is the real route pair — some mobile spec docs still describe a `POST mobile/me/devices` route that does not exist. |
 | `MobileFileController` | `mobile/files` | `POST upload`, `POST upload-photo` — mirrors `api/files` (§9) with a photo-specific variant. |
 | `MobileDashboardController` | `mobile/dashboard` | `GET stats` — role-aware (business vs. provider) dashboard stat cards. |
@@ -619,7 +603,7 @@ The Mobile API surface (§10) does **not** cover everything both Flutter apps ne
 | **Guest-mode hand-over** (both apps) | `api/marketplace/cart/merge` (business app); `api/marketplace/bid-drafts` (POST, GET), `api/marketplace/bid-drafts/{id}`, `.../{id}/readiness`, `.../{id}/submit` (provider app) | The merge lives on `DirectRentalCartController` and saved bids on `BidDraftController`, both shared with the website; there is no mobile mirror. See §10.1 and `MVP_final_docs/MVP_GUEST_MODE_SPECIFICATION.md`. |
 | **Provider invoices** (provider app) | `api/finance/invoices` | No `MobileProviderInvoiceController`/mobile route exists — `ProviderInvoiceController` (§6.7) is called directly. |
 | **Onboarding reference data** (both apps) | `api/kyc-requirements`, `api/document-types` | These specific reference lists aren't mirrored under `mobile/reference` (§10's `MobileReferenceDataController` covers vehicle/fuel/business types, cities, banks, lookups — but not KYC requirements or document types), so onboarding screens call the public web routes (§9) directly. |
-| **Bank-transfer deposits** (business app) | `api/finance/deposit-requests`, `api/finance/deposit-requests/my`, `api/platform-bank-accounts` | No `MobileDepositRequestController`/mobile deposit route exists — the business app's bank-transfer deposit screens call `DepositRequestController` and `PlatformBankAccountController` (§6.4, §9) directly. Automated-gateway deposits *do* have a mobile route (`mobile/payments/intent`, §10). |
+| **Bank-transfer deposits** (business app) | `api/finance/deposit-requests`, `api/finance/deposit-requests/my`, `api/platform-bank-accounts` | No `MobileDepositRequestController`/mobile deposit route exists — the business app's bank-transfer deposit screens call `DepositRequestController` and `PlatformBankAccountController` (§6.4, §9) directly. |
 | **RFQ vehicle/fuel-type lookups** (business app, one call site) | `api/lookups/type/VEHICLE_TYPE`, `api/lookups/type/FUEL_TYPE` | One RFQ-repository call site in the business app hits a `lookups/type/{code}` shape rather than `MobileReferenceDataController`'s `mobile/reference/lookups/{typeCode}` — same data, different (non-mobile) path; worth normalizing to the mobile route since it already exists. |
 
 **Implication for anyone building or testing an API client against this backend:** the mobile apps are not a clean "everything under `mobile/`" client — treat the `mobile/*` prefix as the *primary* surface for mobile work, but expect several real, load-bearing calls to land on plain `api/...` routes, most of which happen to be publicly-reference-data or Direct-Rental related.
@@ -633,7 +617,6 @@ There is **no** global `{success, error: {code, message, details}}` envelope. Re
 - **Validation/business-rule failures:** most commonly a plain object, e.g. `BadRequest(new { message = "..." })` or `NotFound(new { message = "..." })`. Some flows return richer shapes for a specific UI need — e.g. the award-shortfall error on `POST api/marketplace/bids/award` embeds an affordability hint directly in the exception message text, not a structured `details` array.
 - **Unhandled exceptions:** fall through to ASP.NET Core's default developer/production exception behavior (no custom global exception-to-JSON middleware was found wrapping every controller).
 - **Auth failures:** standard ASP.NET Core `401`/`403` from the authentication/authorization middleware — `AuthController.Login` additionally distinguishes `403` sub-cases with `accountBlocked: true` or `requiresVerification: true` flags in the body for the frontend to branch on.
-- **Webhook signature failures:** `401` (Chapa/Telebirr/CBE Birr webhook signature validation, §6.5).
 
 Do not build a client that assumes a `success`/`data` envelope on every response — inspect the HTTP status code and treat the body as the raw resource (or a raw `{ message }`/`{ error }` shape) instead.
 

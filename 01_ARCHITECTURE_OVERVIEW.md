@@ -63,7 +63,7 @@ There is **no separate BFF service, no API gateway, no YARP**. The client surfac
 │   ├─ Identity       (Business/Provider/Vehicle, KYC/KYB, trust)    │
 │   ├─ Marketplace    (RFQ, bidding, split awards, Direct Rental)    │
 │   ├─ Contracts      (18-state lifecycle, OTP signing, extension)  │
-│   ├─ Finance        (wallets, escrow, settlement, Chapa gateway)   │
+│   ├─ Finance        (wallets, escrow, settlement, bank transfers)  │
 │   ├─ Delivery       (handover OTP, return OTP, inspection)         │
 │   ├─ MasterData     (versioned policy/rules engine, lookups)       │
 │   └─ Notifications  (multi-channel admin-configurable, SignalR)    │
@@ -99,7 +99,7 @@ Each module follows (or is migrating toward) the standard shape defined in `arch
 | **Identity** | Business/Provider/Vehicle registration, KYC/KYB, trust scoring, tiering | Trust-score formula built but **not wired** into any production event; no business-side risk score exists |
 | **Marketplace** | RFQ (header + line items), blind bidding, split awards, Direct Rental | Line-item + split-award model, not epic-04/05's single-vehicle-type model; ranking algorithm & anti-collusion detection don't exist |
 | **Contracts** | Contract lifecycle, vehicle assignment, OTP signing, completion/termination | 18 real string status values (not a 4-state enum-driven model) — see `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` |
-| **Finance** | Wallets, double-entry ledger, escrow, settlement, commission, payment gateways | Live Chapa/Telebirr/CBEBirr webhooks (not "future"); two disagreeing escrow-computation code paths and two disagreeing tier-threshold schemes coexist today |
+| **Finance** | Wallets, double-entry ledger, escrow, settlement, commission, bank-transfer deposit/withdrawal requests | No payment gateway: deposits and withdrawals are admin-approved bank transfers; two disagreeing escrow-computation code paths and two disagreeing tier-threshold schemes coexist today |
 | **Delivery** | OTP handover, photo/odometer/fuel evidence, return + inspection | Return-trip OTP + inspection checklist is a parallel system, undocumented in the original delivery epic |
 | **MasterData** | Versioned commission/contract/escrow/settlement policy rules, tiers, lookups, geography, banks | Admin-facing configuration UI exists on web with no explicit epic-level deliverable anywhere |
 | **Notifications** | Multi-channel (email/SMS/push) admin-configurable delivery, SignalR real-time hub | 40+ admin endpoints, credential rotation, live test-send — far beyond "email/SMS, WebSocket optional" |
@@ -147,7 +147,7 @@ Confirmed via `backend/docker-compose*.yml` (separate files per concern: `develo
 ```
 marketplace-api   — single container, the whole .NET 9 monolith
                     (env vars wire Postgres, Redis, Keycloak, MinIO,
-                    RabbitMQ, and Chapa payment config directly —
+                    and RabbitMQ config directly —
                     no gateway/BFF container in between)
 postgres          — single instance
 keycloak          — its own compose file

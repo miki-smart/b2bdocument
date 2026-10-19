@@ -92,7 +92,7 @@ This diagram, and every claim in this document, should be read together with:
 | **Events** | MediatR (in-process) is the dominant, actively-used mechanism | `RabbitMQ.Client` is a real package dependency and a real docker-compose service, but the coverage audit found minimal active production usage today — provisioned, not primary. |
 | **Cache** | Redis | Session/cache data |
 | **Storage** | MinIO | S3-compatible object storage for documents/photos |
-| **Payments** | Chapa.NET SDK — Chapa/Telebirr/CBEBirr webhook processing **is live today**, not a future item | Confirmed via `Chapa.NET` package and `PaymentController.cs` |
+| **Payments** | Bank transfer only — admin-approved deposit requests and withdrawals; no payment gateway | Confirmed via `DepositRequestController` and `WithdrawalController` (`process-bank-transfer`) |
 | **Push/Notifications** | FirebaseAdmin (FCM), SMTP email, SMS (Afromessage), SignalR (`NotificationHub`) for real-time in-app | Admin-configurable multi-channel system with credential rotation — far beyond a simple "send email/SMS" MVP scope |
 | **Logging** | Serilog (structured, file + console + Seq sinks) | |
 
@@ -138,7 +138,7 @@ RFQ (header + line items), blind bidding, per-line-item bids with full audit tra
 Contract lifecycle (18 real status strings, not the 4-state model in older docs), vehicle-assignment sub-lifecycle, dual-party OTP e-signature, two-party completion flow, termination request/approve, contract extension (UI built, backend endpoint currently missing — see epic-06 §6.11). See `MVP_final_docs/MVP_CONTRACT_STATE_MACHINE.md` for the full authoritative model.
 
 ### 5. Finance Module
-Digital wallets (business & provider), double-entry ledger, automated escrow lock/release with retry, monthly settlement cycles, tier-based commission, live Chapa/Telebirr/CBEBirr payment-gateway webhook processing, refunds. Two competing escrow-computation code paths and two disagreeing tier-threshold schemes coexist in code today (documented in `backlog/mvp/epic-08-wallet-escrow.md`) — a real inconsistency, not a documentation error.
+Digital wallets (business & provider), double-entry ledger, automated escrow lock/release with retry, monthly settlement cycles, tier-based commission, admin-approved bank-transfer deposits and withdrawals, refunds. Two competing escrow-computation code paths and two disagreeing tier-threshold schemes coexist in code today (documented in `backlog/mvp/epic-08-wallet-escrow.md`) — a real inconsistency, not a documentation error.
 
 ### 6. Delivery Module
 OTP-based vehicle handover (6-digit, SHA-256 hashed, 5-minute expiry), photo evidence capture, odometer/fuel recording, a separate return-trip OTP + vehicle inspection checklist system. `DeliveryVehicleHandover`, `DeliverySLAViolation`, `DeliveryFailureReason`, `DeliveryEventLog` entities exist in the domain/DB but nothing currently writes to them.
